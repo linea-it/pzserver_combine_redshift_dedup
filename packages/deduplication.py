@@ -31,6 +31,12 @@ import dask.dataframe as dd
 
 from utils import get_phase_logger, log_phase
 
+from lsdb.dask.merge_catalog_functions import (
+    concat_align_catalogs,
+    get_aligned_pixels_from_alignment,
+    align_and_apply,
+)
+
 # ==============================
 # Logger (child of 'crc')
 # ==============================
@@ -1139,7 +1145,28 @@ def _dedup_local_with_margin(
     # Build view and run solver (guard-restore happens inside).
     pm["_src"] = "main"
     mg["_src"] = "margin"
-    view = pd.concat([pm, mg], ignore_index=True)
+
+    # Build the combined view while avoiding empty entries in concat.
+    # This keeps pandas happy and future-proof w.r.t. all-NA/empty inputs.
+    frames: list[pd.DataFrame] = []
+    if not pm.empty:
+        frames.append(pm)
+    if not mg.empty:
+        frames.append(mg)
+
+    # This should not happen because we early-exit when both are empty,
+    # but keep a defensive guard here for robustness.
+    if not frames:
+        cols = {
+            crd_col: pd.Series(dtype="string[pyarrow]"),
+            tie_col: pd.Series(dtype="Int8"),
+        }
+        if group_col:
+            cols[group_col] = pd.Series(dtype="Int64")
+        return pd.DataFrame(cols)
+
+    view = pd.concat(frames, ignore_index=True)
+
 
     solved = deduplicate_pandas(
         view,
@@ -1171,6 +1198,60 @@ def _dedup_local_with_margin(
 
     return out
 
+def _dedup_alignfunc_with_margin(
+    part_main,
+    part_margin,
+    pixel_main,
+    pixel_margin,
+    info_main,
+    info_margin,
+    *,
+    tiebreaking_priority: Sequence[str],
+    instrument_type_priority: Optional[Mapping[str, int]],
+    delta_z_threshold: float = 0.0,
+    crd_col: str = "CRD_ID",
+    compared_col: str = "compared_to",
+    z_col: str = "z",
+    tie_col: str = "tie_result",
+    edge_log: bool = False,
+    group_col: str | None = None,
+) -> pd.DataFrame:
+    """Adapter for LSDB/HATS `align_and_apply`.
+
+    `align_and_apply` passes partitions, pixels and catalog info for each catalog.
+    Here we forward only the relevant arguments to `_dedup_local_with_margin`,
+    which already contains the logic to run deduplication on (main + margin)
+    and return labels for main rows only.
+
+    Parameters
+    ----------
+    part_main :
+        Main partition (NestedFrame / pandas-like).
+    part_margin :
+        Margin partition aligned to the same HATS pixel.
+    pixel_main :
+        Healpix pixel for the main partition (used only for diagnostics).
+    pixel_margin :
+        Healpix pixel for the margin partition (unused here).
+    info_main :
+        Catalog properties for the main catalog (unused).
+    info_margin :
+        Catalog properties for the margin catalog (unused).
+    """
+    return _dedup_local_with_margin(
+        part_main,
+        part_margin,
+        pixel_main,  # diagnostics only
+        tiebreaking_priority=tiebreaking_priority,
+        instrument_type_priority=instrument_type_priority,
+        delta_z_threshold=delta_z_threshold,
+        crd_col=crd_col,
+        compared_col=compared_col,
+        z_col=z_col,
+        tie_col=tie_col,
+        edge_log=edge_log,
+        group_col=group_col,
+    )
 
 def _dedup_local_no_margin(
     part_main,
@@ -1362,96 +1443,57 @@ def run_dedup_with_lsdb_map_partitions(
                 group_col=group_col,
             )
         else:
-            margin_ddf = cat.margin._ddf
+            # ------------------------------------------------------------------
+            # NEW: margin-aware path using LSDB/HATS pixel-tree alignment.
+            #
+            # Instead of forcing Dask divisions of `main_ddf` and `margin_ddf`
+            # to match, we rely on the HATS pixel-tree alignment used by LSDB
+            # for concatenation. This guarantees that main and margin partitions
+            # are aligned on the same HATS cells (including pixels that appear
+            # only in the margin).
+            # ------------------------------------------------------------------
+            log.info(
+                "Margin attached; running dedup using LSDB/HATS pixel alignment "
+                "(concat_align_catalogs + align_and_apply)."
+            )
 
-            # Main must have known divisions.
-            main_div = getattr(main_ddf, "divisions", None)
-            if main_div is None:
-                raise RuntimeError(
-                    "Margin present but main catalog has unknown divisions; rebuild with known divisions."
-                )
-
-            # Margin must also have known divisions; if not, set a sorted index equal to main's index.
-            idx_name = main_ddf._meta.index.name
-            if idx_name is None:
-                raise RuntimeError(
-                    "Main catalog index name is None; cannot align divisions."
-                )
-            if getattr(margin_ddf, "divisions", None) is None:
-                with log_phase("deduplication", "margin_set_index", _base_logger()):
-                    margin_ddf = margin_ddf.set_index(idx_name, sorted=True, drop=False)
-
-            marg_div = margin_ddf.divisions
-            if marg_div is None:
-                raise RuntimeError(
-                    "Margin still has unknown divisions after set_index."
-                )
-
-            # Make division dtypes compatible if needed.
-            t_main = type(main_div[0]) if len(main_div) else None
-            t_marg = type(marg_div[0]) if len(marg_div) else None
-            if t_main is not None and t_marg is not None and t_main != t_marg:
-                try:
-                    import numpy as _np
-
-                    main_div = tuple(_np.asarray(main_div, dtype=object).tolist())
-                    marg_div = tuple(_np.asarray(marg_div, dtype=object).tolist())
-                except Exception as e:
-                    raise RuntimeError(
-                        f"Incompatible division dtypes between main ({t_main}) and margin ({t_marg}): {e}"
-                    ) from e
-
-            # Build ordered union of divisions so both sides share the same split points.
-            try:
-                merged_divisions = tuple(sorted(set(main_div + marg_div)))
-                if len(merged_divisions) < 2:
-                    raise RuntimeError(
-                        "Merged divisions must have at least two boundaries."
-                    )
-            except Exception as e:
-                raise RuntimeError(f"Could not build merged divisions: {e}") from e
-
-            # Repartition both sides to the merged divisions.
-            from dask import config as _dask_config
-
+            # Build a concatenation-oriented pixel alignment between `cat`
+            # and its margin. We disable MOC filtering so that pixels that
+            # appear only in the margin are still included.
             with log_phase(
-                "deduplication", "repartition_to_merged_divisions", _base_logger()
-            ) as l2:
-                with _dask_config.set({"dataframe.shuffle.method": "tasks"}):
-                    main_ddf_aligned = main_ddf.repartition(
-                        divisions=merged_divisions, force=True
-                    )
-                    margin_ddf_aligned = margin_ddf.repartition(
-                        divisions=merged_divisions, force=True
-                    )
-                l2.info(
-                    "Aligned: nparts(main)=%d nparts(margin)=%d",
-                    main_ddf_aligned.npartitions,
-                    margin_ddf_aligned.npartitions,
-                )
-
-            # Strict post-conditions
-            if (
-                main_ddf_aligned.npartitions != margin_ddf_aligned.npartitions
-                or main_ddf_aligned.divisions != margin_ddf_aligned.divisions
+                "deduplication", "pixel_alignment_main_margin", _base_logger()
             ):
-                raise RuntimeError(
-                    "Aligned repartition failed: main and margin differ in npartitions/divisions.\n"
-                    f" main.npartitions={main_ddf_aligned.npartitions}, "
-                    f"margin.npartitions={margin_ddf_aligned.npartitions}\n"
-                    f" main.divisions[:3]={main_ddf_aligned.divisions[:3]} ... [-3:]={main_ddf_aligned.divisions[-3:]}\n"
-                    f" margin.divisions[:3]={margin_ddf_aligned.divisions[:3]} ... [-3:]={margin_ddf_aligned.divisions[-3:]}"
+                # Use the same catalog on both sides so concat_align_catalogs can
+                # expand main + margin internally. Passing `cat.margin` directly
+                # would fail because MarginCatalog has no `.margin` attribute.
+                alignment = concat_align_catalogs(
+                    cat,
+                    cat,
+                    filter_by_mocs=False,
+                    # alignment_type default is OUTER, which is what we want
+                )
+                aligned_pixels = get_aligned_pixels_from_alignment(alignment)
+                log.info(
+                    "Pixel alignment built for main+margin: n_aligned_pixels=%d",
+                    len(aligned_pixels),
                 )
 
-            # 1:1 zip between aligned partitions.
+            # Each entry in `catalog_mappings` is:
+            #   (HealpixDataset, list[HealpixPixel])
+            # Here we align the main catalog and its margin on the same pixel set.
+            catalog_mappings = [
+                (cat, aligned_pixels),
+                (cat.margin, aligned_pixels),
+            ]
+
+            # Align partitions on the HATS pixel grid and run dedup on
+            # (main + margin) for each pixel using the adapter defined above.
             with log_phase(
-                "deduplication", "map_partitions_with_margin", _base_logger()
+                "deduplication", "align_and_apply_with_margin", _base_logger()
             ):
-                labels_dd = main_ddf_aligned.map_partitions(
-                    _dedup_local_with_margin,
-                    margin_ddf_aligned,
-                    None,  # diagnostics
-                    meta=meta,
+                delayed_parts = align_and_apply(
+                    catalog_mappings,
+                    func=_dedup_alignfunc_with_margin,
                     tiebreaking_priority=tiebreaking_priority,
                     instrument_type_priority=instrument_type_priority,
                     delta_z_threshold=float(delta_z_threshold),
@@ -1462,6 +1504,9 @@ def run_dedup_with_lsdb_map_partitions(
                     edge_log=edge_log,
                     group_col=group_col,
                 )
+
+            # Build a Dask DataFrame from the delayed per-pixel label frames.
+            labels_dd = dd.from_delayed(delayed_parts, meta=meta)
 
         # Stable dtypes for downstream merges.
         assign_map = {
