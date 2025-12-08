@@ -1117,12 +1117,15 @@ def _build_collection_with_retry(
             logger.info(
                 f"Small catalog ({total_size_mb:.1f} MB). Building collection via fast path → {collection_path}"
             )
+            
             pdf_list = [pd.read_parquet(p) for p in in_file_paths]
+            
             dfp = (
                 pd.concat(pdf_list, ignore_index=True)
                 if len(pdf_list) > 1
                 else pdf_list[0]
             )
+           
             dfp = _rename_duplicate_columns_pd(dfp, logger)
 
             for col, pd_dtype in [
@@ -1155,9 +1158,9 @@ def _build_collection_with_retry(
                     except Exception:
                         pass
 
-            schema = _build_arrow_schema_for_catalog(
-                dfp, schema_hints=_normalize_schema_hints(schema_hints or {})
-            )
+            #schema = _build_arrow_schema_for_catalog(
+            #    dfp, schema_hints=_normalize_schema_hints(schema_hints or {})
+            #)
 
             catalog = lsdb.from_dataframe(
                 dfp,
@@ -1165,9 +1168,10 @@ def _build_collection_with_retry(
                 ra_column="ra",
                 dec_column="dec",
                 use_pyarrow_types=True,
-                schema=schema,
+                #schema=schema,
             )
-            catalog.to_hats(collection_path, as_collection=True, overwrite=True)
+            
+            catalog.write_catalog(collection_path, as_collection=True, overwrite=True)
 
             logger.info(f"Finished collection fast-path: {collection_path}")
             return collection_path
@@ -1185,19 +1189,21 @@ def _build_collection_with_retry(
         except Exception as e:
             logger.warning(f"Failed to remove partial '{collection_path}': {e}")
 
-    schema_file = os.path.join(parent_dir, f"{output_artifact_name}_schema.parquet")
-    try:
-        _write_schema_file_for_collection(
-            parquet_path=parquet_path,
-            schema_out_path=schema_file,
-            logger=logger,
-            schema_hints=_normalize_schema_hints(schema_hints or {}),
-        )
-    except Exception as e:
-        logger.warning(
-            f"Could not build schema file for fallback import ({type(e).__name__}: {e}). Proceeding without it."
-        )
-        schema_file = None
+    #schema_file = os.path.join(parent_dir, f"{output_artifact_name}_schema.parquet")
+    #try:
+    #    _write_schema_file_for_collection(
+    #        parquet_path=parquet_path,
+    #        schema_out_path=schema_file,
+    #        logger=logger,
+    #        schema_hints=_normalize_schema_hints(schema_hints or {}),
+    #    )
+    #except Exception as e:
+    #    logger.warning(
+    #        f"Could not build schema file for fallback import ({type(e).__name__}: {e}). Proceeding without it."
+    #    )
+    #    schema_file = None
+
+    schema_file = None
 
     def _make_args(with_margin: bool):
         kw = dict(

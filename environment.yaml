@@ -11,9 +11,9 @@ dependencies:
   - pandas
   - numpy
   - pyyaml
-  - lsdb=0.6.5
-  - hats=0.6.5
-  - hats-import=0.6.5
+  - lsdb=0.7.3
+  - hats=0.7.3
+  - hats-import=0.7.3
   - tables-io                  
   - h5py
 

@@ -9,7 +9,7 @@ This module supports two export backends, controlled by the hardcoded flag
 - If USE_LSDB_CONCAT = True (default):
     Performs the crossmatch; updates `compared_to`; normalizes dtypes on each
     input catalog independently; concatenates at the LSDB catalog level;
-    writes a HATS collection via `to_hats`; returns the collection path.
+    writes a HATS collection via `write_catalog`; returns the collection path.
     (No intermediate Parquet.)
 
 - If USE_LSDB_CONCAT = False:
@@ -27,7 +27,7 @@ Public API:
 # -----------------------
 # Backend switch
 # -----------------------
-USE_LSDB_CONCAT: bool = False  # Toggle behavior as described above.
+USE_LSDB_CONCAT: bool = True  # Toggle behavior as described above.
 
 # -----------------------
 # Standard library
@@ -480,7 +480,7 @@ def crossmatch_tiebreak(
         step,
         radius,
         k,
-        ("LSDB+to_hats" if USE_LSDB_CONCAT else "Dask+Parquet+import"),
+        ("LSDB+write_catalog" if USE_LSDB_CONCAT else "Dask+Parquet+import"),
     )
 
     # 1) Spatial crossmatch
@@ -538,7 +538,7 @@ def crossmatch_tiebreak(
     )
     logger.info("Compared_to updated on partitions (%.2fs)", time.time() - t0)
 
-    # 4) Export path A: LSDB concat + to_hats
+    # 4) Export path A: LSDB concat + write_catalog
     if USE_LSDB_CONCAT:
         # Normalize dtypes on each catalog independently *before* concat
         t0 = time.time()
@@ -550,19 +550,24 @@ def crossmatch_tiebreak(
 
         # Concatenate at the LSDB catalog level
         t0 = time.time()
-        merged_cat = left_fixed.concat(right_fixed)
+
+        merged_cat = left_fixed.concat(
+            right_fixed,
+            ignore_empty_margins=True,
+        )
+
         logger.info("LSDB concat done (%.2fs)", time.time() - t0)
 
         # Persist as HATS collection and return path
         t0 = time.time()
         collection_path = os.path.join(temp_dir, f"merged_step{step}_hats")
-        merged_cat.to_hats(
+        merged_cat.write_catalog(
             collection_path,
             as_collection=True,
             overwrite=True,
         )
         logger.info(
-            "Write complete (to_hats): step=%s path=%s (%.2fs)",
+            "Write complete (write_catalog): step=%s path=%s (%.2fs)",
             step,
             collection_path,
             time.time() - t0,
@@ -640,7 +645,7 @@ def crossmatch_tiebreak_safe(
 
     If the crossmatch yields a known empty-overlap condition:
       - LSDB path: ensure `compared_to`, normalize each catalog, LSDB concat,
-        `to_hats`, return collection.
+        `write_catalog`, return collection.
       - Legacy path: ensure `compared_to`, Dask concat, Parquet, import, return collection.
     """
     logger = _get_logger()
@@ -648,7 +653,7 @@ def crossmatch_tiebreak_safe(
     logger.info(
         "START xmatch_update_compared_to_safe: step=%s backend=%s",
         step,
-        ("LSDB+to_hats" if USE_LSDB_CONCAT else "Dask+Parquet+import"),
+        ("LSDB+write_catalog" if USE_LSDB_CONCAT else "Dask+Parquet+import"),
     )
 
     try:
@@ -699,10 +704,13 @@ def crossmatch_tiebreak_safe(
                 left_fixed = _normalize_catalog_dtypes(left_ready, translation_config)
                 right_fixed = _normalize_catalog_dtypes(right_ready, translation_config)
 
-                merged_cat = left_fixed.concat(right_fixed)
+                merged_cat = left_fixed.concat(
+                    right_fixed,
+                    ignore_empty_margins=True,
+                )
 
                 collection_path = os.path.join(temp_dir, f"merged_step{step}_hats")
-                merged_cat.to_hats(
+                merged_cat.write_catalog(
                     collection_path,
                     as_collection=True,
                     overwrite=True,

@@ -807,115 +807,163 @@ def main(
             "concatenate_and_remove_duplicates",
         ):
 
-            if crossmatch_already_done:
-                # No auto needed: merges already completed and merged_step{final} present
-                log_auto.info(
-                    "Skip automatch: crossmatch already finalized (merged_step%d exists or logged).",
-                    final_step,
-                )
-            else:
-                log_auto.info(
-                    "START automatch: generating *_hats_auto from prepared collections"
-                )
-
-                queue_auto: list[dict] = []
-                already_done = 0
-                for info in prepared_info:
-                    tag = f"autocross_{info['internal_name']}"
-                    hats_auto = info["prepared_path"] + "_hats_auto"
-                    if tag in completed and os.path.isdir(hats_auto):
-                        already_done += 1
-                    else:
-                        queue_auto.append(info)
-
-                max_inflight_auto = int(param_config.get("auto_cross_max_inflight", 5))
-                log_auto.info(
-                    "Concurrency for auto-cross: max_inflight=%d, to_run=%d, already_done=%d",
-                    max_inflight_auto,
-                    len(queue_auto),
-                    already_done,
-                )
-
-                if queue_auto:
-                    ac2 = as_completed()
-                    inflight2 = []
-                    fut2info: dict[Any, dict] = {}
-
-                    def _submit_auto(i: dict):
-                        return client.submit(
-                            _auto_cross_worker,
-                            i,
-                            logs_dir,
-                            translation_config,
-                            pure=False,
-                        )
-
-                    for _ in range(min(max_inflight_auto, len(queue_auto))):
-                        info = queue_auto.pop(0)
-                        fut = _submit_auto(info)
-                        ac2.add(fut)
-                        inflight2.append(fut)
-                        fut2info[fut] = info
-
-                    auto_done_now = 0
-                    while inflight2:
-                        fut = next(ac2)
-                        inflight2.remove(fut)
-                        try:
-                            out_path = fut.result()
-                        except Exception:
-                            _log_remote_future_exception(
-                                log_auto,
-                                fut,
-                                msg_prefix=f"AUTO-CROSS FAILED for {info_err['internal_name']} (remote worker traceback)",
-                            )
-                            raise
-
-                        info_ok = fut2info.pop(fut)
-                        info_ok["collection_path"] = out_path
-                        log_step(resume_log, f"autocross_{info_ok['internal_name']}")
-                        auto_done_now += 1
-                        if queue_auto:
-                            nxt = queue_auto.pop(0)
-                            fut2 = _submit_auto(nxt)
-                            ac2.add(fut2)
-                            inflight2.append(fut2)
-                            fut2info[fut2] = nxt
-
+            try:
+                if crossmatch_already_done:
+                    # No auto needed: merges already completed and merged_step{final} present
                     log_auto.info(
-                        "Auto crossmatch completed for %d catalogs (re/computed)",
-                        auto_done_now,
+                        "Skip automatch: crossmatch already finalized (merged_step%d exists or logged).",
+                        final_step,
                     )
                 else:
                     log_auto.info(
-                        "No auto-crossmatch needed (all *_hats_auto present)."
+                        "START automatch: generating *_hats_auto from prepared collections"
                     )
 
-                current_workers = len(client.scheduler_info().get("workers", {}))
-                log_auto.info(
-                    "WORKERS STILL RUNNING=%d.",
-                    current_workers,
-                )
+                    queue_auto: list[dict] = []
+                    already_done = 0
+                    for info in prepared_info:
+                        tag = f"autocross_{info['internal_name']}"
+                        hats_auto = info["prepared_path"] + "_hats_auto"
+                        if tag in completed and os.path.isdir(hats_auto):
+                            already_done += 1
+                        else:
+                            queue_auto.append(info)
 
-                log_auto.info("END automatch: all *_hats_auto guaranteed on disk")
+                    max_inflight_auto = int(param_config.get("auto_cross_max_inflight", 5))
+                    log_auto.info(
+                        "Concurrency for auto-cross: max_inflight=%d, to_run=%d, already_done=%d",
+                        max_inflight_auto,
+                        len(queue_auto),
+                        already_done,
+                    )
 
-            # -----------------------------------------------------------
-            # Enforcement of *_hats_auto ONLY if we are still going to run crossmatch
-            # -----------------------------------------------------------
-            if not crossmatch_already_done:
-                missing_auto: list[str] = []
-                for info in prepared_info:
-                    hats_auto = info["prepared_path"] + "_hats_auto"
-                    if os.path.isdir(hats_auto):
-                        info["collection_path"] = hats_auto
+                    if queue_auto:
+                        ac2 = as_completed()
+                        inflight2 = []
+                        fut2info: dict[Any, dict] = {}
+
+                        def _submit_auto(i: dict):
+                            """Submit a self-crossmatch job for a single prepared catalog."""
+                            log_auto.info(
+                                "Submitting AUTO-CROSS for %s | prepared_path=%s",
+                                i.get("internal_name"),
+                                i.get("prepared_path"),
+                            )
+                            return client.submit(
+                                _auto_cross_worker,
+                                i,
+                                logs_dir,
+                                translation_config,
+                                pure=False,
+                            )
+
+                        # Prime the inflight queue
+                        for _ in range(min(max_inflight_auto, len(queue_auto))):
+                            info = queue_auto.pop(0)
+                            fut = _submit_auto(info)
+                            ac2.add(fut)
+                            inflight2.append(fut)
+                            fut2info[fut] = info
+
+                        auto_done_now = 0
+                        while inflight2:
+                            fut = next(ac2)
+                            inflight2.remove(fut)
+
+                            # Retrieve context for this future (for logging on both success and failure)
+                            info_ctx = fut2info.get(fut, {})
+                            name = info_ctx.get("internal_name", "<unknown>")
+                            prepared_path = info_ctx.get("prepared_path", "<unknown>")
+
+                            try:
+                                out_path = fut.result()
+                            except Exception:
+                                # Log remote worker traceback with context and re-raise
+                                _log_remote_future_exception(
+                                    log_auto,
+                                    fut,
+                                    msg_prefix=(
+                                        f"AUTO-CROSS FAILED for {name} | prepared_path={prepared_path}"
+                                    ),
+                                    extra={"phase": "automatch"},
+                                )
+                                raise
+
+                            info_ok = fut2info.pop(fut, info_ctx)
+                            info_ok["collection_path"] = out_path
+
+                            log_auto.info(
+                                "AUTO-CROSS OK: %s | prepared_path=%s | output=%s",
+                                info_ok.get("internal_name"),
+                                info_ok.get("prepared_path"),
+                                out_path,
+                            )
+
+                            log_step(resume_log, f"autocross_{info_ok['internal_name']}")
+                            auto_done_now += 1
+
+                            # Keep pipeline saturated
+                            if queue_auto:
+                                nxt = queue_auto.pop(0)
+                                fut2 = _submit_auto(nxt)
+                                ac2.add(fut2)
+                                inflight2.append(fut2)
+                                fut2info[fut2] = nxt
+
+                        log_auto.info(
+                            "Auto crossmatch completed for %d catalogs (re/computed)",
+                            auto_done_now,
+                        )
                     else:
-                        missing_auto.append(info["internal_name"])
-                if missing_auto:
-                    raise FileNotFoundError(
-                        "Auto-cross outputs still missing after recovery: "
-                        + ", ".join(missing_auto)
-                        + ". Check disk/permissions/logs."
+                        log_auto.info(
+                            "No auto-crossmatch needed (all *_hats_auto present)."
+                        )
+
+                    current_workers = len(client.scheduler_info().get("workers", {}))
+                    log_auto.info(
+                        "WORKERS STILL RUNNING=%d.",
+                        current_workers,
                     )
+
+                    log_auto.info("END automatch: all *_hats_auto guaranteed on disk")
+
+                # -----------------------------------------------------------
+                # Enforcement of *_hats_auto ONLY if we are still going to run crossmatch
+                # -----------------------------------------------------------
+                if not crossmatch_already_done:
+                    missing_auto: list[str] = []
+                    for info in prepared_info:
+                        hats_auto = info["prepared_path"] + "_hats_auto"
+                        if os.path.isdir(hats_auto):
+                            info["collection_path"] = hats_auto
+                        else:
+                            missing_auto.append(info["internal_name"])
+
+                    if missing_auto:
+                        # Detailed diagnostic before raising
+                        log_auto.error(
+                            "AUTO-CROSS VERIFICATION FAILED. Missing %d outputs. Expected *_hats_auto roots:",
+                            len(missing_auto),
+                        )
+                        for info in prepared_info:
+                            hats_auto = info["prepared_path"] + "_hats_auto"
+                            log_auto.error(
+                                " - %s | expected=%s | exists=%s",
+                                info["internal_name"],
+                                hats_auto,
+                                os.path.isdir(hats_auto),
+                            )
+
+                        raise FileNotFoundError(
+                            "Auto-cross outputs still missing after recovery: "
+                            + ", ".join(missing_auto)
+                            + ". Check disk/permissions/logs."
+                        )
+
+            except Exception:
+                # Catch ANY driver-side error in the automatch phase
+                log_auto.exception("Automatch FAILED with an unhandled error")
+                raise
 
         # ---------------------------------------------------------------
         # 3) CROSSMATCH (parallel tournament; no per-step resume)

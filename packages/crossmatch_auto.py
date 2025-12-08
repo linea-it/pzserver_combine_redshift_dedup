@@ -275,7 +275,7 @@ def crossmatch_auto(
     logger.info(
         "Writing collection: base_dir=%s catalog_name=%s", parent_dir, artifact_auto
     )
-    updated.to_hats(
+    updated.write_catalog(
         collection_path_auto,
         as_collection=True,
         overwrite=True,
