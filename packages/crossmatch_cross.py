@@ -490,6 +490,7 @@ def crossmatch_tiebreak(
         radius_arcsec=radius,
         n_neighbors=k,
         suffixes=("left", "right"),
+        suffix_method='all_columns',
     )
     logger.info("Crossmatch done (%.2fs)", time.time() - t0)
 

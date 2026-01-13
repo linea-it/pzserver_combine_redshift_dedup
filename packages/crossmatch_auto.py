@@ -174,6 +174,7 @@ def _self_xmatch_pairs(
         radius_arcsec=radius_arcsec,
         n_neighbors=n_neighbors,
         suffixes=("left", "right"),
+        suffix_method='all_columns',
     )
     pair_cols = ["CRD_IDleft", "CRD_IDright"]
     pairs_df = xmatched[pair_cols].compute()
