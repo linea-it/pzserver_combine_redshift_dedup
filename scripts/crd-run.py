@@ -1586,7 +1586,7 @@ def main(
                             .transform("any")
                             .fillna(False)
                         )
-                        draw_group = (~has_1) & (~has_3) & has_2
+                        draw_group = (~has_1) & has_2
                         cand_mask = draw_group & tie_num.eq(2) & gid.notna()
                         n_groups = int(gid[cand_mask].nunique())
                         if n_groups > 0:
