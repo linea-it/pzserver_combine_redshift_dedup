@@ -1560,13 +1560,18 @@ def main(
                     .fillna(0)
                     .astype("int8")
                 )
-                if tie_treatment_option == "draw_one":
-                    if "group_id" not in df_final.columns:
-                        log_cons.warning(
-                            "tie_treatment_option=draw_one requires group_id; falling back to remove_all."
-                        )
-                        tie_treatment_option = "remove_all"
-                    else:
+                try:
+                    tie_counts = (
+                        tie_num.value_counts(dropna=False).sort_index().to_dict()
+                    )
+                    log_cons.info("tie_result counts pre-filter: %s", tie_counts)
+                except Exception as e_counts:
+                    log_cons.debug("Could not compute tie_result counts: %s", e_counts)
+
+                gid = None
+                has_1 = has_2 = has_3 = None
+                if "group_id" in df_final.columns:
+                    try:
                         gid = df_final["group_id"]
                         has_1 = (
                             tie_num.eq(1)
@@ -1586,6 +1591,56 @@ def main(
                             .transform("any")
                             .fillna(False)
                         )
+                        n_groups = int(gid.dropna().nunique())
+                        n_has_1 = int(
+                            tie_num.eq(1).groupby(gid, dropna=True).any().sum()
+                        )
+                        n_has_2 = int(
+                            tie_num.eq(2).groupby(gid, dropna=True).any().sum()
+                        )
+                        n_has_3 = int(
+                            tie_num.eq(3).groupby(gid, dropna=True).any().sum()
+                        )
+                        n_hard = int(((~has_1) & has_2).sum())
+                        log_cons.info(
+                            "tie_result group stats: total=%d has1=%d has2=%d has3=%d hard_tie=%d",
+                            n_groups,
+                            n_has_1,
+                            n_has_2,
+                            n_has_3,
+                            n_hard,
+                        )
+                    except Exception as e_grp:
+                        log_cons.debug("Could not compute group tie stats: %s", e_grp)
+                if tie_treatment_option == "draw_one":
+                    if "group_id" not in df_final.columns:
+                        log_cons.warning(
+                            "tie_treatment_option=draw_one requires group_id; falling back to remove_all."
+                        )
+                        tie_treatment_option = "remove_all"
+                    else:
+                        if gid is None:
+                            gid = df_final["group_id"]
+                        if has_1 is None or has_2 is None:
+                            has_1 = (
+                                tie_num.eq(1)
+                                .groupby(gid, dropna=True)
+                                .transform("any")
+                                .fillna(False)
+                            )
+                            has_2 = (
+                                tie_num.eq(2)
+                                .groupby(gid, dropna=True)
+                                .transform("any")
+                                .fillna(False)
+                            )
+                        if has_3 is None:
+                            has_3 = (
+                                tie_num.eq(3)
+                                .groupby(gid, dropna=True)
+                                .transform("any")
+                                .fillna(False)
+                            )
                         draw_group = (~has_1) & has_2
                         cand_mask = draw_group & tie_num.eq(2) & gid.notna()
                         n_groups = int(gid[cand_mask].nunique())
