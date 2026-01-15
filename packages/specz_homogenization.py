@@ -1,16 +1,18 @@
-# -*- coding: utf-8 -*-
 from __future__ import annotations
 
-"""
-Homogenization helpers for the CRC pipeline.
+"""Homogenization helpers for the CRC pipeline.
 
-This module contains ONLY the logic related to computing or honoring the
+This module contains only the logic related to computing or honoring the
 homogenized columns:
     - z_flag_homogenized
     - instrument_type_homogenized
 
 It is intended to be imported by the main `specz.py` module.
 Functions are copied verbatim from the original file to avoid behavior changes.
+
+Public API:
+    - _honor_user_homogenized_mapping
+    - _homogenize
 """
 
 # -----------------------
@@ -41,15 +43,18 @@ except Exception:  # pragma: no cover
     USE_ARROW_TYPES = False
 
 if USE_ARROW_TYPES:
-    DTYPE_STR   = pd.ArrowDtype(pd.ArrowDtype(pa.string()).pyarrow_dtype) if hasattr(pd, "ArrowDtype") else "string"
+    if hasattr(pd, "ArrowDtype"):
+        DTYPE_STR = pd.ArrowDtype(pd.ArrowDtype(pa.string()).pyarrow_dtype)
+    else:
+        DTYPE_STR = "string"
     DTYPE_FLOAT = pd.ArrowDtype(pa.float64())
-    DTYPE_INT   = pd.ArrowDtype(pa.int64())
-    DTYPE_BOOL  = pd.ArrowDtype(pa.bool_())
+    DTYPE_INT = pd.ArrowDtype(pa.int64())
+    DTYPE_BOOL = pd.ArrowDtype(pa.bool_())
 else:
-    DTYPE_STR   = "string"
+    DTYPE_STR = "string"
     DTYPE_FLOAT = "Float64"
-    DTYPE_INT   = "Int64"
-    DTYPE_BOOL  = "boolean"
+    DTYPE_INT = "Int64"
+    DTYPE_BOOL = "boolean"
 
 # -----------------------
 # Constants (also used by _normalize_types in specz.py)
@@ -139,7 +144,7 @@ def _assert_yaml_coverage_for_surveys(
 
     Args:
         df: Input frame (must contain 'survey').
-        key: Either 'z_flag' or 'instrument_type' – used to look up '<key>_translation'.
+        key: Either 'z_flag' or 'instrument_type' - used to look up '<key>_translation'.
         translation_rules_uc: Upper-cased translation rules from YAML (survey -> ruleset).
         product_name: Catalog identifier (for error context).
         logger: Logger.
@@ -207,7 +212,9 @@ def _homogenize(
     instrument_type_priority = translation_config.get("instrument_type_priority", {})
     translation_rules_uc = {k.upper(): v for k, v in translation_config.get("translation_rules", {}).items()}
 
-    # ---- vectorized translator ----
+    # -----------------------
+    # Vectorized translator
+    # -----------------------
     def _translate_column_vectorized(df: dd.DataFrame, key: str, out_col: str, out_kind: str) -> dd.DataFrame:
         """Apply YAML translation rules per partition."""
         assert key in {"z_flag", "instrument_type"}

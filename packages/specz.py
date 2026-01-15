@@ -1,31 +1,25 @@
-# -*- coding: utf-8 -*-
 from __future__ import annotations
 
-"""
-Combine Redshift Catalogs – catalog preparation.
+"""Combine Redshift Catalogs - catalog preparation.
 
 Loads a raw spectroscopic catalog, validates/normalizes schema, derives
 standardized fields (IDs, homogenized flags, DP1 flags), optionally imports
 HATS and generates margin cache, and writes a prepared Parquet artifact.
 
 Public API:
-    - prepare_catalog(entry, translation_config, logs_dir, temp_dir, combine_mode)
+    - prepare_catalog
 """
 
 # -----------------------
 # Standard library
 # -----------------------
 import ast as _ast
-import builtins
 import difflib
 import glob
 import logging
-import math
 import os
-import pathlib
 import re
 import shutil
-from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
 # -----------------------
@@ -102,7 +96,11 @@ DP1_REGIONS = [
 # Centralized logging
 # -----------------------
 def _get_logger() -> logging.Logger:
-    """Return a child logger that propagates to the root 'crc' logger."""
+    """Return a child logger that propagates to the root 'crc' logger.
+
+    Returns:
+        logging.Logger: Base logger.
+    """
     logger = logging.getLogger(LOGGER_NAME)
     logger.setLevel(logging.NOTSET)
     logger.propagate = True
@@ -112,7 +110,16 @@ def _get_logger() -> logging.Logger:
 def _phase_logger(
     base_logger: logging.Logger, phase: str, product: str | None = None
 ) -> logging.LoggerAdapter:
-    """Return a LoggerAdapter injecting phase (and product if provided)."""
+    """Return a LoggerAdapter injecting phase (and product if provided).
+
+    Args:
+        base_logger: Base logger.
+        phase: Phase label.
+        product: Optional product identifier.
+
+    Returns:
+        logging.LoggerAdapter: Logger with extra context.
+    """
     extra = {"phase": phase}
     if product:
         extra["product"] = product
@@ -174,7 +181,7 @@ def _validate_and_rename(
                 i += 1
             logger.info(
                 f"{product_name} Resolve rename collision: '{tgt}' already exists; "
-                f"'{tgt}' → '{parked}' before mapping '{src}'→'{tgt}'"
+                f"'{tgt}' -> '{parked}' before mapping '{src}' -> '{tgt}'"
             )
             df = df.rename(columns={tgt: parked})
 
@@ -340,10 +347,10 @@ def _stash_previous_results(
 
     mapped_id_from_crd = str(non_null_map.get("id", "")).strip().lower() == "crd_id"
 
-    # Handle YAML-mapped id → CRD_ID
+    # Handle YAML-mapped id -> CRD_ID
     if mapped_id_from_crd and "id" in cols:
         new_name = _next_available_prev_name(cols, "CRD_ID_prev")
-        logger.info(f"Stash CRD_ID from YAML-mapped 'id' → {new_name} (keep 'id')")
+        logger.info(f"Stash CRD_ID from YAML-mapped 'id' -> {new_name} (keep 'id')")
         df[new_name] = df["id"]
         cols.append(new_name)
 
@@ -351,7 +358,7 @@ def _stash_previous_results(
     if "CRD_ID" in cols:
         new_name = _next_available_prev_name(cols, "CRD_ID_prev")
         if new_name != "CRD_ID":
-            logger.info(f"Stash previous CRD_ID → {new_name}")
+            logger.info(f"Stash previous CRD_ID -> {new_name}")
             df = df.rename(columns={"CRD_ID": new_name})
             cols.append(new_name)
 
@@ -359,7 +366,7 @@ def _stash_previous_results(
     if "compared_to" in cols:
         new_name = _next_available_prev_name(cols, "compared_to_prev")
         if new_name != "compared_to":
-            logger.info(f"Stash previous compared_to → {new_name}")
+            logger.info(f"Stash previous compared_to -> {new_name}")
             df = df.rename(columns={"compared_to": new_name})
             cols.append(new_name)
 
@@ -367,7 +374,7 @@ def _stash_previous_results(
     if "group_id" in cols:
         new_name = _next_available_prev_name(cols, "group_id_prev")
         if new_name != "group_id":
-            logger.info(f"Stash previous group_id → {new_name}")
+            logger.info(f"Stash previous group_id -> {new_name}")
             df = df.rename(columns={"group_id": new_name})
             cols.append(new_name)
 
@@ -417,7 +424,7 @@ def _normalize_string_series_to_na(s: pd.Series) -> pd.Series:
 
 
 def _to_nullable_boolean_strict(s: pd.Series) -> pd.Series:
-    """Convert to nullable boolean strictly (non-bool → <NA>).
+    """Convert to nullable boolean strictly (non-bool -> <NA>).
 
     Args:
         s: Input series.
@@ -922,7 +929,9 @@ def _save_parquet(df: dd.DataFrame, temp_dir: str, product_name: str) -> str:
     return out_path
 
 
-# ---- Arrow schema builder ----
+# -----------------------
+# Arrow schema builder
+# -----------------------
 def _build_arrow_schema_for_catalog(
     df: pd.DataFrame, schema_hints: dict | None = None
 ) -> pa.Schema:
@@ -1012,9 +1021,9 @@ def _build_arrow_schema_for_catalog(
     return pa.schema(uniq_fields)
 
 
-# =======================
+# -----------------------
 # Collections
-# =======================
+# -----------------------
 def _write_schema_file_for_collection(
     parquet_path: str,
     schema_out_path: str,
@@ -1115,7 +1124,7 @@ def _build_collection_with_retry(
     if total_size_mb <= size_threshold_mb:
         try:
             logger.info(
-                f"Small catalog ({total_size_mb:.1f} MB). Building collection via fast path → {collection_path}"
+                f"Small catalog ({total_size_mb:.1f} MB). Building collection via fast path -> {collection_path}"
             )
             
             pdf_list = [pd.read_parquet(p) for p in in_file_paths]
@@ -1282,9 +1291,9 @@ def _maybe_collection(
     )
 
 
-# =======================
+# -----------------------
 # Main orchestrator
-# =======================
+# -----------------------
 def prepare_catalog(
     entry: dict,
     translation_config: dict,
@@ -1364,7 +1373,7 @@ def prepare_catalog(
                 df = df[df["z_flag_homogenized"] >= cut_val]
                 final_count = df.shape[0].compute()
                 lg.info(
-                    f"Applied z_flag_homogenized cut >= {cut_val}: {initial_count} → {final_count} rows"
+                    f"Applied z_flag_homogenized cut >= {cut_val}: {initial_count} -> {final_count} rows"
                 )
             else:
                 lg.warning(

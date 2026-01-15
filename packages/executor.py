@@ -1,24 +1,45 @@
-# combine_redshift_dedup/packages/executor.py
+"""Executor helpers for CRC.
 
+Provides a small factory to create Dask clusters from config.
+
+Public API:
+    - get_executor
+"""
+
+# -----------------------
+# Standard library
+# -----------------------
 import logging
-from typing import Dict, Optional, Any
+from typing import Any, Dict
 
+# -----------------------
+# Third-party
+# -----------------------
 from dask.distributed import LocalCluster
 from dask_jobqueue import SLURMCluster
 
+# -----------------------
+# Project
+# -----------------------
 from utils import get_phase_logger
+
+__all__ = ["get_executor"]
 
 LOGGER_NAME = "crc.executor"
 
 
 def _get_logger() -> logging.LoggerAdapter:
-    """Return a phase-aware logger ('crc.executor' with phase='executor')."""
+    """Return a phase-aware logger ('crc.executor' with phase='executor').
+
+    Returns:
+        logging.LoggerAdapter: Logger with phase context.
+    """
     base = logging.getLogger(LOGGER_NAME)
     base.propagate = True
     return get_phase_logger("executor", base)
 
 
-def get_executor(executor_config: Dict[str, Any], logs_dir: Optional[str] = None):
+def get_executor(executor_config: Dict[str, Any], logs_dir: str | None = None):
     """Create and return a Dask cluster from config.
 
     Behavior:
@@ -49,17 +70,17 @@ def get_executor(executor_config: Dict[str, Any], logs_dir: Optional[str] = None
 
     logger.info("Setting up executor: %s", executor_name)
 
-    # -------------------------
+    # -----------------------
     # Local cluster
-    # -------------------------
+    # -----------------------
     if executor_name == "local":
         cluster = LocalCluster(**args)
         logger.info("LocalCluster started with args=%s", args)
         return cluster
 
-    # -------------------------
+    # -----------------------
     # SLURM cluster
-    # -------------------------
+    # -----------------------
     if executor_name == "slurm":
         instance_cfg = dict(args.get("instance", {}) or {})
         scale_cfg = dict(args.get("scale", {}) or {})
@@ -96,7 +117,7 @@ def get_executor(executor_config: Dict[str, Any], logs_dir: Optional[str] = None
             account,
         )
         logger.info(
-            "Initial submit: minimum_jobs=%d → n_workers=%d (worker processes).",
+            "Initial submit: minimum_jobs=%d -> n_workers=%d (worker processes).",
             min_jobs,
             n_workers_init,
         )
@@ -112,9 +133,9 @@ def get_executor(executor_config: Dict[str, Any], logs_dir: Optional[str] = None
 
         return cluster
 
-    # -------------------------
+    # -----------------------
     # Unknown -> minimal local
-    # -------------------------
+    # -----------------------
     logger.warning(
         "Unknown executor '%s'. Falling back to a minimal LocalCluster.", executor_name
     )

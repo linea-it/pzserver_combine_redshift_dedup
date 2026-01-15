@@ -1,81 +1,69 @@
-# -*- coding: utf-8 -*-
-"""
-Orchestrates the CRC pipeline (prepare → auto-crossmatch → crossmatch → deduplicate → export).
+"""Orchestrate the CRC pipeline (prepare -> auto-crossmatch -> crossmatch -> deduplicate -> export).
+
+Public API:
+    - main
 """
 
 from __future__ import annotations
 
-# =====================
-# Built-in
-# =====================
+# -----------------------
+# Standard library
+# -----------------------
 import argparse
 import glob
 import json
 import os
-import re
 import shutil
 import sys
 import time
 import warnings
-from pathlib import Path
 from typing import Any
-from datetime import datetime
 
-# =====================
+# -----------------------
 # Logging
-# =====================
+# -----------------------
 import logging
-from logging.handlers import (
-    RotatingFileHandler,
-)  # noqa: F401  (kept for back-compat imports)
 
-# =====================
+# -----------------------
 # Third-party
-# =====================
+# -----------------------
 import dask
 import dask.dataframe as dd
 import pandas as pd
 from dask.distributed import Client, as_completed, performance_report
 import lsdb
 
-# =====================
+# -----------------------
 # Project
-# =====================
+# -----------------------
 from crossmatch_auto import crossmatch_auto
 from crossmatch_cross import crossmatch_tiebreak_safe
-from deduplication import (
-    deduplicate_pandas,
-    run_dedup_with_lsdb_map_partitions,
-)
+from deduplication import run_dedup_with_lsdb_map_partitions
 from executor import get_executor
 from product_handle import save_dataframe
-from specz import (
-    prepare_catalog,
-    USE_ARROW_TYPES,
-    DTYPE_STR,
-)
+from specz import DTYPE_STR, USE_ARROW_TYPES, prepare_catalog
 from utils import (
     configure_exception_hook,
     configure_warning_handler,
     dump_yml,
+    ensure_crc_logger,
     load_yml,
     log_step,
     read_completed_steps,
-    update_process_info,
-    ensure_crc_logger,
     start_crc_log_collector,
+    update_process_info,
 )
 
+__all__ = ["main"]
 
-# ---------------------------------------------------------------------------
+
+# -----------------------
 # Helpers
-# ---------------------------------------------------------------------------
+# -----------------------
 def _log_remote_future_exception(
     lg: logging.LoggerAdapter, fut, msg_prefix: str, extra: dict | None = None
 ) -> None:
-    """
-    Logs the remote (worker-side) traceback carried by a Dask Future.
-    """
+    """Log the remote (worker-side) traceback carried by a Dask Future."""
     import traceback as _tb
 
     try:
@@ -290,9 +278,9 @@ def _cleanup_previous_step(
             _rm_path(coll)
 
 
-# ---------------------------------------------------------------------------
+# -----------------------
 # Worker task for auto self-crossmatch
-# ---------------------------------------------------------------------------
+# -----------------------
 
 
 def _auto_cross_worker(info: dict, logs_dir: str, translation_config: dict):
@@ -311,9 +299,9 @@ def _auto_cross_worker(info: dict, logs_dir: str, translation_config: dict):
     return out_auto
 
 
-# ---------------------------------------------------------------------------
+# -----------------------
 # Parallel crossmatch worker
-# ---------------------------------------------------------------------------
+# -----------------------
 def _xmatch_worker(
     left_collection_path: str,
     right_collection_path: str,
@@ -346,9 +334,9 @@ def _xmatch_worker(
     )
 
 
-# ---------------------------------------------------------------------------
+# -----------------------
 # Cleanup for crossmatch tournment
-# ---------------------------------------------------------------------------
+# -----------------------
 def _cleanup_inputs_of_merge(
     left_root: str,
     right_root: str,
@@ -382,9 +370,9 @@ def _cleanup_inputs_of_merge(
             _rm_root(rroot)
 
 
-# ---------------------------------------------------------------------------
+# -----------------------
 # Publish / copy helpers
-# ---------------------------------------------------------------------------
+# -----------------------
 def _copy_file(src: str, dst: str, lg: logging.LoggerAdapter) -> None:
     os.makedirs(os.path.dirname(dst) or ".", exist_ok=True)
     abs_src, abs_dst = os.path.abspath(src), os.path.abspath(dst)
@@ -394,7 +382,7 @@ def _copy_file(src: str, dst: str, lg: logging.LoggerAdapter) -> None:
     try:
         if os.path.exists(abs_dst):
             os.remove(abs_dst)
-        os.link(abs_src, abs_dst)  # hardlink se for mesmo FS
+        os.link(abs_src, abs_dst)  # hardlink when on the same filesystem
         lg.info("Hardlinked: %s -> %s", abs_src, abs_dst)
     except Exception:
         shutil.copy2(abs_src, abs_dst)
@@ -402,7 +390,7 @@ def _copy_file(src: str, dst: str, lg: logging.LoggerAdapter) -> None:
 
 
 def _copy_tree(src_dir: str, dst_dir: str, lg: logging.LoggerAdapter) -> None:
-    """Copia recursivamente src_dir → dst_dir, sobrescrevendo se existir."""
+    """Copy src_dir -> dst_dir recursively, overwriting if present."""
     if not os.path.isdir(src_dir):
         lg.warning("Source dir not found for copy: %s", src_dir)
         return
@@ -436,9 +424,9 @@ def _snapshot_shell_logs(
             _copy_file(path, os.path.join(dst_dir, os.path.basename(path)), lg)
 
 
-# ---------------------------------------------------------------------------
+# -----------------------
 # Core pipeline
-# ---------------------------------------------------------------------------
+# -----------------------
 
 
 def main(
@@ -651,9 +639,9 @@ def main(
     global_report_path = os.path.join(logs_dir, "main_dask_report.html")
     with performance_report(filename=global_report_path):
 
-        # ---------------------------------------------------------------
+        # -----------------------
         # 1) PREPARATION
-        # ---------------------------------------------------------------
+        # -----------------------
         log_prep = _phase_logger(base_logger, "preparation")
         log_prep.info(
             "START preparation: reading inputs and building prepared collections (temp=%s)",
@@ -768,9 +756,9 @@ def main(
 
         log_prep.info("END preparation: finished prepared collections")
 
-        # ---------------------------------------------------------------
+        # -----------------------
         # Detect pipeline state for resume (is crossmatch already done?)
-        # ---------------------------------------------------------------
+        # -----------------------
         final_step = len(prepared_info) - 1
         resume_log = os.path.join(temp_dir, "process_resume.log")
 
@@ -798,9 +786,9 @@ def main(
             _recover_final_collection_path() if crossmatch_already_done else None
         )
 
-        # ---------------------------------------------------------------
+        # -----------------------
         # 2) AUTO MATCH (self crossmatch over each prepared)
-        # ---------------------------------------------------------------
+        # -----------------------
         log_auto = _phase_logger(base_logger, "automatch")
         if combine_mode in (
             "concatenate_and_mark_duplicates",
@@ -927,9 +915,9 @@ def main(
 
                     log_auto.info("END automatch: all *_hats_auto guaranteed on disk")
 
-                # -----------------------------------------------------------
+                # -----------------------
                 # Enforcement of *_hats_auto ONLY if we are still going to run crossmatch
-                # -----------------------------------------------------------
+                # -----------------------
                 if not crossmatch_already_done:
                     missing_auto: list[str] = []
                     for info in prepared_info:
@@ -965,9 +953,9 @@ def main(
                 log_auto.exception("Automatch FAILED with an unhandled error")
                 raise
 
-        # ---------------------------------------------------------------
+        # -----------------------
         # 3) CROSSMATCH (parallel tournament; no per-step resume)
-        # ---------------------------------------------------------------
+        # -----------------------
         log_cross = _phase_logger(base_logger, "crossmatch")
         log_cross.info(
             "START crossmatch (parallel tournament) over prepared *_hats_auto"
@@ -1161,7 +1149,7 @@ def main(
                                         raw_out,
                                     )
 
-                                # Delicate cleanup — delete only the two inputs consumed by this merge
+                                # Delicate cleanup - delete only the two inputs consumed by this merge
                                 if delete_temp_files:
                                     try:
                                         _cleanup_inputs_of_merge(
@@ -1241,9 +1229,9 @@ def main(
             cluster.close()
             return
 
-        # -----------------------------------------------------------
+        # -----------------------
         # 4) DEDUPLICATION
-        # -----------------------------------------------------------
+        # -----------------------
         log_dedup = _phase_logger(base_logger, "deduplication")
 
         # In "concatenate" mode there is no LSDB collection root; skip dedup entirely.
@@ -1500,9 +1488,9 @@ def main(
             # Next phase runs below:
             start_consolidate = True
 
-    # ---------------------------------------------------------------
+    # -----------------------
     # 5) CONSOLIDATION / EXPORT
-    # ---------------------------------------------------------------
+    # -----------------------
     log_cons = _phase_logger(base_logger, "consolidation")
     log_cons.info(
         "START consolidation: staging artifacts into process dir (base_dir=%s)",
@@ -1702,7 +1690,9 @@ def main(
         log_cons.error("FAILED to update process_info: %s\n%s", e, _tb.format_exc())
         raise
 
-    # ----------------- PUBLISH STEP -----------------
+    # -----------------------
+    # Publish step
+    # -----------------------
     publish_logger = _phase_logger(base_logger, "register")
     publish_logger.info(
         "START publish: copying staged artifacts from process dir to out_root_and_dir (%s)",
@@ -1796,9 +1786,9 @@ def main(
     cluster.close()
 
 
-# ---------------------------------------------------------------------------
+# -----------------------
 # Helpers
-# ---------------------------------------------------------------------------
+# -----------------------
 def _pick_next_process_dir(root: str) -> str:
     """Return first non-existing 'processNNN' path under root."""
     i = 1
@@ -1810,9 +1800,9 @@ def _pick_next_process_dir(root: str) -> str:
         i += 1
 
 
-# ---------------------------------------------------------------------------
+# -----------------------
 # CLI
-# ---------------------------------------------------------------------------
+# -----------------------
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         description="Combine redshift catalogs via preparation, crossmatch (no tie-breaking), and graph-based deduplication."
@@ -1840,7 +1830,7 @@ if __name__ == "__main__":
     os.makedirs(base_dir, exist_ok=True)
 
     # Optional: echo the chosen run dir early for visibility when logs aren't wired yet
-    print(f"▶ Using run directory: {base_dir}")
+    print(f"Using run directory: {base_dir}")
 
     start_ts = time.time()
     ok = False
@@ -1855,6 +1845,6 @@ if __name__ == "__main__":
         if lg.handlers:
             logging.LoggerAdapter(lg, {"phase": "consolidation"}).info(msg)
         else:
-            print(("✅ " if ok else "❌ ") + msg)
+            print(("OK " if ok else "FAIL ") + msg)
         if not ok:
             sys.exit(1)

@@ -1,6 +1,3 @@
-# combine_redshift_dedup/packages/utils.py
-# -*- coding: utf-8 -*-
-
 """Shared utilities for CRC pipeline: logging, YAML IO, process tracking, and hooks.
 
 This module centralizes logging configuration for the whole pipeline and provides
@@ -19,10 +16,26 @@ Environment variables:
     CRC_LOG_FORCE_LOCAL_FILE: "1" forces file logging also in workers.
     CRC_LOG_FORCE_RECONFIG: "1" forces reconfiguration even if already configured
         within the same PID (useful if you need to change log_dir at runtime).
+
+Public API:
+    - ensure_crc_logger
+    - get_phase_logger
+    - log_phase
+    - start_crc_log_collector
+    - load_yml
+    - dump_yml
+    - configure_warning_handler
+    - configure_exception_hook
+    - set_global_logger
+    - get_global_logger
+    - log_and_print
 """
 
 from __future__ import annotations
 
+# -----------------------
+# Standard library
+# -----------------------
 import json
 import logging
 import os
@@ -36,21 +49,24 @@ from logging.handlers import DatagramHandler, RotatingFileHandler
 from pathlib import Path
 from typing import Any, Tuple
 
+# -----------------------
+# Third-party
+# -----------------------
 import pandas as pd  # kept for other utilities in this module
 import yaml          # kept for other utilities in this module
 
 
-# =============================================================================
+# -----------------------
 # Globals
-# =============================================================================
+# -----------------------
 
 # Single-process lock to make handler setup atomic.
 _CRC_LOG_LOCK = threading.RLock()
 
 
-# =============================================================================
+# -----------------------
 # Formatters & Filters
-# =============================================================================
+# -----------------------
 
 class CRCFormatter(logging.Formatter):
     """Formatter with microsecond timestamps and phase support.
@@ -91,9 +107,9 @@ class _OnlyCRC(logging.Filter):
         return False
 
 
-# =============================================================================
+# -----------------------
 # Logger helpers
-# =============================================================================
+# -----------------------
 
 def get_phase_logger(phase: str, base: logging.Logger | None = None) -> logging.LoggerAdapter:
     """Return a LoggerAdapter that injects `phase` into every record.
@@ -123,17 +139,17 @@ def log_phase(phase: str, step_id: str | None = None, base: logging.Logger | Non
     label = f"{step_id}" if step_id else ""
     import time as _t
     t0 = _t.time()
-    log.info("▶ START %s", label)
+    log.info("START %s", label)
     try:
         yield log
     finally:
         dt = _t.time() - t0
-        log.info("✅ END %s (%.2fs)", label, dt)
+        log.info("END %s (%.2fs)", label, dt)
 
 
-# =============================================================================
+# -----------------------
 # UDP collector (driver-side)
-# =============================================================================
+# -----------------------
 
 class _CRCUDPHandler(socketserver.BaseRequestHandler):
     """Receives JSON-encoded LogRecords and re-emits them into 'crc'."""
@@ -173,9 +189,9 @@ def start_crc_log_collector(host: str = "127.0.0.1", port: int = 19997) -> Tuple
     return server, t
 
 
-# =============================================================================
+# -----------------------
 # UDP JSON handler (worker/driver-side sender)
-# =============================================================================
+# -----------------------
 
 class _JSONDatagramHandler(DatagramHandler):
     """Sends LogRecords as JSON text to the UDP collector."""
@@ -212,9 +228,9 @@ class _JSONDatagramHandler(DatagramHandler):
         return json.dumps(d, ensure_ascii=False).encode("utf-8")
 
 
-# =============================================================================
+# -----------------------
 # Logger setup
-# =============================================================================
+# -----------------------
 
 def ensure_crc_logger(log_dir: str, level: int = logging.INFO) -> logging.Logger:
     """Ensure the unified 'crc' logger is configured exactly once per process.
@@ -359,9 +375,9 @@ def ensure_crc_logger(log_dir: str, level: int = logging.INFO) -> logging.Logger
         return logger
 
 
-# ============================================================
+# -----------------------
 # Back-compat helpers (kept minimal on purpose)
-# ============================================================
+# -----------------------
 
 
 def setup_logger(name: str = "combine_redshift_dedup", logdir: str = ".") -> logging.Logger:
@@ -382,9 +398,9 @@ def setup_logger(name: str = "combine_redshift_dedup", logdir: str = ".") -> log
     return logging.getLogger("crc")
 
 
-# ============================================================
+# -----------------------
 # Global logger access
-# ============================================================
+# -----------------------
 
 _global_logger: logging.Logger | None = None
 
@@ -421,9 +437,9 @@ def log_and_print(message: str, logger: logging.Logger) -> None:
     logger.info(message)
 
 
-# ============================================================
+# -----------------------
 # YAML utilities
-# ============================================================
+# -----------------------
 
 
 def load_yml(filepath: str) -> dict:
@@ -451,9 +467,9 @@ def dump_yml(filepath: str, content: dict, encoding: str = "utf-8") -> None:
         yaml.dump(content, f)
 
 
-# ============================================================
+# -----------------------
 # Process tracking
-# ============================================================
+# -----------------------
 
 
 def log_step(log_file: str, step_name: str) -> None:
@@ -495,9 +511,9 @@ def update_process_info(process_info: dict, process_info_path: str, key: str, va
     dump_yml(process_info_path, process_info)
 
 
-# ============================================================
+# -----------------------
 # Error and warning handling
-# ============================================================
+# -----------------------
 
 
 def configure_warning_handler(logger: logging.Logger) -> None:
@@ -535,6 +551,6 @@ def configure_exception_hook(logger: logging.Logger, process_info: dict, process
             update_process_info(process_info, process_info_path, "status", "Failed")
             update_process_info(process_info, process_info_path, "end_time", str(pd.Timestamp.now()))
         except Exception as e:
-            logger.warning(f"⚠️ Could not update process.yml after failure: {e}")
+            logger.warning(f"Could not update process.yml after failure: {e}")
 
     sys.excepthook = handle_exception

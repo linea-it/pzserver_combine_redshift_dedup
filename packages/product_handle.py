@@ -1,29 +1,44 @@
-# combine_redshift_dedup/packages/product_handle.py
+"""File ingestion helpers for CRC products.
 
-from pathlib import Path
-import io
+Provides a unified interface to read Parquet/CSV/HDF5/FITS/plain-text files
+and return Dask DataFrames with normalized dtypes.
+
+Public API:
+    - ProductHandle
+"""
+
+# -----------------------
+# Standard library
+# -----------------------
 import csv
+import io
 import json
+from pathlib import Path
+
+# -----------------------
+# Third-party
+# -----------------------
+import dask.dataframe as dd
 import numpy as np
 import pandas as pd
-import dask.dataframe as dd
+import pyarrow as pa
+import pyarrow.parquet as pq
 import tables_io
 from astropy.table import Table
 
-import pyarrow as pa
-import pyarrow.parquet as pq
+__all__ = ["ProductHandle"]
 
 
-# ============================================================
+# -----------------------
 # Constants
-# ============================================================
+# -----------------------
 # NA tokens normalized to pd.NA after decoding from bytes/text
 _NA_TOKENS = {"", "na", "nan", "null", "none", "<na>"}
 
 
-# ============================================================
-# Reader: Unified handle + format-specific readers
-# ============================================================
+# -----------------------
+# Reader: unified handle + format-specific readers
+# -----------------------
 class ProductHandle:
     """Unified interface to read Parquet/CSV/HDF5/FITS/plain text into a Dask DataFrame."""
 
@@ -31,7 +46,7 @@ class ProductHandle:
         """Initialize.
 
         Args:
-          filepath: Path to a data file.
+            filepath: Path to a data file.
         """
         self.filepath = Path(filepath)
 
@@ -50,9 +65,9 @@ class ProductHandle:
         self.has_header = True
         self.column_names = None
 
-    # -----------------------------
+    # -----------------------
     # Public API
-    # -----------------------------
+    # -----------------------
     def to_ddf(self):
         """Read the file and return a Dask DataFrame."""
         if self.base_ext == ".parquet":
@@ -103,9 +118,9 @@ class ProductHandle:
         else:
             raise ValueError(f"Unsupported file extension: {self.filepath}")
 
-    # -----------------------------
+    # -----------------------
     # CSV helpers
-    # -----------------------------
+    # -----------------------
     def _inspect_csv(self):
         """Detect delimiter/header using robust heuristics."""
         with open(self.filepath, "rb") as fb:
@@ -151,9 +166,9 @@ class ProductHandle:
             self.has_header = False
             self.column_names = [f"col_{i}" for i in range(df_head.shape[1] if not df_head.empty else 0)]
 
-    # -----------------------------
+    # -----------------------
     # FITS reader (+ postprocess)
-    # -----------------------------
+    # -----------------------
     def _read_fits_to_ddf(self):
         """Read FITS to Dask DataFrame with nullable semantics preserved."""
         table = Table.read(self.filepath)
@@ -187,9 +202,9 @@ class ProductHandle:
 
         return ddf
 
-    # -----------------------------
+    # -----------------------
     # HDF5 reader (+ postprocess)
-    # -----------------------------
+    # -----------------------
     def _read_hdf5_to_ddf(self):
         """Read HDF5 to Dask DataFrame via tables_io with dtype normalization."""
         df = tables_io.read(self.filepath, tables_io.types.PD_DATAFRAME)
@@ -197,9 +212,9 @@ class ProductHandle:
         return dd.from_pandas(df, npartitions=1)
 
 
-# ============================================================
+# -----------------------
 # Reader helpers (CSV + decode/normalize + astropy conversions)
-# ============================================================
+# -----------------------
 def _string_bool_to_boolean(series: pd.Series) -> pd.Series:
     """Convert 'true'/'false'/NA to pandas BooleanDtype without evaluating NA."""
     s = series.astype("string")
@@ -401,7 +416,7 @@ def _normalize_after_read(df: pd.DataFrame, *, source: str) -> pd.DataFrame:
     for c in df.columns:
         s = df[c]
 
-        # Case 1: bytes-like → decode
+        # Case 1: bytes-like -> decode
         was_bytes = _is_fixed_bytes(s) or _is_object_bytes_series(s)
         if was_bytes:
             decoded = _decode_byteslike_to_string(s, encoding=text_encoding, errors="replace")
@@ -411,7 +426,7 @@ def _normalize_after_read(df: pd.DataFrame, *, source: str) -> pd.DataFrame:
                 df[c] = decoded
             continue
 
-        # Case 2: string-like → normalize NA tokens and strict boolean text
+        # Case 2: string-like -> normalize NA tokens and strict boolean text
         if pd.api.types.is_string_dtype(s):
             s_norm = _normalize_na_tokens_to_pdna(s.astype("string"))
             if _looks_like_bool_text(s_norm):
@@ -436,7 +451,7 @@ def _astropy_table_to_pandas_nullable(table: Table) -> pd.DataFrame:
         col = table[name]
         has_mask = hasattr(col, "mask")
 
-        # FITS LOGICAL → pandas nullable boolean with NA preserved
+        # FITS LOGICAL -> pandas nullable boolean with NA preserved
         if getattr(col.dtype, "kind", None) == "b":
             s = pd.Series(col.astype(object))
             if has_mask:
@@ -465,9 +480,9 @@ def _astropy_table_to_pandas_nullable(table: Table) -> pd.DataFrame:
     return pd.DataFrame(out)
 
 
-# ============================================================
+# -----------------------
 # Writer helpers (fixed-bytes encoders + sanitizers)
-# ============================================================
+# -----------------------
 def _to_fixed_bytes(series: pd.Series, safety_cap: int = 1 << 16, *, encoding: str = "utf-8", errors: str = "replace") -> pd.Series:
     """Convert string-like series to fixed-width NumPy bytes (|S{N})."""
     def _to_text(x):
@@ -656,14 +671,22 @@ def _sanitize_for_fits(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-# ============================================================
+# -----------------------
 # Save API (Parquet/CSV/HDF5/FITS) + placement of writer helpers
-# ============================================================
+# -----------------------
 def save_dataframe(df, output_path, format_):
     """Save DataFrame to disk in the requested format.
 
     Parquet: write via PyArrow directly.
     CSV/HDF5/FITS: sanitize dtypes for compatibility.
+
+    Args:
+        df: Input pandas DataFrame.
+        output_path: Path without extension.
+        format_: Output format (parquet, csv, hdf5, fits).
+
+    Raises:
+        ValueError: If the output format is unsupported.
     """
     ext = format_.lower()
 

@@ -1,34 +1,32 @@
 from __future__ import annotations
 
-"""
-Self-crossmatch and `compared_to` updater for CRC.
+"""Self-crossmatch and `compared_to` updater for CRC.
 
 Runs a self spatial crossmatch on a single catalog, updates its `compared_to`
 column (adds neighbor CRD_IDs, removes self-links), and writes a new on-disk
 collection `<artifact>_auto`.
 
 Public API:
-    - crossmatch_auto(...)
+    - crossmatch_auto
 """
 
-# =======================
+# -----------------------
 # Standard library
-# =======================
+# -----------------------
+import logging
 import os
 import time
-import logging
-from typing import Dict, Iterable, List, Set, Optional
+from typing import Dict, Iterable, List, Set
 
-# =======================
+# -----------------------
 # Third-party
-# =======================
+# -----------------------
 import numpy as np
 import pandas as pd
-import lsdb  # LSDB Catalog type / open_catalog
 
-# =======================
+# -----------------------
 # Project
-# =======================
+# -----------------------
 from specz import DTYPE_STR  # Arrow-backed string dtype
 from utils import get_phase_logger
 
@@ -37,20 +35,24 @@ __all__ = ["crossmatch_auto"]
 LOGGER_NAME = "crc.crossmatch_auto"  # child of the central pipeline logger
 
 
-# =======================
+# -----------------------
 # Logging helper
-# =======================
+# -----------------------
 def _get_logger() -> logging.LoggerAdapter:
-    """Return a phase-aware logger ('crc.crossmatch_auto' with phase='automatch')."""
+    """Return a phase-aware logger ('crc.crossmatch_auto' with phase='automatch').
+
+    Returns:
+        logging.LoggerAdapter: Logger with phase context.
+    """
     base = logging.getLogger(LOGGER_NAME)
     base.setLevel(logging.NOTSET)
     base.propagate = True
     return get_phase_logger("automatch", base)
 
 
-# =======================
+# -----------------------
 # Internal helpers
-# =======================
+# -----------------------
 def _adjacency_from_pairs(
     left_ids: pd.Series, right_ids: pd.Series
 ) -> Dict[str, Set[str]]:
@@ -61,7 +63,7 @@ def _adjacency_from_pairs(
         right_ids: Series with right CRD_IDs.
 
     Returns:
-        Dict mapping CRD_ID -> set of neighbor CRD_IDs.
+        Dict[str, Set[str]]: Mapping of CRD_ID to neighbor ids.
     """
     adj: Dict[str, Set[str]] = {}
     L = left_ids.astype(str).to_numpy(dtype=object, copy=False)
@@ -89,19 +91,21 @@ def _merge_compared_to_partition(
 
     Args:
         part: Partition dataframe.
-        pairs_adj: Mapping CRD_ID -> iterable of neighbors.
+        pairs_adj: Mapping CRD_ID -> iterable of neighbor ids.
 
     Returns:
-        Partition with updated `compared_to` (Arrow string dtype), NA if empty.
+        pd.DataFrame: Partition with updated `compared_to` (NA if empty).
     """
     p = part.copy()
 
     if "compared_to" not in p.columns:
-        p["compared_to"] = pd.Series(pd.NA, index=p.index)
+        p["compared_to"] = pd.Series(
+            pd.array([pd.NA] * len(p), dtype=DTYPE_STR), index=p.index
+        )
 
     crd_list: List[str] = p["CRD_ID"].astype(str).tolist()
 
-    def _norm_token(x) -> Optional[str]:
+    def _norm_token(x) -> str | None:
         if pd.isna(x):
             return None
         if isinstance(x, (bool, np.bool_)):
@@ -153,7 +157,7 @@ def _self_xmatch_pairs(
     n_neighbors: int,
     logger: logging.LoggerAdapter,
 ) -> Dict[str, Set[str]]:
-    """Run a self-crossmatch and return an adjacency (CRD_ID -> neighbors).
+    """Run a self-crossmatch and return an adjacency (CRD_ID -> neighbor ids).
 
     Args:
         catalog: LSDB catalog to crossmatch with itself.
@@ -162,7 +166,7 @@ def _self_xmatch_pairs(
         logger: Logger.
 
     Returns:
-        Mapping CRD_ID -> set of neighbor CRD_IDs.
+        Dict[str, Set[str]]: Mapping of CRD_ID to neighbor ids.
     """
     logger.info(
         'Running self-crossmatch: radius=%.3f" n_neighbors=%d',
@@ -202,24 +206,34 @@ def _update_compared_to(
 
     Args:
         catalog: LSDB catalog.
-        pairs_adj: Mapping CRD_ID -> neighbors.
+        pairs_adj: Mapping CRD_ID -> neighbor ids.
 
     Returns:
-        New catalog object with updated `compared_to`.
+        lsdb.catalog.Catalog: Catalog with updated `compared_to`.
     """
-    meta_pdf = catalog._ddf._meta.copy()
-    if "compared_to" not in meta_pdf.columns:
-        meta_pdf = meta_pdf.assign(compared_to=pd.Series(pd.array([], dtype=DTYPE_STR)))
-    else:
-        meta_pdf["compared_to"] = pd.Series(pd.array([], dtype=DTYPE_STR))
+    meta_pdf = _ensure_compared_to_meta(catalog._ddf._meta)
     return catalog.map_partitions(
         _merge_compared_to_partition, pairs_adj, meta=meta_pdf
     )
 
 
-# =======================
+def _ensure_compared_to_meta(meta_df: pd.DataFrame) -> pd.DataFrame:
+    """Return a meta dataframe with a typed `compared_to` column.
+
+    Args:
+        meta_df: Input meta dataframe.
+
+    Returns:
+        pd.DataFrame: Meta dataframe with `compared_to` set to string dtype.
+    """
+    meta = meta_df.copy()
+    meta["compared_to"] = pd.Series(pd.array([], dtype=DTYPE_STR))
+    return meta
+
+
+# -----------------------
 # Public API
-# =======================
+# -----------------------
 def crossmatch_auto(
     catalog: "lsdb.catalog.Catalog",
     collection_path: str,
@@ -236,7 +250,7 @@ def crossmatch_auto(
             `crossmatch_n_neighbors`.
 
     Returns:
-        Path to the new collection `<artifact>_auto`.
+        str: Path to the new collection `<artifact>_auto`.
     """
     logger = _get_logger()
     if not collection_path:
@@ -264,7 +278,7 @@ def crossmatch_auto(
         collection_path_auto,
     )
 
-    # 1) Self-crossmatch → adjacency (CRD_ID -> neighbors)
+    # 1) Self-crossmatch -> adjacency (CRD_ID -> neighbor ids)
     pairs_adj = _self_xmatch_pairs(catalog, radius, k, logger)
 
     # 2) Update `compared_to`
