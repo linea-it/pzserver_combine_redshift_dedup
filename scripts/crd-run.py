@@ -1567,6 +1567,16 @@ def main(
                     log_cons.info("tie_result counts pre-filter: %s", tie_counts)
                 except Exception as e_counts:
                     log_cons.debug("Could not compute tie_result counts: %s", e_counts)
+                try:
+                    idx_unique = bool(df_final.index.is_unique)
+                    n_dupes = int(df_final.index.duplicated().sum())
+                    log_cons.info(
+                        "df_final index unique=%s duplicated=%d",
+                        idx_unique,
+                        n_dupes,
+                    )
+                except Exception as e_idx:
+                    log_cons.debug("Could not inspect df_final index: %s", e_idx)
 
                 gid = None
                 has_1 = has_2 = has_3 = None
@@ -1647,15 +1657,21 @@ def main(
                         if n_groups > 0:
                             rng = np.random.default_rng()
                             seed = int(rng.integers(0, 2**32 - 1))
+                            cand_pos = np.flatnonzero(
+                                cand_mask.to_numpy(dtype=bool, na_value=False)
+                            )
+                            cand_gid = gid.iloc[cand_pos]
+                            cand_df = pd.DataFrame(
+                                {"pos": cand_pos, "group_id": cand_gid.to_numpy()}
+                            )
                             winners = (
-                                df_final.loc[cand_mask]
-                                .groupby("group_id", dropna=True)
-                                .sample(n=1, random_state=seed)
-                                .index
+                                cand_df.groupby("group_id", dropna=True)
+                                .sample(n=1, random_state=seed)["pos"]
+                                .to_numpy()
                             )
                             tie_num = tie_num.copy()
-                            tie_num.loc[cand_mask] = 0
-                            tie_num.loc[winners] = 1
+                            tie_num.iloc[cand_pos] = 0
+                            tie_num.iloc[winners] = 1
                             df_final = df_final.assign(tie_result=tie_num)
                             log_cons.info(
                                 "Draw-one resolved %d absolute-tie groups.", n_groups
