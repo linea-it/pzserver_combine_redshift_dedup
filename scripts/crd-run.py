@@ -1533,6 +1533,11 @@ def main(
             raise
 
     if combine_mode == "concatenate_and_remove_duplicates":
+        if not df_final.index.is_unique:
+            log_cons.info(
+                "Resetting df_final index (duplicates found) before tie filtering."
+            )
+            df_final = df_final.reset_index(drop=True)
         tie_treatment_option = (
             str(param_config.get("tie_treatment_option", "remove_all") or "remove_all")
             .strip()
