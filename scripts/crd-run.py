@@ -30,6 +30,7 @@ import logging
 import dask
 import dask.dataframe as dd
 import pandas as pd
+import numpy as np
 from dask.distributed import Client, as_completed, performance_report
 import lsdb
 
@@ -1532,13 +1533,26 @@ def main(
             raise
 
     if combine_mode == "concatenate_and_remove_duplicates":
+        tie_treatment_option = (
+            str(param_config.get("tie_treatment_option", "remove_all") or "remove_all")
+            .strip()
+            .lower()
+        )
+        if tie_treatment_option not in {"remove_all", "keep_all", "draw_one"}:
+            log_cons.warning(
+                "Unknown tie_treatment_option=%s; defaulting to remove_all.",
+                tie_treatment_option,
+            )
+            tie_treatment_option = "remove_all"
+
         if "tie_result" not in df_final.columns:
             log_cons.warning(
                 "Expected 'tie_result' column for removal mode, but it is missing; skipping row filter."
             )
         else:
             log_cons.info(
-                "Filtering winners by tie_result == 1 (remove-duplicates mode)"
+                "tie_treatment_option=%s (remove-duplicates mode)",
+                tie_treatment_option,
             )
             try:
                 tie_num = (
@@ -1546,17 +1560,76 @@ def main(
                     .fillna(0)
                     .astype("int8")
                 )
-                keep_mask = tie_num.eq(1)
+                if tie_treatment_option == "draw_one":
+                    if "group_id" not in df_final.columns:
+                        log_cons.warning(
+                            "tie_treatment_option=draw_one requires group_id; falling back to remove_all."
+                        )
+                        tie_treatment_option = "remove_all"
+                    else:
+                        gid = df_final["group_id"]
+                        has_1 = (
+                            tie_num.eq(1)
+                            .groupby(gid, dropna=True)
+                            .transform("any")
+                            .fillna(False)
+                        )
+                        has_2 = (
+                            tie_num.eq(2)
+                            .groupby(gid, dropna=True)
+                            .transform("any")
+                            .fillna(False)
+                        )
+                        has_3 = (
+                            tie_num.eq(3)
+                            .groupby(gid, dropna=True)
+                            .transform("any")
+                            .fillna(False)
+                        )
+                        draw_group = (~has_1) & (~has_3) & has_2
+                        cand_mask = draw_group & tie_num.eq(2) & gid.notna()
+                        n_groups = int(gid[cand_mask].nunique())
+                        if n_groups > 0:
+                            rng = np.random.default_rng()
+                            seed = int(rng.integers(0, 2**32 - 1))
+                            winners = (
+                                df_final.loc[cand_mask]
+                                .groupby("group_id", dropna=True)
+                                .sample(n=1, random_state=seed)
+                                .index
+                            )
+                            tie_num = tie_num.copy()
+                            tie_num.loc[cand_mask] = 0
+                            tie_num.loc[winners] = 1
+                            df_final = df_final.assign(tie_result=tie_num)
+                            log_cons.info(
+                                "Draw-one resolved %d absolute-tie groups.", n_groups
+                            )
+                        else:
+                            log_cons.info("Draw-one found no absolute-tie groups.")
+
+                if tie_treatment_option == "keep_all":
+                    keep_mask = tie_num.isin([1, 2])
+                    log_cons.info(
+                        "Filtering rows by tie_result in {1,2} (keep_all)."
+                    )
+                else:
+                    keep_mask = tie_num.eq(1)
+                    log_cons.info(
+                        "Filtering winners by tie_result == 1 (%s).",
+                        tie_treatment_option,
+                    )
                 kept = int(keep_mask.sum())
                 dropped = int(len(df_final) - kept)
                 df_final = df_final.loc[keep_mask].copy()
                 log_cons.info(
-                    "Removed duplicates by tie_result==1: kept=%d rows, dropped=%d rows.",
+                    "Removed duplicates by tie_treatment_option=%s: kept=%d rows, dropped=%d rows.",
+                    tie_treatment_option,
                     kept,
                     dropped,
                 )
             except Exception as e:
-                log_cons.error("FAILED while filtering by tie_result==1: %s", e)
+                log_cons.error("FAILED while filtering by tie_treatment_option: %s", e)
                 raise
 
     if USE_ARROW_TYPES:
