@@ -1,40 +1,39 @@
 from __future__ import annotations
 
-"""
-Crossmatch and `compared_to` updater for CRC.
+"""Crossmatch and `compared_to` updater for CRC.
 
 This module supports two export backends, controlled by the hardcoded flag
-`USE_LSDB_CONCAT`:
+`USE_LSDB_CONCAT`.
 
-- If USE_LSDB_CONCAT = True (default):
-    Performs the crossmatch; updates `compared_to`; normalizes dtypes on each
-    input catalog independently; concatenates at the LSDB catalog level;
-    writes a HATS collection via `to_hats`; returns the collection path.
-    (No intermediate Parquet.)
-
-- If USE_LSDB_CONCAT = False:
-    Performs the crossmatch; updates `compared_to`; extracts the underlying
-    Dask DataFrames (`._ddf`) from the two catalogs; concatenates them with
-    Dask; normalizes dtypes on the merged Dask DataFrame (expected, prev, expr);
-    writes a Parquet dataset; imports it as an LSDB collection (margin-first
-    retry); returns the collection path.
+Backends:
+    - If USE_LSDB_CONCAT = True (default): run the crossmatch, update
+      `compared_to`, normalize dtypes per catalog, concatenate at the LSDB
+      catalog level, and persist a HATS collection via `write_catalog`.
+      Returns the collection path.
+    - If USE_LSDB_CONCAT = False: run the crossmatch, update `compared_to`,
+      concatenate the underlying Dask DataFrames, normalize dtypes on the
+      merged Dask DataFrame (expected, prev, expr), write a Parquet dataset,
+      and import it as an LSDB collection (margin-first retry).
+      Returns the collection path.
 
 Public API:
-    - crossmatch_tiebreak(...)
-    - crossmatch_tiebreak_safe(...)
+    - crossmatch_tiebreak
+    - crossmatch_tiebreak_safe
 """
 
 # -----------------------
 # Backend switch
 # -----------------------
-USE_LSDB_CONCAT: bool = False  # Toggle behavior as described above.
+USE_LSDB_CONCAT: bool = True  # Toggle behavior as described above.
+BACKEND_LSDB_LABEL = "LSDB+write_catalog"
+BACKEND_LEGACY_LABEL = "Dask+Parquet+import"
 
 # -----------------------
 # Standard library
 # -----------------------
+import logging
 import os
 import time
-import logging
 from typing import Dict, Iterable, List, Set
 
 # -----------------------
@@ -43,8 +42,6 @@ from typing import Dict, Iterable, List, Set
 import numpy as np
 import pandas as pd
 import dask.dataframe as dd
-import lsdb
-
 # -----------------------
 # Project
 # -----------------------
@@ -69,11 +66,24 @@ LOGGER_NAME = "crc.crossmatch"  # child of the pipeline root logger ("crc")
 # Centralized logging
 # -----------------------
 def _get_logger() -> logging.LoggerAdapter:
-    """Return a phase-aware logger ('crc.crossmatch' with phase='crossmatch')."""
+    """Return a phase-aware logger ('crc.crossmatch' with phase='crossmatch').
+
+    Returns:
+        logging.LoggerAdapter: Logger with phase context.
+    """
     base = logging.getLogger(LOGGER_NAME)
     base.setLevel(logging.NOTSET)
     base.propagate = True
     return get_phase_logger("crossmatch", base)
+
+
+def _get_backend_label() -> str:
+    """Return the active backend label for logging.
+
+    Returns:
+        str: Active backend label.
+    """
+    return BACKEND_LSDB_LABEL if USE_LSDB_CONCAT else BACKEND_LEGACY_LABEL
 
 
 # -----------------------
@@ -82,7 +92,15 @@ def _get_logger() -> logging.LoggerAdapter:
 def _adjacency_from_pairs(
     left_ids: pd.Series, right_ids: pd.Series
 ) -> Dict[str, Set[str]]:
-    """Build an undirected adjacency from left-right crossmatch pairs."""
+    """Build an undirected adjacency from left-right crossmatch pairs.
+
+    Args:
+        left_ids: Left-side CRD_ID values.
+        right_ids: Right-side CRD_ID values.
+
+    Returns:
+        Dict[str, Set[str]]: Mapping of node id to neighbor ids.
+    """
     adj: Dict[str, Set[str]] = {}
     L = left_ids.astype(str).to_numpy(dtype=object, copy=False)
     R = right_ids.astype(str).to_numpy(dtype=object, copy=False)
@@ -105,7 +123,15 @@ def _merge_compared_to_partition(
     part: pd.DataFrame,
     pairs_adj: Dict[str, Iterable[str]],
 ) -> pd.DataFrame:
-    """Partition-wise update of `compared_to` by unioning existing entries with new pairs."""
+    """Update `compared_to` on a pandas partition.
+
+    Args:
+        part: Partition to update.
+        pairs_adj: Mapping of CRD_ID to neighbor ids from crossmatch pairs.
+
+    Returns:
+        pd.DataFrame: Updated partition with merged `compared_to`.
+    """
     p = part.copy()
 
     if "compared_to" not in p.columns:
@@ -158,6 +184,66 @@ def _merge_compared_to_partition(
     return p
 
 
+def _ensure_compared_to_meta(meta_df: pd.DataFrame) -> pd.DataFrame:
+    """Return a meta dataframe with a typed `compared_to` column.
+
+    Args:
+        meta_df: Input meta dataframe.
+
+    Returns:
+        pd.DataFrame: Meta dataframe with `compared_to` set to string dtype.
+    """
+    meta = meta_df.copy()
+    meta["compared_to"] = pd.Series(pd.array([], dtype=DTYPE_STR))
+    return meta
+
+
+def _ensure_compared_to_column(part: pd.DataFrame) -> pd.DataFrame:
+    """Ensure the partition has a `compared_to` column with string dtype.
+
+    Args:
+        part: Partition to update.
+
+    Returns:
+        pd.DataFrame: Partition with `compared_to` added when missing.
+    """
+    if "compared_to" not in part.columns:
+        part = part.copy()
+        part["compared_to"] = pd.Series(
+            pd.array([pd.NA] * len(part), dtype=DTYPE_STR),
+            index=part.index,
+        )
+    return part
+
+
+def _get_expr_schema_hints(translation_config: dict | None) -> dict:
+    """Return expr column schema hints from translation_config.
+
+    Args:
+        translation_config: Optional configuration containing expr hints.
+
+    Returns:
+        dict: Expr column schema hints or empty dict.
+    """
+    cfg = translation_config or {}
+    if cfg.get("save_expr_columns") is False:
+        return {}
+    return cfg.get("expr_column_schema", {}) or {}
+
+
+def _ensure_compared_to(cat):
+    """Ensure `compared_to` exists on a catalog for map_partitions.
+
+    Args:
+        cat: Catalog with a Dask backing dataframe.
+
+    Returns:
+        Catalog-like object: Catalog with `compared_to` ensured.
+    """
+    meta = _ensure_compared_to_meta(cat._ddf._meta)
+    return cat.map_partitions(_ensure_compared_to_column, meta=meta)
+
+
 # -----------------------
 # Dtype normalization helpers (catalog-level, via map_partitions)
 # -----------------------
@@ -184,7 +270,16 @@ def _cast_partition_expected(
     expected_types: dict,
     schema_hints: dict | None,
 ) -> pd.DataFrame:
-    """Cast/add core columns and optional expr columns on a pandas partition."""
+    """Cast/add core columns and optional expr columns on a pandas partition.
+
+    Args:
+        part: Partition to cast.
+        expected_types: Mapping of column name to expected dtype.
+        schema_hints: Optional mapping of extra columns to type hints.
+
+    Returns:
+        pd.DataFrame: Partition with normalized dtypes.
+    """
     df = part.copy()
 
     # 1) Core expected types
@@ -289,13 +384,16 @@ def _cast_partition_expected(
 
 
 def _normalize_catalog_dtypes(cat, translation_config: dict | None):
-    """Return a new catalog with normalized dtypes (lazy, via map_partitions)."""
-    cfg = translation_config or {}
-    schema_hints_local = (
-        {}
-        if (cfg.get("save_expr_columns") is False)
-        else (cfg.get("expr_column_schema", {}) or {})
-    )
+    """Return a new catalog with normalized dtypes (lazy, via map_partitions).
+
+    Args:
+        cat: LSDB catalog with a Dask backing dataframe.
+        translation_config: Optional config containing expr column hints.
+
+    Returns:
+        Catalog-like object: Catalog with normalized dtypes.
+    """
+    schema_hints_local = _get_expr_schema_hints(translation_config)
 
     # Build meta by running the caster on the meta dataframe
     meta_in = cat._ddf._meta
@@ -312,8 +410,16 @@ def _coerce_optional_columns_for_import(
     df: dd.DataFrame,
     schema_hints: dict | None = None,
 ) -> dd.DataFrame:
-    """Coerce prev/expr columns to consistent Arrow dtypes across partitions."""
-    # 1) Prev columns → normalize
+    """Coerce prev/expr columns to consistent Arrow dtypes across partitions.
+
+    Args:
+        df: Dask DataFrame to normalize.
+        schema_hints: Optional mapping of expr column name to type.
+
+    Returns:
+        dd.DataFrame: Updated Dask DataFrame.
+    """
+    # 1) Prev columns -> normalize
     prev_like_str = [c for c in df.columns if str(c).startswith("CRD_ID_prev")]
     prev_like_str += [c for c in df.columns if str(c).startswith("compared_to_prev")]
     for c in prev_like_str:
@@ -379,7 +485,15 @@ def _coerce_optional_columns_for_import(
 def _normalize_ddf_expected_types(
     merged: dd.DataFrame, translation_config: dict | None
 ) -> dd.DataFrame:
-    """Normalize expected/core columns on a merged Dask DataFrame prior to import."""
+    """Normalize expected/core columns on a merged Dask DataFrame prior to import.
+
+    Args:
+        merged: Merged Dask DataFrame.
+        translation_config: Optional config containing expr column hints.
+
+    Returns:
+        dd.DataFrame: Updated Dask DataFrame.
+    """
     expected_types = dict(_EXPECTED_TYPES)
 
     # 1) Core expected types
@@ -423,12 +537,7 @@ def _normalize_ddf_expected_types(
             pass
 
     # 2) Prev/expr columns
-    cfg = translation_config or {}
-    schema_hints_local = (
-        {}
-        if (cfg.get("save_expr_columns") is False)
-        else (cfg.get("expr_column_schema", {}) or {})
-    )
+    schema_hints_local = _get_expr_schema_hints(translation_config)
     merged = _coerce_optional_columns_for_import(merged, schema_hints_local)
 
     return merged
@@ -440,7 +549,13 @@ def _normalize_ddf_expected_types(
 def _safe_to_parquet(ddf, path, **kwargs) -> None:
     """Write Parquet robustly for both plain Dask and nested_dask frames.
 
-    Tries engine="pyarrow"; if backend already sets an engine, retries without it.
+    Args:
+        ddf: Dask DataFrame (or compatible) to write.
+        path: Output path for Parquet dataset.
+        **kwargs: Extra options forwarded to `to_parquet`.
+
+    Raises:
+        TypeError: If `to_parquet` fails for unexpected reasons.
     """
     try:
         ddf.to_parquet(path, engine="pyarrow", **kwargs)
@@ -451,9 +566,142 @@ def _safe_to_parquet(ddf, path, **kwargs) -> None:
             raise
 
 
-# =======================
+def _concat_and_write_hats(
+    left_cat,
+    right_cat,
+    temp_dir: str,
+    step,
+    translation_config: dict | None,
+    *,
+    logger: logging.LoggerAdapter | None = None,
+    log_steps: bool = False,
+) -> str:
+    """Normalize, concatenate catalogs, and write a HATS collection.
+
+    Args:
+        left_cat: Left-side catalog.
+        right_cat: Right-side catalog.
+        temp_dir: Output directory.
+        step: Pipeline step identifier.
+        translation_config: Optional configuration with schema hints.
+        logger: Optional logger for progress messages.
+        log_steps: Whether to log intermediate steps and durations.
+
+    Returns:
+        str: Output collection path.
+    """
+    if log_steps:
+        t0 = time.time()
+    left_fixed = _normalize_catalog_dtypes(left_cat, translation_config)
+    right_fixed = _normalize_catalog_dtypes(right_cat, translation_config)
+    if log_steps and logger is not None:
+        logger.info(
+            "Per-catalog type normalization attached (lazy) (%.2fs)",
+            time.time() - t0,
+        )
+
+    if log_steps:
+        t0 = time.time()
+    merged_cat = left_fixed.concat(
+        right_fixed,
+        ignore_empty_margins=True,
+    )
+    if log_steps and logger is not None:
+        logger.info("LSDB concat done (%.2fs)", time.time() - t0)
+
+    if log_steps:
+        t0 = time.time()
+    collection_path = os.path.join(temp_dir, f"merged_step{step}_hats")
+    merged_cat.write_catalog(
+        collection_path,
+        as_collection=True,
+        overwrite=True,
+    )
+    if log_steps and logger is not None:
+        logger.info(
+            "Write complete (write_catalog): step=%s path=%s (%.2fs)",
+            step,
+            collection_path,
+            time.time() - t0,
+        )
+    return collection_path
+
+
+def _concat_parquet_import(
+    left_cat,
+    right_cat,
+    temp_dir: str,
+    logs_dir: str,
+    step,
+    client,
+    translation_config: dict | None,
+    *,
+    logger: logging.LoggerAdapter | None = None,
+    log_steps: bool = False,
+) -> str:
+    """Concatenate catalogs via Dask, write Parquet, then import a collection.
+
+    Args:
+        left_cat: Left-side catalog.
+        right_cat: Right-side catalog.
+        temp_dir: Output directory for Parquet.
+        logs_dir: Path for import logs.
+        step: Pipeline step identifier.
+        client: Dask client used by the importer.
+        translation_config: Optional configuration with schema hints.
+        logger: Optional logger for progress messages.
+        log_steps: Whether to log intermediate steps and durations.
+
+    Returns:
+        str: Output collection path.
+    """
+    if log_steps:
+        t0 = time.time()
+    lddf = left_cat._ddf
+    rddf = right_cat._ddf
+    merged = dd.concat([lddf, rddf])
+    merged = _normalize_ddf_expected_types(merged, translation_config)
+    if log_steps and logger is not None:
+        logger.info(
+            "Dask concat + type normalization (lazy) (%.2fs)",
+            time.time() - t0,
+        )
+
+    if log_steps:
+        t0 = time.time()
+    merged_path = os.path.join(temp_dir, f"merged_step{step}")
+    _safe_to_parquet(merged, merged_path, write_index=False)
+    if log_steps and logger is not None:
+        logger.info("Parquet written: path=%s (%.2fs)", merged_path, time.time() - t0)
+
+    if log_steps:
+        t0 = time.time()
+    schema_hints_local = _get_expr_schema_hints(translation_config)
+    schema_hints = schema_hints_local if schema_hints_local else None
+
+    if log_steps and logger is not None:
+        logger.info("START import_collection: step=%s parquet=%s", step, merged_path)
+    collection_path = _build_collection_with_retry(
+        parquet_path=merged_path,
+        logs_dir=logs_dir,
+        logger=logger,
+        client=client,
+        try_margin=True,
+        schema_hints=schema_hints,
+    )
+    if log_steps and logger is not None:
+        logger.info(
+            "END import_collection: step=%s path=%s (%.2fs)",
+            step,
+            collection_path,
+            time.time() - t0,
+        )
+    return collection_path
+
+
+# -----------------------
 # Main logic
-# =======================
+# -----------------------
 def crossmatch_tiebreak(
     left_cat,
     right_cat,
@@ -464,9 +712,20 @@ def crossmatch_tiebreak(
     translation_config: dict | None = None,
     do_import: bool = True,  # kept for signature compatibility; ignored in both paths (we always return a collection)
 ) -> str:
-    """Crossmatch two catalogs, update `compared_to`, then export to a collection.
+    """Crossmatch two catalogs, update `compared_to`, then export a collection.
 
-    Behavior depends on USE_LSDB_CONCAT (see module docstring).
+    Args:
+        left_cat: Left-side catalog.
+        right_cat: Right-side catalog.
+        logs_dir: Path for import logs (legacy path).
+        temp_dir: Path for temporary output (Parquet or HATS).
+        step: Pipeline step identifier.
+        client: Dask client (legacy import path).
+        translation_config: Optional configuration with crossmatch and schema hints.
+        do_import: Ignored; kept for signature compatibility.
+
+    Returns:
+        str: Output collection path.
     """
     logger = _get_logger()
     t0_all = time.time()
@@ -480,7 +739,7 @@ def crossmatch_tiebreak(
         step,
         radius,
         k,
-        ("LSDB+to_hats" if USE_LSDB_CONCAT else "Dask+Parquet+import"),
+        _get_backend_label(),
     )
 
     # 1) Spatial crossmatch
@@ -490,6 +749,7 @@ def crossmatch_tiebreak(
         radius_arcsec=radius,
         n_neighbors=k,
         suffixes=("left", "right"),
+        suffix_method='all_columns',
     )
     logger.info("Crossmatch done (%.2fs)", time.time() - t0)
 
@@ -519,16 +779,8 @@ def crossmatch_tiebreak(
     # 3) Update `compared_to` on both catalogs, partition-wise
     t0 = time.time()
 
-    def _ensure_meta(meta_df: pd.DataFrame) -> pd.DataFrame:
-        m = meta_df.copy()
-        if "compared_to" not in m.columns:
-            m["compared_to"] = pd.Series(pd.array([], dtype=DTYPE_STR))
-        else:
-            m["compared_to"] = pd.Series(pd.array([], dtype=DTYPE_STR))
-        return m
-
-    left_meta = _ensure_meta(left_cat._ddf._meta)
-    right_meta = _ensure_meta(right_cat._ddf._meta)
+    left_meta = _ensure_compared_to_meta(left_cat._ddf._meta)
+    right_meta = _ensure_compared_to_meta(right_cat._ddf._meta)
 
     left_updated = left_cat.map_partitions(
         _merge_compared_to_partition, pairs_adj, meta=left_meta
@@ -538,34 +790,16 @@ def crossmatch_tiebreak(
     )
     logger.info("Compared_to updated on partitions (%.2fs)", time.time() - t0)
 
-    # 4) Export path A: LSDB concat + to_hats
+    # 4) Export path A: LSDB concat + write_catalog
     if USE_LSDB_CONCAT:
-        # Normalize dtypes on each catalog independently *before* concat
-        t0 = time.time()
-        left_fixed = _normalize_catalog_dtypes(left_updated, translation_config)
-        right_fixed = _normalize_catalog_dtypes(right_updated, translation_config)
-        logger.info(
-            "Per-catalog type normalization attached (lazy) (%.2fs)", time.time() - t0
-        )
-
-        # Concatenate at the LSDB catalog level
-        t0 = time.time()
-        merged_cat = left_fixed.concat(right_fixed)
-        logger.info("LSDB concat done (%.2fs)", time.time() - t0)
-
-        # Persist as HATS collection and return path
-        t0 = time.time()
-        collection_path = os.path.join(temp_dir, f"merged_step{step}_hats")
-        merged_cat.to_hats(
-            collection_path,
-            as_collection=True,
-            overwrite=True,
-        )
-        logger.info(
-            "Write complete (to_hats): step=%s path=%s (%.2fs)",
+        collection_path = _concat_and_write_hats(
+            left_updated,
+            right_updated,
+            temp_dir,
             step,
-            collection_path,
-            time.time() - t0,
+            translation_config,
+            logger=logger,
+            log_steps=True,
         )
         logger.info(
             "END crossmatch_update_compared_to: step=%s links=%d nodes=%d output=%s (%.2fs)",
@@ -578,42 +812,16 @@ def crossmatch_tiebreak(
         return collection_path
 
     # 4b) Export path B (legacy): Dask concat + Parquet + import
-    t0 = time.time()
-    lddf = left_updated._ddf
-    rddf = right_updated._ddf
-    merged = dd.concat([lddf, rddf])
-    merged = _normalize_ddf_expected_types(merged, translation_config)
-    logger.info("Dask concat + type normalization (lazy) (%.2fs)", time.time() - t0)
-
-    t0 = time.time()
-    merged_path = os.path.join(temp_dir, f"merged_step{step}")
-    _safe_to_parquet(merged, merged_path, write_index=False)
-    logger.info("Parquet written: path=%s (%.2fs)", merged_path, time.time() - t0)
-
-    # Import as Collection (margin-first, with optional schema hints)
-    t0 = time.time()
-    cfg = translation_config or {}
-    schema_hints_local = (
-        {}
-        if (cfg.get("save_expr_columns") is False)
-        else (cfg.get("expr_column_schema", {}) or {})
-    )
-    schema_hints = schema_hints_local if schema_hints_local else None
-
-    logger.info("START import_collection: step=%s parquet=%s", step, merged_path)
-    collection_path = _build_collection_with_retry(
-        parquet_path=merged_path,
-        logs_dir=logs_dir,
-        logger=logger,
-        client=client,
-        try_margin=True,
-        schema_hints=schema_hints,
-    )
-    logger.info(
-        "END import_collection: step=%s path=%s (%.2fs)",
+    collection_path = _concat_parquet_import(
+        left_updated,
+        right_updated,
+        temp_dir,
+        logs_dir,
         step,
-        collection_path,
-        time.time() - t0,
+        client,
+        translation_config,
+        logger=logger,
+        log_steps=True,
     )
     logger.info(
         "END crossmatch_update_compared_to: step=%s links=%d nodes=%d output=%s (%.2fs)",
@@ -636,19 +844,36 @@ def crossmatch_tiebreak_safe(
     translation_config: dict | None = None,
     do_import: bool = True,  # ignored; always returns a collection
 ) -> str:
-    """Wrapper around `crossmatch_tiebreak` with graceful empty-overlap fallback.
+    """Wrap `crossmatch_tiebreak` with a graceful empty-overlap fallback.
 
     If the crossmatch yields a known empty-overlap condition:
-      - LSDB path: ensure `compared_to`, normalize each catalog, LSDB concat,
-        `to_hats`, return collection.
-      - Legacy path: ensure `compared_to`, Dask concat, Parquet, import, return collection.
+        - LSDB path: ensure `compared_to`, normalize each catalog, LSDB concat,
+          `write_catalog`, return collection.
+        - Legacy path: ensure `compared_to`, Dask concat, Parquet, import,
+          return collection.
+
+    Args:
+        left_cat: Left-side catalog.
+        right_cat: Right-side catalog.
+        logs_dir: Path for import logs (legacy path).
+        temp_dir: Path for temporary output (Parquet or HATS).
+        step: Pipeline step identifier.
+        client: Dask client (legacy import path).
+        translation_config: Optional configuration with schema hints.
+        do_import: Ignored; kept for signature compatibility.
+
+    Returns:
+        str: Output collection path.
+
+    Raises:
+        RuntimeError: Re-raised if not an empty-overlap condition.
     """
     logger = _get_logger()
     t0_safe = time.time()
     logger.info(
         "START xmatch_update_compared_to_safe: step=%s backend=%s",
         step,
-        ("LSDB+to_hats" if USE_LSDB_CONCAT else "Dask+Parquet+import"),
+        _get_backend_label(),
     )
 
     try:
@@ -676,36 +901,16 @@ def crossmatch_tiebreak_safe(
             logger.info("Empty-overlap condition detected: %s", msg)
 
             # Ensure `compared_to` exists on both sides
-            def _ensure_compared_to(cat):
-                def _ensure_col(part: pd.DataFrame) -> pd.DataFrame:
-                    if "compared_to" not in part.columns:
-                        part = part.copy()
-                        part["compared_to"] = pd.Series(
-                            pd.array([pd.NA] * len(part), dtype=DTYPE_STR),
-                            index=part.index,
-                        )
-                    return part
-
-                meta = cat._ddf._meta.copy()
-                if "compared_to" not in meta.columns:
-                    meta["compared_to"] = pd.Series(pd.array([], dtype=DTYPE_STR))
-                return cat.map_partitions(_ensure_col, meta=meta)
-
             left_ready = _ensure_compared_to(left_cat)
             right_ready = _ensure_compared_to(right_cat)
 
             if USE_LSDB_CONCAT:
-                # Normalize dtypes per catalog, then LSDB concat and write HATS
-                left_fixed = _normalize_catalog_dtypes(left_ready, translation_config)
-                right_fixed = _normalize_catalog_dtypes(right_ready, translation_config)
-
-                merged_cat = left_fixed.concat(right_fixed)
-
-                collection_path = os.path.join(temp_dir, f"merged_step{step}_hats")
-                merged_cat.to_hats(
-                    collection_path,
-                    as_collection=True,
-                    overwrite=True,
+                collection_path = _concat_and_write_hats(
+                    left_ready,
+                    right_ready,
+                    temp_dir,
+                    step,
+                    translation_config,
                 )
                 logger.info(
                     "END xmatch_update_compared_to_safe: step=%s output=%s (%.2fs)",
@@ -715,30 +920,15 @@ def crossmatch_tiebreak_safe(
                 )
                 return collection_path
 
-            # Legacy path: Dask concat + Parquet + import
-            lddf = left_ready._ddf
-            rddf = right_ready._ddf
-            merged = dd.concat([lddf, rddf])
-            merged = _normalize_ddf_expected_types(merged, translation_config)
-
-            merged_path = os.path.join(temp_dir, f"merged_step{step}")
-            _safe_to_parquet(merged, merged_path, write_index=False)
-
-            cfg = translation_config or {}
-            schema_hints_local = (
-                {}
-                if (cfg.get("save_expr_columns") is False)
-                else (cfg.get("expr_column_schema", {}) or {})
-            )
-            schema_hints = schema_hints_local if schema_hints_local else None
-
-            collection_path = _build_collection_with_retry(
-                parquet_path=merged_path,
-                logs_dir=logs_dir,
+            collection_path = _concat_parquet_import(
+                left_ready,
+                right_ready,
+                temp_dir,
+                logs_dir,
+                step,
+                client,
+                translation_config,
                 logger=logger,
-                client=client,
-                try_margin=True,
-                schema_hints=schema_hints,
             )
             logger.info(
                 "END xmatch_update_compared_to_safe: step=%s output=%s (%.2fs)",

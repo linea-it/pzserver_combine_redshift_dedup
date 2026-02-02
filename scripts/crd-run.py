@@ -1,81 +1,70 @@
-# -*- coding: utf-8 -*-
-"""
-Orchestrates the CRC pipeline (prepare → auto-crossmatch → crossmatch → deduplicate → export).
+"""Orchestrate the CRC pipeline (prepare -> auto-crossmatch -> crossmatch -> deduplicate -> export).
+
+Public API:
+    - main
 """
 
 from __future__ import annotations
 
-# =====================
-# Built-in
-# =====================
+# -----------------------
+# Standard library
+# -----------------------
 import argparse
 import glob
 import json
 import os
-import re
 import shutil
 import sys
 import time
 import warnings
-from pathlib import Path
 from typing import Any
-from datetime import datetime
 
-# =====================
+# -----------------------
 # Logging
-# =====================
+# -----------------------
 import logging
-from logging.handlers import (
-    RotatingFileHandler,
-)  # noqa: F401  (kept for back-compat imports)
 
-# =====================
+# -----------------------
 # Third-party
-# =====================
+# -----------------------
 import dask
 import dask.dataframe as dd
 import pandas as pd
+import numpy as np
 from dask.distributed import Client, as_completed, performance_report
 import lsdb
 
-# =====================
+# -----------------------
 # Project
-# =====================
+# -----------------------
 from crossmatch_auto import crossmatch_auto
 from crossmatch_cross import crossmatch_tiebreak_safe
-from deduplication import (
-    deduplicate_pandas,
-    run_dedup_with_lsdb_map_partitions,
-)
+from deduplication import run_dedup_with_lsdb_map_partitions
 from executor import get_executor
 from product_handle import save_dataframe
-from specz import (
-    prepare_catalog,
-    USE_ARROW_TYPES,
-    DTYPE_STR,
-)
+from specz import DTYPE_STR, USE_ARROW_TYPES, prepare_catalog
 from utils import (
     configure_exception_hook,
     configure_warning_handler,
     dump_yml,
+    ensure_crc_logger,
     load_yml,
     log_step,
     read_completed_steps,
-    update_process_info,
-    ensure_crc_logger,
     start_crc_log_collector,
+    update_process_info,
 )
 
+__all__ = ["main"]
 
-# ---------------------------------------------------------------------------
+
+# -----------------------
 # Helpers
-# ---------------------------------------------------------------------------
+# -----------------------
 def _log_remote_future_exception(
     lg: logging.LoggerAdapter, fut, msg_prefix: str, extra: dict | None = None
 ) -> None:
-    """
-    Logs the remote (worker-side) traceback carried by a Dask Future.
-    """
+    """Log the remote (worker-side) traceback carried by a Dask Future."""
     import traceback as _tb
 
     try:
@@ -290,9 +279,9 @@ def _cleanup_previous_step(
             _rm_path(coll)
 
 
-# ---------------------------------------------------------------------------
+# -----------------------
 # Worker task for auto self-crossmatch
-# ---------------------------------------------------------------------------
+# -----------------------
 
 
 def _auto_cross_worker(info: dict, logs_dir: str, translation_config: dict):
@@ -311,9 +300,9 @@ def _auto_cross_worker(info: dict, logs_dir: str, translation_config: dict):
     return out_auto
 
 
-# ---------------------------------------------------------------------------
+# -----------------------
 # Parallel crossmatch worker
-# ---------------------------------------------------------------------------
+# -----------------------
 def _xmatch_worker(
     left_collection_path: str,
     right_collection_path: str,
@@ -346,9 +335,9 @@ def _xmatch_worker(
     )
 
 
-# ---------------------------------------------------------------------------
+# -----------------------
 # Cleanup for crossmatch tournment
-# ---------------------------------------------------------------------------
+# -----------------------
 def _cleanup_inputs_of_merge(
     left_root: str,
     right_root: str,
@@ -382,9 +371,9 @@ def _cleanup_inputs_of_merge(
             _rm_root(rroot)
 
 
-# ---------------------------------------------------------------------------
+# -----------------------
 # Publish / copy helpers
-# ---------------------------------------------------------------------------
+# -----------------------
 def _copy_file(src: str, dst: str, lg: logging.LoggerAdapter) -> None:
     os.makedirs(os.path.dirname(dst) or ".", exist_ok=True)
     abs_src, abs_dst = os.path.abspath(src), os.path.abspath(dst)
@@ -394,7 +383,7 @@ def _copy_file(src: str, dst: str, lg: logging.LoggerAdapter) -> None:
     try:
         if os.path.exists(abs_dst):
             os.remove(abs_dst)
-        os.link(abs_src, abs_dst)  # hardlink se for mesmo FS
+        os.link(abs_src, abs_dst)  # hardlink when on the same filesystem
         lg.info("Hardlinked: %s -> %s", abs_src, abs_dst)
     except Exception:
         shutil.copy2(abs_src, abs_dst)
@@ -402,7 +391,7 @@ def _copy_file(src: str, dst: str, lg: logging.LoggerAdapter) -> None:
 
 
 def _copy_tree(src_dir: str, dst_dir: str, lg: logging.LoggerAdapter) -> None:
-    """Copia recursivamente src_dir → dst_dir, sobrescrevendo se existir."""
+    """Copy src_dir -> dst_dir recursively, overwriting if present."""
     if not os.path.isdir(src_dir):
         lg.warning("Source dir not found for copy: %s", src_dir)
         return
@@ -436,9 +425,9 @@ def _snapshot_shell_logs(
             _copy_file(path, os.path.join(dst_dir, os.path.basename(path)), lg)
 
 
-# ---------------------------------------------------------------------------
+# -----------------------
 # Core pipeline
-# ---------------------------------------------------------------------------
+# -----------------------
 
 
 def main(
@@ -651,9 +640,9 @@ def main(
     global_report_path = os.path.join(logs_dir, "main_dask_report.html")
     with performance_report(filename=global_report_path):
 
-        # ---------------------------------------------------------------
+        # -----------------------
         # 1) PREPARATION
-        # ---------------------------------------------------------------
+        # -----------------------
         log_prep = _phase_logger(base_logger, "preparation")
         log_prep.info(
             "START preparation: reading inputs and building prepared collections (temp=%s)",
@@ -768,9 +757,9 @@ def main(
 
         log_prep.info("END preparation: finished prepared collections")
 
-        # ---------------------------------------------------------------
+        # -----------------------
         # Detect pipeline state for resume (is crossmatch already done?)
-        # ---------------------------------------------------------------
+        # -----------------------
         final_step = len(prepared_info) - 1
         resume_log = os.path.join(temp_dir, "process_resume.log")
 
@@ -798,128 +787,176 @@ def main(
             _recover_final_collection_path() if crossmatch_already_done else None
         )
 
-        # ---------------------------------------------------------------
+        # -----------------------
         # 2) AUTO MATCH (self crossmatch over each prepared)
-        # ---------------------------------------------------------------
+        # -----------------------
         log_auto = _phase_logger(base_logger, "automatch")
         if combine_mode in (
             "concatenate_and_mark_duplicates",
             "concatenate_and_remove_duplicates",
         ):
 
-            if crossmatch_already_done:
-                # No auto needed: merges already completed and merged_step{final} present
-                log_auto.info(
-                    "Skip automatch: crossmatch already finalized (merged_step%d exists or logged).",
-                    final_step,
-                )
-            else:
-                log_auto.info(
-                    "START automatch: generating *_hats_auto from prepared collections"
-                )
-
-                queue_auto: list[dict] = []
-                already_done = 0
-                for info in prepared_info:
-                    tag = f"autocross_{info['internal_name']}"
-                    hats_auto = info["prepared_path"] + "_hats_auto"
-                    if tag in completed and os.path.isdir(hats_auto):
-                        already_done += 1
-                    else:
-                        queue_auto.append(info)
-
-                max_inflight_auto = int(param_config.get("auto_cross_max_inflight", 5))
-                log_auto.info(
-                    "Concurrency for auto-cross: max_inflight=%d, to_run=%d, already_done=%d",
-                    max_inflight_auto,
-                    len(queue_auto),
-                    already_done,
-                )
-
-                if queue_auto:
-                    ac2 = as_completed()
-                    inflight2 = []
-                    fut2info: dict[Any, dict] = {}
-
-                    def _submit_auto(i: dict):
-                        return client.submit(
-                            _auto_cross_worker,
-                            i,
-                            logs_dir,
-                            translation_config,
-                            pure=False,
-                        )
-
-                    for _ in range(min(max_inflight_auto, len(queue_auto))):
-                        info = queue_auto.pop(0)
-                        fut = _submit_auto(info)
-                        ac2.add(fut)
-                        inflight2.append(fut)
-                        fut2info[fut] = info
-
-                    auto_done_now = 0
-                    while inflight2:
-                        fut = next(ac2)
-                        inflight2.remove(fut)
-                        try:
-                            out_path = fut.result()
-                        except Exception:
-                            _log_remote_future_exception(
-                                log_auto,
-                                fut,
-                                msg_prefix=f"AUTO-CROSS FAILED for {info_err['internal_name']} (remote worker traceback)",
-                            )
-                            raise
-
-                        info_ok = fut2info.pop(fut)
-                        info_ok["collection_path"] = out_path
-                        log_step(resume_log, f"autocross_{info_ok['internal_name']}")
-                        auto_done_now += 1
-                        if queue_auto:
-                            nxt = queue_auto.pop(0)
-                            fut2 = _submit_auto(nxt)
-                            ac2.add(fut2)
-                            inflight2.append(fut2)
-                            fut2info[fut2] = nxt
-
+            try:
+                if crossmatch_already_done:
+                    # No auto needed: merges already completed and merged_step{final} present
                     log_auto.info(
-                        "Auto crossmatch completed for %d catalogs (re/computed)",
-                        auto_done_now,
+                        "Skip automatch: crossmatch already finalized (merged_step%d exists or logged).",
+                        final_step,
                     )
                 else:
                     log_auto.info(
-                        "No auto-crossmatch needed (all *_hats_auto present)."
+                        "START automatch: generating *_hats_auto from prepared collections"
                     )
 
-                current_workers = len(client.scheduler_info().get("workers", {}))
-                log_auto.info(
-                    "WORKERS STILL RUNNING=%d.",
-                    current_workers,
-                )
+                    queue_auto: list[dict] = []
+                    already_done = 0
+                    for info in prepared_info:
+                        tag = f"autocross_{info['internal_name']}"
+                        hats_auto = info["prepared_path"] + "_hats_auto"
+                        if tag in completed and os.path.isdir(hats_auto):
+                            already_done += 1
+                        else:
+                            queue_auto.append(info)
 
-                log_auto.info("END automatch: all *_hats_auto guaranteed on disk")
+                    max_inflight_auto = int(param_config.get("auto_cross_max_inflight", 5))
+                    log_auto.info(
+                        "Concurrency for auto-cross: max_inflight=%d, to_run=%d, already_done=%d",
+                        max_inflight_auto,
+                        len(queue_auto),
+                        already_done,
+                    )
 
-            # -----------------------------------------------------------
-            # Enforcement of *_hats_auto ONLY if we are still going to run crossmatch
-            # -----------------------------------------------------------
-            if not crossmatch_already_done:
-                missing_auto: list[str] = []
-                for info in prepared_info:
-                    hats_auto = info["prepared_path"] + "_hats_auto"
-                    if os.path.isdir(hats_auto):
-                        info["collection_path"] = hats_auto
+                    if queue_auto:
+                        ac2 = as_completed()
+                        inflight2 = []
+                        fut2info: dict[Any, dict] = {}
+
+                        def _submit_auto(i: dict):
+                            """Submit a self-crossmatch job for a single prepared catalog."""
+                            log_auto.info(
+                                "Submitting AUTO-CROSS for %s | prepared_path=%s",
+                                i.get("internal_name"),
+                                i.get("prepared_path"),
+                            )
+                            return client.submit(
+                                _auto_cross_worker,
+                                i,
+                                logs_dir,
+                                translation_config,
+                                pure=False,
+                            )
+
+                        # Prime the inflight queue
+                        for _ in range(min(max_inflight_auto, len(queue_auto))):
+                            info = queue_auto.pop(0)
+                            fut = _submit_auto(info)
+                            ac2.add(fut)
+                            inflight2.append(fut)
+                            fut2info[fut] = info
+
+                        auto_done_now = 0
+                        while inflight2:
+                            fut = next(ac2)
+                            inflight2.remove(fut)
+
+                            # Retrieve context for this future (for logging on both success and failure)
+                            info_ctx = fut2info.get(fut, {})
+                            name = info_ctx.get("internal_name", "<unknown>")
+                            prepared_path = info_ctx.get("prepared_path", "<unknown>")
+
+                            try:
+                                out_path = fut.result()
+                            except Exception:
+                                # Log remote worker traceback with context and re-raise
+                                _log_remote_future_exception(
+                                    log_auto,
+                                    fut,
+                                    msg_prefix=(
+                                        f"AUTO-CROSS FAILED for {name} | prepared_path={prepared_path}"
+                                    ),
+                                    extra={"phase": "automatch"},
+                                )
+                                raise
+
+                            info_ok = fut2info.pop(fut, info_ctx)
+                            info_ok["collection_path"] = out_path
+
+                            log_auto.info(
+                                "AUTO-CROSS OK: %s | prepared_path=%s | output=%s",
+                                info_ok.get("internal_name"),
+                                info_ok.get("prepared_path"),
+                                out_path,
+                            )
+
+                            log_step(resume_log, f"autocross_{info_ok['internal_name']}")
+                            auto_done_now += 1
+
+                            # Keep pipeline saturated
+                            if queue_auto:
+                                nxt = queue_auto.pop(0)
+                                fut2 = _submit_auto(nxt)
+                                ac2.add(fut2)
+                                inflight2.append(fut2)
+                                fut2info[fut2] = nxt
+
+                        log_auto.info(
+                            "Auto crossmatch completed for %d catalogs (re/computed)",
+                            auto_done_now,
+                        )
                     else:
-                        missing_auto.append(info["internal_name"])
-                if missing_auto:
-                    raise FileNotFoundError(
-                        "Auto-cross outputs still missing after recovery: "
-                        + ", ".join(missing_auto)
-                        + ". Check disk/permissions/logs."
+                        log_auto.info(
+                            "No auto-crossmatch needed (all *_hats_auto present)."
+                        )
+
+                    current_workers = len(client.scheduler_info().get("workers", {}))
+                    log_auto.info(
+                        "WORKERS STILL RUNNING=%d.",
+                        current_workers,
                     )
 
-        # ---------------------------------------------------------------
+                    log_auto.info("END automatch: all *_hats_auto guaranteed on disk")
+
+                # -----------------------
+                # Enforcement of *_hats_auto ONLY if we are still going to run crossmatch
+                # -----------------------
+                if not crossmatch_already_done:
+                    missing_auto: list[str] = []
+                    for info in prepared_info:
+                        hats_auto = info["prepared_path"] + "_hats_auto"
+                        if os.path.isdir(hats_auto):
+                            info["collection_path"] = hats_auto
+                        else:
+                            missing_auto.append(info["internal_name"])
+
+                    if missing_auto:
+                        # Detailed diagnostic before raising
+                        log_auto.error(
+                            "AUTO-CROSS VERIFICATION FAILED. Missing %d outputs. Expected *_hats_auto roots:",
+                            len(missing_auto),
+                        )
+                        for info in prepared_info:
+                            hats_auto = info["prepared_path"] + "_hats_auto"
+                            log_auto.error(
+                                " - %s | expected=%s | exists=%s",
+                                info["internal_name"],
+                                hats_auto,
+                                os.path.isdir(hats_auto),
+                            )
+
+                        raise FileNotFoundError(
+                            "Auto-cross outputs still missing after recovery: "
+                            + ", ".join(missing_auto)
+                            + ". Check disk/permissions/logs."
+                        )
+
+            except Exception:
+                # Catch ANY driver-side error in the automatch phase
+                log_auto.exception("Automatch FAILED with an unhandled error")
+                raise
+
+        # -----------------------
         # 3) CROSSMATCH (parallel tournament; no per-step resume)
-        # ---------------------------------------------------------------
+        # -----------------------
         log_cross = _phase_logger(base_logger, "crossmatch")
         log_cross.info(
             "START crossmatch (parallel tournament) over prepared *_hats_auto"
@@ -1113,7 +1150,7 @@ def main(
                                         raw_out,
                                     )
 
-                                # Delicate cleanup — delete only the two inputs consumed by this merge
+                                # Delicate cleanup - delete only the two inputs consumed by this merge
                                 if delete_temp_files:
                                     try:
                                         _cleanup_inputs_of_merge(
@@ -1193,9 +1230,9 @@ def main(
             cluster.close()
             return
 
-        # -----------------------------------------------------------
+        # -----------------------
         # 4) DEDUPLICATION
-        # -----------------------------------------------------------
+        # -----------------------
         log_dedup = _phase_logger(base_logger, "deduplication")
 
         # In "concatenate" mode there is no LSDB collection root; skip dedup entirely.
@@ -1452,9 +1489,9 @@ def main(
             # Next phase runs below:
             start_consolidate = True
 
-    # ---------------------------------------------------------------
+    # -----------------------
     # 5) CONSOLIDATION / EXPORT
-    # ---------------------------------------------------------------
+    # -----------------------
     log_cons = _phase_logger(base_logger, "consolidation")
     log_cons.info(
         "START consolidation: staging artifacts into process dir (base_dir=%s)",
@@ -1496,13 +1533,31 @@ def main(
             raise
 
     if combine_mode == "concatenate_and_remove_duplicates":
+        if not df_final.index.is_unique:
+            log_cons.info(
+                "Resetting df_final index (duplicates found) before tie filtering."
+            )
+            df_final = df_final.reset_index(drop=True)
+        tie_treatment_option = (
+            str(param_config.get("tie_treatment_option", "remove_all") or "remove_all")
+            .strip()
+            .lower()
+        )
+        if tie_treatment_option not in {"remove_all", "keep_all", "draw_one"}:
+            log_cons.warning(
+                "Unknown tie_treatment_option=%s; defaulting to remove_all.",
+                tie_treatment_option,
+            )
+            tie_treatment_option = "remove_all"
+
         if "tie_result" not in df_final.columns:
             log_cons.warning(
                 "Expected 'tie_result' column for removal mode, but it is missing; skipping row filter."
             )
         else:
             log_cons.info(
-                "Filtering winners by tie_result == 1 (remove-duplicates mode)"
+                "tie_treatment_option=%s (remove-duplicates mode)",
+                tie_treatment_option,
             )
             try:
                 tie_num = (
@@ -1510,17 +1565,147 @@ def main(
                     .fillna(0)
                     .astype("int8")
                 )
-                keep_mask = tie_num.eq(1)
+                try:
+                    tie_counts = (
+                        tie_num.value_counts(dropna=False).sort_index().to_dict()
+                    )
+                    log_cons.info("tie_result counts pre-filter: %s", tie_counts)
+                except Exception as e_counts:
+                    log_cons.debug("Could not compute tie_result counts: %s", e_counts)
+                try:
+                    idx_unique = bool(df_final.index.is_unique)
+                    n_dupes = int(df_final.index.duplicated().sum())
+                    log_cons.info(
+                        "df_final index unique=%s duplicated=%d",
+                        idx_unique,
+                        n_dupes,
+                    )
+                except Exception as e_idx:
+                    log_cons.debug("Could not inspect df_final index: %s", e_idx)
+
+                gid = None
+                has_1 = has_2 = has_3 = None
+                if "group_id" in df_final.columns:
+                    try:
+                        gid = df_final["group_id"]
+                        has_1 = (
+                            tie_num.eq(1)
+                            .groupby(gid, dropna=True)
+                            .transform("any")
+                            .fillna(False)
+                        )
+                        has_2 = (
+                            tie_num.eq(2)
+                            .groupby(gid, dropna=True)
+                            .transform("any")
+                            .fillna(False)
+                        )
+                        has_3 = (
+                            tie_num.eq(3)
+                            .groupby(gid, dropna=True)
+                            .transform("any")
+                            .fillna(False)
+                        )
+                        n_groups = int(gid.dropna().nunique())
+                        n_has_1 = int(
+                            tie_num.eq(1).groupby(gid, dropna=True).any().sum()
+                        )
+                        n_has_2 = int(
+                            tie_num.eq(2).groupby(gid, dropna=True).any().sum()
+                        )
+                        n_has_3 = int(
+                            tie_num.eq(3).groupby(gid, dropna=True).any().sum()
+                        )
+                        n_hard = int(((~has_1) & has_2).sum())
+                        log_cons.info(
+                            "tie_result group stats: total=%d has1=%d has2=%d has3=%d hard_tie=%d",
+                            n_groups,
+                            n_has_1,
+                            n_has_2,
+                            n_has_3,
+                            n_hard,
+                        )
+                    except Exception as e_grp:
+                        log_cons.debug("Could not compute group tie stats: %s", e_grp)
+                if tie_treatment_option == "draw_one":
+                    if "group_id" not in df_final.columns:
+                        log_cons.warning(
+                            "tie_treatment_option=draw_one requires group_id; falling back to remove_all."
+                        )
+                        tie_treatment_option = "remove_all"
+                    else:
+                        if gid is None:
+                            gid = df_final["group_id"]
+                        if has_1 is None or has_2 is None:
+                            has_1 = (
+                                tie_num.eq(1)
+                                .groupby(gid, dropna=True)
+                                .transform("any")
+                                .fillna(False)
+                            )
+                            has_2 = (
+                                tie_num.eq(2)
+                                .groupby(gid, dropna=True)
+                                .transform("any")
+                                .fillna(False)
+                            )
+                        if has_3 is None:
+                            has_3 = (
+                                tie_num.eq(3)
+                                .groupby(gid, dropna=True)
+                                .transform("any")
+                                .fillna(False)
+                            )
+                        draw_group = (~has_1) & has_2
+                        cand_mask = draw_group & tie_num.eq(2) & gid.notna()
+                        n_groups = int(gid[cand_mask].nunique())
+                        if n_groups > 0:
+                            rng = np.random.default_rng()
+                            seed = int(rng.integers(0, 2**32 - 1))
+                            cand_pos = np.flatnonzero(
+                                cand_mask.to_numpy(dtype=bool, na_value=False)
+                            )
+                            cand_gid = gid.iloc[cand_pos]
+                            cand_df = pd.DataFrame(
+                                {"pos": cand_pos, "group_id": cand_gid.to_numpy()}
+                            )
+                            winners = (
+                                cand_df.groupby("group_id", dropna=True)
+                                .sample(n=1, random_state=seed)["pos"]
+                                .to_numpy()
+                            )
+                            tie_num = tie_num.copy()
+                            tie_num.iloc[cand_pos] = 0
+                            tie_num.iloc[winners] = 1
+                            df_final = df_final.assign(tie_result=tie_num)
+                            log_cons.info(
+                                "Draw-one resolved %d absolute-tie groups.", n_groups
+                            )
+                        else:
+                            log_cons.info("Draw-one found no absolute-tie groups.")
+
+                if tie_treatment_option == "keep_all":
+                    keep_mask = tie_num.isin([1, 2])
+                    log_cons.info(
+                        "Filtering rows by tie_result in {1,2} (keep_all)."
+                    )
+                else:
+                    keep_mask = tie_num.eq(1)
+                    log_cons.info(
+                        "Filtering winners by tie_result == 1 (%s).",
+                        tie_treatment_option,
+                    )
                 kept = int(keep_mask.sum())
                 dropped = int(len(df_final) - kept)
                 df_final = df_final.loc[keep_mask].copy()
                 log_cons.info(
-                    "Removed duplicates by tie_result==1: kept=%d rows, dropped=%d rows.",
+                    "Removed duplicates by tie_treatment_option=%s: kept=%d rows, dropped=%d rows.",
+                    tie_treatment_option,
                     kept,
                     dropped,
                 )
             except Exception as e:
-                log_cons.error("FAILED while filtering by tie_result==1: %s", e)
+                log_cons.error("FAILED while filtering by tie_treatment_option: %s", e)
                 raise
 
     if USE_ARROW_TYPES:
@@ -1654,7 +1839,9 @@ def main(
         log_cons.error("FAILED to update process_info: %s\n%s", e, _tb.format_exc())
         raise
 
-    # ----------------- PUBLISH STEP -----------------
+    # -----------------------
+    # Publish step
+    # -----------------------
     publish_logger = _phase_logger(base_logger, "register")
     publish_logger.info(
         "START publish: copying staged artifacts from process dir to out_root_and_dir (%s)",
@@ -1748,9 +1935,9 @@ def main(
     cluster.close()
 
 
-# ---------------------------------------------------------------------------
+# -----------------------
 # Helpers
-# ---------------------------------------------------------------------------
+# -----------------------
 def _pick_next_process_dir(root: str) -> str:
     """Return first non-existing 'processNNN' path under root."""
     i = 1
@@ -1762,9 +1949,9 @@ def _pick_next_process_dir(root: str) -> str:
         i += 1
 
 
-# ---------------------------------------------------------------------------
+# -----------------------
 # CLI
-# ---------------------------------------------------------------------------
+# -----------------------
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         description="Combine redshift catalogs via preparation, crossmatch (no tie-breaking), and graph-based deduplication."
@@ -1792,7 +1979,7 @@ if __name__ == "__main__":
     os.makedirs(base_dir, exist_ok=True)
 
     # Optional: echo the chosen run dir early for visibility when logs aren't wired yet
-    print(f"▶ Using run directory: {base_dir}")
+    print(f"Using run directory: {base_dir}")
 
     start_ts = time.time()
     ok = False
@@ -1807,6 +1994,6 @@ if __name__ == "__main__":
         if lg.handlers:
             logging.LoggerAdapter(lg, {"phase": "consolidation"}).info(msg)
         else:
-            print(("✅ " if ok else "❌ ") + msg)
+            print(("OK " if ok else "FAIL ") + msg)
         if not ok:
             sys.exit(1)

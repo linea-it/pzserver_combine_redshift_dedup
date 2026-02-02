@@ -5,15 +5,17 @@ channels:
 dependencies:
   - python
   - pip
-  - dask
-  - distributed
-  - dask-jobqueue         
+  - dask==2025.3.0
+  - distributed==2025.3.0
+  - dask-jobqueue==0.9.0
   - pandas
+  - cdshealpix==0.7.2
+  - nested-pandas==0.6.6
   - numpy
   - pyyaml
-  - lsdb=0.6.5
-  - hats=0.6.5
-  - hats-import=0.6.5
-  - tables-io                  
+  - lsdb=0.7.3
+  - hats=0.7.3
+  - hats-import=0.7.3
+  - tables-io
   - h5py
 

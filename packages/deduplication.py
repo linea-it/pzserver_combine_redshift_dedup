@@ -1,44 +1,56 @@
-# deduplication.py
 from __future__ import annotations
 
 """Deduplication for Combine Redshift Catalogs (CRC).
 
-Builds a graph from ``CRD_ID <-> compared_to`` and resolves duplicates with
+Builds a graph from `CRD_ID <-> compared_to` and resolves duplicates with
 configurable priorities. Provides a pandas solver (`deduplicate_pandas`) and a
 Dask/LSDB per-partition driver (`run_dedup_with_lsdb_map_partitions`).
 """
 
-# ==============================
-# Imports
-# ==============================
+# -----------------------
+# Standard library
+# -----------------------
 from typing import (
     Iterable,
     Mapping,
     Sequence,
-    Optional,
     Dict,
     List,
-    Tuple,
 )
 import math
 import logging
 import time
 
-import dask
+# -----------------------
+# Third-party
+# -----------------------
 import numpy as np
 import pandas as pd
 import dask.dataframe as dd
 
+# -----------------------
+# Project
+# -----------------------
 from utils import get_phase_logger, log_phase
 
-# ==============================
+from lsdb.dask.merge_catalog_functions import (
+    concat_align_catalogs,
+    get_aligned_pixels_from_alignment,
+    align_and_apply,
+)
+
+# -----------------------
 # Logger (child of 'crc')
-# ==============================
+# -----------------------
 LOGGER_NAME = "crc.dedup"
 
 
 def _base_logger() -> logging.Logger:
-    """Return the child base logger ('crc.dedup')."""
+    """Return the child base logger ('crc.dedup').
+
+    Returns:
+        logging.Logger: Base logger.
+    """
     lg = logging.getLogger(LOGGER_NAME)
     lg.setLevel(logging.NOTSET)
     lg.propagate = True
@@ -46,22 +58,26 @@ def _base_logger() -> logging.Logger:
 
 
 def _phase_logger() -> logging.LoggerAdapter:
-    """Return a phase-aware logger (phase='deduplication')."""
+    """Return a phase-aware logger (phase='deduplication').
+
+    Returns:
+        logging.LoggerAdapter: Logger with phase context.
+    """
     return get_phase_logger("deduplication", _base_logger())
 
 
-# ==============================
+# -----------------------
 # Public API
-# ==============================
+# -----------------------
 __all__ = [
     "deduplicate_pandas",
     "run_dedup_with_lsdb_map_partitions",
 ]
 
 
-# ==============================
+# -----------------------
 # Small helpers: string/parse/score
-# ==============================
+# -----------------------
 def _canon_id_series(s: pd.Series) -> pd.Series:
     """Return canonical CRD-like IDs (strip and remove zero-width chars)."""
     t = s.astype("string")
@@ -100,9 +116,9 @@ def _score_instrument_type(
     return series.map(_score_one).astype("int64")
 
 
-# ==============================
+# -----------------------
 # Graph building
-# ==============================
+# -----------------------
 def _split_cmp_vectorized(s: pd.Series) -> pd.Series:
     """Split `compared_to` values vectorially into lists."""
     s = s.astype("string")
@@ -114,7 +130,7 @@ def _build_edges_fast(
     *,
     crd_col: str,
     compared_col: str,
-    zf_series: Optional[pd.Series] = None,
+    zf_series: pd.Series | None = None,
     edge_log: bool = False,
 ):
     """Build undirected edges among NON-STAR rows (vectorized path).
@@ -313,9 +329,9 @@ def _build_edges_pdf(df: pd.DataFrame, crd_col: str, compared_col: str) -> pd.Da
     return out
 
 
-# ==============================
-# Δz clustering + CC fallback (DSU)
-# ==============================
+# -----------------------
+# Dz clustering + CC fallback (DSU)
+# -----------------------
 def _collapse_within_dz(
     mask: pd.Series,
     gid: pd.Series,
@@ -442,9 +458,9 @@ def _connected_components(
     return out
 
 
-# ==============================
+# -----------------------
 # 1-D safe helpers (numeric)
-# ==============================
+# -----------------------
 def _series_1d_from(df_or_series) -> pd.Series:
     """Ensure a 1-D Series when a duplicated-name selection returns a DataFrame."""
     if isinstance(df_or_series, pd.DataFrame):
@@ -458,9 +474,9 @@ def _to_numeric(series_like) -> pd.Series:
     return pd.to_numeric(s, errors="coerce")
 
 
-# ==============================
-# Guard Restore
-# ==============================
+# -----------------------
+# Guard restore
+# -----------------------
 def _only_star_neighbors_series(col: pd.Series, star_ids: set[str]) -> pd.Series:
     """True when compared_to is non-empty AND all neighbors are star IDs."""
     s = col.astype("string").fillna("")
@@ -477,15 +493,27 @@ def _apply_guard_restore_local(
     *,
     crd_col: str,
     compared_col: str,
-    zf_series: Optional[pd.Series],
+    zf_series: pd.Series | None,
     tie_col: str,
     tie_col_orig: str,
 ) -> pd.DataFrame:
-    """Restore original tie_result for non-stars with empty compared_to OR only-star neighbors."""
-    if tie_col_orig not in df.columns:
-        return df  # nada a restaurar
+    """Restore original tie_result for non-stars with empty/only-star neighbors.
 
-    # estrela (fixos em 3) e máscara de compared_to vazio
+    Args:
+        df: Partition dataframe.
+        crd_col: Name of the CRD_ID column.
+        compared_col: Name of the compared_to column.
+        zf_series: Optional z_flag series.
+        tie_col: Name of the tie_result column.
+        tie_col_orig: Name of the original tie_result column.
+
+    Returns:
+        pd.DataFrame: Updated dataframe.
+    """
+    if tie_col_orig not in df.columns:
+        return df  # nothing to restore
+
+    # Stars (fixed as 3) and empty compared_to mask.
     is_star = pd.Series(False, index=df.index)
     if zf_series is not None:
         is_star = pd.to_numeric(zf_series, errors="coerce").eq(6.0)
@@ -493,33 +521,33 @@ def _apply_guard_restore_local(
     cmp_str = df[compared_col].astype("string")
     cmp_empty = cmp_str.isna() | cmp_str.str.strip().eq("")
 
-    # conjunto local de IDs de estrelas nesta partição/view
+    # Local set of star IDs for this partition/view.
     star_ids = set(df.loc[is_star, crd_col].astype("string"))
 
     only_star_neighbors = (~cmp_empty) & _only_star_neighbors_series(
         df[compared_col], star_ids
     )
 
-    # regra pedida:
-    # - se objeto é estrela -> mantém tie=3 (não restaurar)
-    # - se não-estrela e (compared_to vazio OU só vizinhos estrelas) -> restaurar
+    # Rule:
+    # - if star -> keep tie=3 (do not restore)
+    # - if non-star and (empty compared_to OR only star neighbors) -> restore
     restore_mask = (~is_star) & (cmp_empty | only_star_neighbors)
 
-    # aplica restauração
+    # Apply restoration.
     df.loc[restore_mask, tie_col] = df.loc[restore_mask, tie_col_orig]
     return df
 
 
-# ==============================
+# -----------------------
 # Per-group resolver
-# ==============================
+# -----------------------
 def _resolve_group(
     g: pd.DataFrame,
     *,
     crd_col: str,
     z_col: str,
     tiebreaking_priority: Sequence[str],
-    instrument_type_priority: Optional[Mapping[str, int]],
+    instrument_type_priority: Mapping[str, int] | None,
     delta_z_threshold: float,
 ) -> pd.DataFrame:
     """Resolve ties within a single connected component."""
@@ -583,13 +611,13 @@ def _resolve_group(
     return out[[crd, "tie_result_new"]]
 
 
-# ==============================
+# -----------------------
 # Public API (Pandas)
-# ==============================
+# -----------------------
 def deduplicate_pandas(
     df: pd.DataFrame,
     tiebreaking_priority: Sequence[str],
-    instrument_type_priority: Optional[Mapping[str, int]] = None,
+    instrument_type_priority: Mapping[str, int] | None = None,
     *,
     delta_z_threshold: float | int | None = 0.0,
     crd_col: str = "CRD_ID",
@@ -599,9 +627,27 @@ def deduplicate_pandas(
     edge_log: bool = False,
     partition_tag: str | None = None,
     logger: logging.LoggerAdapter | None = None,
-    group_col: str | None = None,  # <<< NOVO
+    group_col: str | None = None,  # new
 ) -> pd.DataFrame:
-    """Graph-based deduplication with vectorized per-group resolution and Δz collapse."""
+    """Graph-based deduplication with vectorized per-group resolution and Dz collapse.
+
+    Args:
+        df: Input dataframe.
+        tiebreaking_priority: Ordered columns for tie-breaking.
+        instrument_type_priority: Optional map for instrument type scoring.
+        delta_z_threshold: Dz threshold for final disambiguation.
+        crd_col: Name of the ID column.
+        compared_col: Name of the neighbors column.
+        z_col: Name of the redshift column.
+        tie_col: Name of the output tie-result column.
+        edge_log: Enable edge diagnostics during graph build.
+        partition_tag: Optional tag to namespace logs.
+        logger: Optional logger for diagnostics.
+        group_col: If set, emit component/group id in this column.
+
+    Returns:
+        pd.DataFrame: Deduplicated dataframe with tie labels.
+    """
     required = {crd_col, compared_col, z_col}
     missing = sorted(required - set(df.columns))
     if missing:
@@ -619,11 +665,11 @@ def deduplicate_pandas(
     crd_norm = out[crd_col].astype("string").str.strip()
     priority_set = set(tiebreaking_priority)
 
-    zf_series: Optional[pd.Series] = None
+    zf_series: pd.Series | None = None
     if "z_flag_homogenized" in out.columns:
         zf_series = _to_numeric(out["z_flag_homogenized"])
 
-    # >>> pass edge_log flag down so diagnostics are computed only when requested
+    # Pass edge_log down so diagnostics are computed only when requested.
     nodes_edge, edges_uv, diag = _build_edges_fast(
         out,
         crd_col=crd_col,
@@ -632,7 +678,7 @@ def deduplicate_pandas(
         edge_log=edge_log,
     )
 
-    # --- logging behavior (quiet for partitions) ---
+    # Logging behavior (quiet for partitions).
     if edge_log:
         lg = logger or _phase_logger()
         tag = f"[{partition_tag}]" if partition_tag else "[global]"
@@ -697,11 +743,11 @@ def deduplicate_pandas(
                 )
                 na_mask[bridged.index.to_numpy()] = False
 
-    # --- Fallback for rows still without group id (avoid mixing stars in graph) ---
+    # Fallback for rows still without group id (avoid mixing stars in graph).
     if na_mask.any():
         pos_na = np.flatnonzero(na_mask)
 
-        # estrelas dentro dos NA
+        # Stars within NA.
         if zf_series is not None:
             is_star_na = np.asarray(
                 zf_series.iloc[pos_na].eq(6).fillna(False), dtype=bool
@@ -711,10 +757,10 @@ def deduplicate_pandas(
 
         pos_na_nonstar = pos_na[~is_star_na]
 
-        # Próximo ID livre, compatível com rótulos do fast-path
+        # Next free ID, compatible with fast-path labels.
         next_gid = int(labels_edge.max()) + 1 if labels_edge.size else 0
 
-        # ===== NA não-estrela =====
+        # NA non-star rows.
         if pos_na_nonstar.size:
             crd_arr_all = crd_norm.to_numpy()
             cmp_arr_all = out[compared_col].astype("string").str.strip().to_numpy()
@@ -730,13 +776,13 @@ def deduplicate_pandas(
 
             if nodes_na:
                 if edges_na.empty:
-                    # Sem arestas: cada linha vira singleton, sem colidir.
+                    # No edges: each row becomes a singleton.
                     gids[pos_na_nonstar] = np.arange(
                         next_gid, next_gid + len(pos_na_nonstar), dtype=np.int64
                     )
                     next_gid += len(pos_na_nonstar)
                 else:
-                    # Com arestas: componentes de verdade
+                    # With edges: real components.
                     comp_map = _connected_components(nodes_na, edges_na)
                     gids[pos_na_nonstar] = next_gid + np.fromiter(
                         (comp_map.get(str(cid), -1) for cid in crd_arr),
@@ -745,16 +791,16 @@ def deduplicate_pandas(
                     )
                     next_gid += max(comp_map.values()) + 1 if comp_map else 0
             else:
-                # Sem nós: também singleton por linha
+                # No nodes: singleton per row.
                 gids[pos_na_nonstar] = np.arange(
                     next_gid, next_gid + len(pos_na_nonstar), dtype=np.int64
                 )
                 next_gid += len(pos_na_nonstar)
 
-            # >>> IMPORTANTE: marque como mapeado para não colidir depois
+            # Mark as mapped to avoid later collisions.
             na_mask[pos_na_nonstar] = False
 
-        # ===== Estrelas (cada uma é singleton) =====
+        # Stars (each is a singleton).
         if is_star_na.any():
             n_star = int(is_star_na.sum())
             gids[pos_na[is_star_na]] = np.arange(
@@ -993,7 +1039,7 @@ def deduplicate_pandas(
 
     out.drop(columns=drop_cols, inplace=True, errors="ignore")
 
-    # >>> PATCH: namespace por partição
+    # Namespace group ids per partition.
     if group_col and partition_tag:
         try:
             import zlib
@@ -1014,9 +1060,9 @@ def deduplicate_pandas(
     return out
 
 
-# ==============================
+# -----------------------
 # LSDB per-partition dedup (with or without margin)
-# ==============================
+# -----------------------
 
 
 def _ensure_string_pyarrow(s: pd.Series) -> pd.Series:
@@ -1080,7 +1126,7 @@ def _dedup_local_with_margin(
     pixel,  # diagnostics only (unused for now)
     *,
     tiebreaking_priority: Sequence[str],
-    instrument_type_priority: Optional[Mapping[str, int]],
+    instrument_type_priority: Mapping[str, int] | None,
     delta_z_threshold: float = 0.0,
     crd_col: str = "CRD_ID",
     compared_col: str = "compared_to",
@@ -1092,21 +1138,21 @@ def _dedup_local_with_margin(
     """Run dedup on (main + margin) and return labels for main rows only.
 
     Args:
-      part_main: Main partition (NestedFrame/pandas-like).
-      part_margin: Margin partition aligned to main.
-      pixel: Partition diagnostics (unused).
-      tiebreaking_priority: Ordered columns for tie-breaking.
-      instrument_type_priority: Map for instrument type scoring (optional).
-      delta_z_threshold: Δz threshold for final disambiguation.
-      crd_col: Name of the ID column.
-      compared_col: Name of the neighbors column.
-      z_col: Name of the redshift column.
-      tie_col: Name of the output tie-result column.
-      edge_log: Enable edge diagnostics during graph build.
-      group_col: If set, also emit component/group id in this column.
+        part_main: Main partition (NestedFrame/pandas-like).
+        part_margin: Margin partition aligned to main.
+        pixel: Partition diagnostics (unused).
+        tiebreaking_priority: Ordered columns for tie-breaking.
+        instrument_type_priority: Map for instrument type scoring (optional).
+        delta_z_threshold: Dz threshold for final disambiguation.
+        crd_col: Name of the ID column.
+        compared_col: Name of the neighbors column.
+        z_col: Name of the redshift column.
+        tie_col: Name of the output tie-result column.
+        edge_log: Enable edge diagnostics during graph build.
+        group_col: If set, also emit component/group id in this column.
 
     Returns:
-      pandas.DataFrame with [CRD_ID, tie_result, (optional) group_col] for main rows.
+        pd.DataFrame: Labels for main rows only.
     """
     # Normalize inputs to pandas.
     pm = _to_pandas(part_main)
@@ -1139,8 +1185,27 @@ def _dedup_local_with_margin(
     # Build view and run solver (guard-restore happens inside).
     pm["_src"] = "main"
     mg["_src"] = "margin"
-    view = pd.concat([pm, mg], ignore_index=True)
 
+    # Build the combined view while avoiding empty entries in concat.
+    # This keeps pandas happy and future-proof w.r.t. all-NA/empty inputs.
+    frames: list[pd.DataFrame] = []
+    if not pm.empty:
+        frames.append(pm)
+    if not mg.empty:
+        frames.append(mg)
+
+    # This should not happen because we early-exit when both are empty,
+    # but keep a defensive guard here for robustness.
+    if not frames:
+        cols = {
+            crd_col: pd.Series(dtype="string[pyarrow]"),
+            tie_col: pd.Series(dtype="Int8"),
+        }
+        if group_col:
+            cols[group_col] = pd.Series(dtype="Int64")
+        return pd.DataFrame(cols)
+
+    view = pd.concat(frames, ignore_index=True)
     solved = deduplicate_pandas(
         view,
         tiebreaking_priority=tiebreaking_priority,
@@ -1171,12 +1236,57 @@ def _dedup_local_with_margin(
 
     return out
 
+def _dedup_alignfunc_with_margin(
+    part_main,
+    part_margin,
+    pixel_main,
+    pixel_margin,
+    info_main,
+    info_margin,
+    *,
+    tiebreaking_priority: Sequence[str],
+    instrument_type_priority: Mapping[str, int] | None,
+    delta_z_threshold: float = 0.0,
+    crd_col: str = "CRD_ID",
+    compared_col: str = "compared_to",
+    z_col: str = "z",
+    tie_col: str = "tie_result",
+    edge_log: bool = False,
+    group_col: str | None = None,
+) -> pd.DataFrame:
+    """Adapter for LSDB/HATS `align_and_apply`.
+
+    Args:
+        part_main: Main partition (NestedFrame/pandas-like).
+        part_margin: Margin partition aligned to the same HATS pixel.
+        pixel_main: Healpix pixel for the main partition (diagnostics only).
+        pixel_margin: Healpix pixel for the margin partition (unused).
+        info_main: Catalog properties for the main catalog (unused).
+        info_margin: Catalog properties for the margin catalog (unused).
+
+    Returns:
+        pd.DataFrame: Labels for main rows only.
+    """
+    return _dedup_local_with_margin(
+        part_main,
+        part_margin,
+        pixel_main,  # diagnostics only
+        tiebreaking_priority=tiebreaking_priority,
+        instrument_type_priority=instrument_type_priority,
+        delta_z_threshold=delta_z_threshold,
+        crd_col=crd_col,
+        compared_col=compared_col,
+        z_col=z_col,
+        tie_col=tie_col,
+        edge_log=edge_log,
+        group_col=group_col,
+    )
 
 def _dedup_local_no_margin(
     part_main,
     *,
     tiebreaking_priority: Sequence[str],
-    instrument_type_priority: Optional[Mapping[str, int]],
+    instrument_type_priority: Mapping[str, int] | None,
     delta_z_threshold: float = 0.0,
     crd_col: str = "CRD_ID",
     compared_col: str = "compared_to",
@@ -1188,19 +1298,19 @@ def _dedup_local_no_margin(
     """Run dedup using only the main partition.
 
     Args:
-      part_main: Main partition (NestedFrame/pandas-like).
-      tiebreaking_priority: Ordered columns for tie-breaking.
-      instrument_type_priority: Map for instrument type scoring (optional).
-      delta_z_threshold: Δz threshold for final disambiguation.
-      crd_col: Name of the ID column.
-      compared_col: Name of the neighbors column.
-      z_col: Name of the redshift column.
-      tie_col: Name of the output tie-result column.
-      edge_log: Enable edge diagnostics during graph build.
-      group_col: If set, also emit component/group id in this column.
+        part_main: Main partition (NestedFrame/pandas-like).
+        tiebreaking_priority: Ordered columns for tie-breaking.
+        instrument_type_priority: Map for instrument type scoring (optional).
+        delta_z_threshold: Dz threshold for final disambiguation.
+        crd_col: Name of the ID column.
+        compared_col: Name of the neighbors column.
+        z_col: Name of the redshift column.
+        tie_col: Name of the output tie-result column.
+        edge_log: Enable edge diagnostics during graph build.
+        group_col: If set, also emit component/group id in this column.
 
     Returns:
-      pandas.DataFrame with [CRD_ID, tie_result, (optional) group_col].
+        pd.DataFrame: Labels for main rows only.
     """
     # Normalize inputs to pandas.
     pm = _to_pandas(part_main)
@@ -1285,16 +1395,32 @@ def run_dedup_with_lsdb_map_partitions(
     cat,
     *,
     tiebreaking_priority: Sequence[str],
-    instrument_type_priority: Optional[Mapping[str, int]],
+    instrument_type_priority: Mapping[str, int] | None,
     delta_z_threshold: float = 0.0,
     crd_col: str = "CRD_ID",
     compared_col: str = "compared_to",
     z_col: str = "z",
     tie_col: str = "tie_result",
     edge_log: bool = False,
-    group_col: str | None = None,  # <<< NOVO
+    group_col: str | None = None,  # new
 ) -> dd.DataFrame:
-    """Compute dedup labels per partition via LSDB; align divisions if margin exists."""
+    """Compute dedup labels per partition via LSDB; align divisions if margin exists.
+
+    Args:
+        cat: LSDB catalog.
+        tiebreaking_priority: Ordered columns for tie-breaking.
+        instrument_type_priority: Map for instrument type scoring (optional).
+        delta_z_threshold: Dz threshold for final disambiguation.
+        crd_col: Name of the ID column.
+        compared_col: Name of the neighbors column.
+        z_col: Name of the redshift column.
+        tie_col: Name of the output tie-result column.
+        edge_log: Enable edge diagnostics during graph build.
+        group_col: If set, also emit component/group id in this column.
+
+    Returns:
+        dd.DataFrame: Dask DataFrame with tie labels (and optional group ids).
+    """
     logger = _phase_logger()
     with log_phase(
         "deduplication", "run_dedup_with_lsdb_map_partitions", _base_logger()
@@ -1362,96 +1488,57 @@ def run_dedup_with_lsdb_map_partitions(
                 group_col=group_col,
             )
         else:
-            margin_ddf = cat.margin._ddf
+            # ------------------------------------------------------------------
+            # NEW: margin-aware path using LSDB/HATS pixel-tree alignment.
+            #
+            # Instead of forcing Dask divisions of `main_ddf` and `margin_ddf`
+            # to match, we rely on the HATS pixel-tree alignment used by LSDB
+            # for concatenation. This guarantees that main and margin partitions
+            # are aligned on the same HATS cells (including pixels that appear
+            # only in the margin).
+            # ------------------------------------------------------------------
+            log.info(
+                "Margin attached; running dedup using LSDB/HATS pixel alignment "
+                "(concat_align_catalogs + align_and_apply)."
+            )
 
-            # Main must have known divisions.
-            main_div = getattr(main_ddf, "divisions", None)
-            if main_div is None:
-                raise RuntimeError(
-                    "Margin present but main catalog has unknown divisions; rebuild with known divisions."
-                )
-
-            # Margin must also have known divisions; if not, set a sorted index equal to main's index.
-            idx_name = main_ddf._meta.index.name
-            if idx_name is None:
-                raise RuntimeError(
-                    "Main catalog index name is None; cannot align divisions."
-                )
-            if getattr(margin_ddf, "divisions", None) is None:
-                with log_phase("deduplication", "margin_set_index", _base_logger()):
-                    margin_ddf = margin_ddf.set_index(idx_name, sorted=True, drop=False)
-
-            marg_div = margin_ddf.divisions
-            if marg_div is None:
-                raise RuntimeError(
-                    "Margin still has unknown divisions after set_index."
-                )
-
-            # Make division dtypes compatible if needed.
-            t_main = type(main_div[0]) if len(main_div) else None
-            t_marg = type(marg_div[0]) if len(marg_div) else None
-            if t_main is not None and t_marg is not None and t_main != t_marg:
-                try:
-                    import numpy as _np
-
-                    main_div = tuple(_np.asarray(main_div, dtype=object).tolist())
-                    marg_div = tuple(_np.asarray(marg_div, dtype=object).tolist())
-                except Exception as e:
-                    raise RuntimeError(
-                        f"Incompatible division dtypes between main ({t_main}) and margin ({t_marg}): {e}"
-                    ) from e
-
-            # Build ordered union of divisions so both sides share the same split points.
-            try:
-                merged_divisions = tuple(sorted(set(main_div + marg_div)))
-                if len(merged_divisions) < 2:
-                    raise RuntimeError(
-                        "Merged divisions must have at least two boundaries."
-                    )
-            except Exception as e:
-                raise RuntimeError(f"Could not build merged divisions: {e}") from e
-
-            # Repartition both sides to the merged divisions.
-            from dask import config as _dask_config
-
+            # Build a concatenation-oriented pixel alignment between `cat`
+            # and its margin. We disable MOC filtering so that pixels that
+            # appear only in the margin are still included.
             with log_phase(
-                "deduplication", "repartition_to_merged_divisions", _base_logger()
-            ) as l2:
-                with _dask_config.set({"dataframe.shuffle.method": "tasks"}):
-                    main_ddf_aligned = main_ddf.repartition(
-                        divisions=merged_divisions, force=True
-                    )
-                    margin_ddf_aligned = margin_ddf.repartition(
-                        divisions=merged_divisions, force=True
-                    )
-                l2.info(
-                    "Aligned: nparts(main)=%d nparts(margin)=%d",
-                    main_ddf_aligned.npartitions,
-                    margin_ddf_aligned.npartitions,
-                )
-
-            # Strict post-conditions
-            if (
-                main_ddf_aligned.npartitions != margin_ddf_aligned.npartitions
-                or main_ddf_aligned.divisions != margin_ddf_aligned.divisions
+                "deduplication", "pixel_alignment_main_margin", _base_logger()
             ):
-                raise RuntimeError(
-                    "Aligned repartition failed: main and margin differ in npartitions/divisions.\n"
-                    f" main.npartitions={main_ddf_aligned.npartitions}, "
-                    f"margin.npartitions={margin_ddf_aligned.npartitions}\n"
-                    f" main.divisions[:3]={main_ddf_aligned.divisions[:3]} ... [-3:]={main_ddf_aligned.divisions[-3:]}\n"
-                    f" margin.divisions[:3]={margin_ddf_aligned.divisions[:3]} ... [-3:]={margin_ddf_aligned.divisions[-3:]}"
+                # Use the same catalog on both sides so concat_align_catalogs can
+                # expand main + margin internally. Passing `cat.margin` directly
+                # would fail because MarginCatalog has no `.margin` attribute.
+                alignment = concat_align_catalogs(
+                    cat,
+                    cat,
+                    filter_by_mocs=False,
+                    # alignment_type default is OUTER, which is what we want
+                )
+                aligned_pixels = get_aligned_pixels_from_alignment(alignment)
+                log.info(
+                    "Pixel alignment built for main+margin: n_aligned_pixels=%d",
+                    len(aligned_pixels),
                 )
 
-            # 1:1 zip between aligned partitions.
+            # Each entry in `catalog_mappings` is:
+            #   (HealpixDataset, list[HealpixPixel])
+            # Here we align the main catalog and its margin on the same pixel set.
+            catalog_mappings = [
+                (cat, aligned_pixels),
+                (cat.margin, aligned_pixels),
+            ]
+
+            # Align partitions on the HATS pixel grid and run dedup on
+            # (main + margin) for each pixel using the adapter defined above.
             with log_phase(
-                "deduplication", "map_partitions_with_margin", _base_logger()
+                "deduplication", "align_and_apply_with_margin", _base_logger()
             ):
-                labels_dd = main_ddf_aligned.map_partitions(
-                    _dedup_local_with_margin,
-                    margin_ddf_aligned,
-                    None,  # diagnostics
-                    meta=meta,
+                delayed_parts = align_and_apply(
+                    catalog_mappings,
+                    func=_dedup_alignfunc_with_margin,
                     tiebreaking_priority=tiebreaking_priority,
                     instrument_type_priority=instrument_type_priority,
                     delta_z_threshold=float(delta_z_threshold),
@@ -1462,6 +1549,9 @@ def run_dedup_with_lsdb_map_partitions(
                     edge_log=edge_log,
                     group_col=group_col,
                 )
+
+            # Build a Dask DataFrame from the delayed per-pixel label frames.
+            labels_dd = dd.from_delayed(delayed_parts, meta=meta)
 
         # Stable dtypes for downstream merges.
         assign_map = {

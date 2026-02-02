@@ -66,27 +66,16 @@ inputs:
         z_err: "redshift_err"
         survey: "survey_name"
 
-    - path: "test_data/3dhst_v4.1.5_random_sample.parquet"
-      internal_name: "004_3dhst_v4.1.5"
+    - path: 'test_data/z_cat_NED_clean_sitcomtn-154_random_sample.parquet'
+      internal_name: "004_ned_sitcomtn"
       columns:
-        id: "phot_id"
-        ra: "ra"
-        dec: "dec"
-        z: "z_best"
-        z_flag: null
+        id: null
+        ra: "RA"
+        dec: "DEC"
+        z: "redshift"
+        z_flag: "quality"
         z_err: null
-        survey: "survey_name"
-
-    - path: "test_data/6dfgs_dr3_random_sample.parquet"
-      internal_name: "005_6dfgs_dr3"
-      columns:
-        id: "SPECID"
-        ra: "RA_deg"
-        dec: "DEC_deg"
-        z: "Z"
-        z_flag: "QUALITY"
-        z_err: null
-        survey: "survey_name"
+        survey: "source"
 
 output_root_dir: "storage"
 output_dir: "outputs" # Relative directory for final outputs
@@ -95,5 +84,6 @@ output_format: "parquet" # Output format: csv, parquet, hdf5, or fits
 
 param:
   combine_type: "concatenate" # Options: "concatenate", "concatenate_and_mark_duplicates", or "concatenate_and_remove_duplicates"
+  tie_treatment_option: "remove_all" # Options (only for concatenate_and_remove_duplicates): "remove_all", "keep_all", "draw_one"
   z_flag_homogenized_value_to_cut: 0.0 # Value to cut in the homogenized z_flag (cut >= value). 0.0 or null means keep all.
-  flags_translation_file: flags_translation.yaml # File with homogenization rules for z_flag and type
+  flags_translation_file: ../flags_translation.yaml # File with homogenization rules for z_flag and type
