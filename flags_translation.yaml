@@ -157,6 +157,23 @@ translation_rules:
           value: "p"
       default: "p"
 
+  COSMOS_SRC:
+    z_flag_translation:
+      0: 0
+      10: 0
+      1: 1
+      11: 1
+      2: 2
+      12: 2
+      9: 2
+      19: 2
+      3: 3
+      13: 3
+      4: 4
+      14: 4
+    instrument_type_translation:
+      default: "s"
+
   # TO BE REVIEWED
   DESI:
     z_flag_translation:
