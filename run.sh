@@ -208,13 +208,26 @@ log "CRC_LOG_FORCE_RECONFIG=${CRC_LOG_FORCE_RECONFIG}"
 log "PYTHONWARNINGS=${PYTHONWARNINGS}"
 
 # =========================
-# Run the pipeline
+# Run the pipeline (via conda run)
 # =========================
 export CRC_LAUNCH_DIR="$PWD"
 
+ENV_NAME="pipe_crd"
+
 _enable_xtrace
-CRC_LOG_COLLECTOR="$CRC_LOG_COLLECTOR" \
-python "$PIPE_BASE/scripts/crd-run.py" "$CONFIG_PATH" --base_dir "$BASE_DIR_OVERRIDE"
+
+conda run --no-capture-output -n "$ENV_NAME" bash -c "
+  export PATH=${PIPE_BASE}/scripts:\$PATH
+  export PYTHONPATH=${PIPE_BASE}/packages:\$PYTHONPATH
+  export CRC_LOG_COLLECTOR='${CRC_LOG_COLLECTOR}'
+  export CRC_LOG_LEVEL='${CRC_LOG_LEVEL}'
+  export CRC_LOG_INCLUDE_NONCRC_WARNINGS='${CRC_LOG_INCLUDE_NONCRC_WARNINGS}'
+  export CRC_LOG_FORCE_RECONFIG='${CRC_LOG_FORCE_RECONFIG}'
+  export PYTHONWARNINGS='${PYTHONWARNINGS}'
+  export CRC_LAUNCH_DIR='${CRC_LAUNCH_DIR}'
+  exec python '${PIPE_BASE}/scripts/crd-run.py' '${CONFIG_PATH}' --base_dir '${BASE_DIR_OVERRIDE}'
+"
+
 _disable_xtrace
 
 # =========================
