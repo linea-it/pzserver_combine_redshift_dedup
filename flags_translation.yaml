@@ -183,6 +183,8 @@ translation_rules:
           value: 1
         - expr: "z_flag == 0 and np.abs(zpdf_med - zchi2) > 0.01 and np.abs(zpdf_med - zchi2) <= 0.1"
           value: 2
+        - expr: "z_flag == 0 and np.abs(zpdf_med - zchi2) <= 0.01 and nbfilt < 30"
+          value: 2
         - expr: "z_flag == 0 and np.abs(zpdf_med - zchi2) <= 0.01 and nbfilt > 30"
           value: 3
         - expr: "type == 6"
