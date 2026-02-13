@@ -177,17 +177,17 @@ translation_rules:
   COSMOS_Web:
     z_flag_translation:
       conditions:
-        - expr: "z_flag != 0"
+        - expr: "type != 1 and z_flag != 0"
           value: 0
-        - expr: "z_flag == 0 and np.abs(zpdf_med - zchi2) > 0.1"
+        - expr: "type != 1 and z_flag == 0 and np.abs(zpdf_med - zchi2) > 0.1"
           value: 1
-        - expr: "z_flag == 0 and np.abs(zpdf_med - zchi2) > 0.01 and np.abs(zpdf_med - zchi2) <= 0.1"
+        - expr: "type != 1 and z_flag == 0 and np.abs(zpdf_med - zchi2) > 0.01 and np.abs(zpdf_med - zchi2) <= 0.1"
           value: 2
-        - expr: "z_flag == 0 and np.abs(zpdf_med - zchi2) <= 0.01 and nbfilt < 30"
+        - expr: "type != 1 and z_flag == 0 and np.abs(zpdf_med - zchi2) <= 0.01 and nbfilt < 30"
           value: 2
-        - expr: "z_flag == 0 and np.abs(zpdf_med - zchi2) <= 0.01 and nbfilt > 30"
+        - expr: "type != 1 and z_flag == 0 and np.abs(zpdf_med - zchi2) <= 0.01 and nbfilt > 30"
           value: 3
-        - expr: "type == 6"
+        - expr: "type == 1"
           value: 6
       default: 0
     instrument_type_translation:
@@ -197,7 +197,7 @@ translation_rules:
   DESI:
     z_flag_translation:
       conditions:
-        - expr: "ZCAT_PRIMARY != True"
+        - expr: "z_flag != 0 and ZCAT_PRIMARY != True"
           value: 0
         - expr: "z_flag != 0 and ZCAT_PRIMARY == True"
           value: 1
