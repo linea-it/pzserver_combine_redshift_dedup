@@ -1,8 +1,11 @@
 #!/bin/bash --login
 set -Eeuo pipefail
 
+SCRIPT_PATH=$(readlink -f "$0")
+PIPELINE_DIR=$(dirname "$SCRIPT_PATH")
+
 ENV_NAME="pipe_crd"
-ENV_FILE="environment.yaml"
+ENV_FILE="$PIPELINE_DIR/environment.yaml"
 
 log() {
   local ts
