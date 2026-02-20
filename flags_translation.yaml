@@ -378,6 +378,26 @@ translation_rules:
     instrument_type_translation:
       default: "s"
 
+  ZCOSMOS:
+    z_flag_translation:
+      conditions:
+        - expr: "int(float(z_flag)) % 10 == 0"
+          value: 0
+        - expr: "int(float(z_flag)) % 10 == 1"
+          value: 1
+        - expr: "int(float(z_flag)) % 10 == 2"
+          value: 2
+        - expr: "int(float(z_flag)) % 10 == 3"
+          value: 3
+        - expr: "int(float(z_flag)) % 10 == 4"
+          value: 4
+        - expr: "int(float(z_flag)) % 10 == 9"
+          value: 2
+      default: 0
+
+    instrument_type_translation:
+      default: "s"
+
   example_survey:
     z_flag_translation:
       88: 4
