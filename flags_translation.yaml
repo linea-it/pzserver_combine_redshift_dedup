@@ -159,18 +159,21 @@ translation_rules:
 
   COSMOS_SRC:
     z_flag_translation:
-      0: 0
-      10: 0
-      1: 1
-      11: 1
-      2: 2
-      12: 2
-      9: 2
-      19: 2
-      3: 3
-      13: 3
-      4: 4
-      14: 4
+      conditions:
+        - expr: "int(float(z_flag)) % 10 == 0"
+          value: 0
+        - expr: "int(float(z_flag)) % 10 == 1"
+          value: 1
+        - expr: "int(float(z_flag)) % 10 == 2"
+          value: 2
+        - expr: "int(float(z_flag)) % 10 == 3"
+          value: 3
+        - expr: "int(float(z_flag)) % 10 == 4"
+          value: 4
+        - expr: "int(float(z_flag)) % 10 == 9"
+          value: 2
+      default: 0
+
     instrument_type_translation:
       default: "s"
 
@@ -195,30 +198,21 @@ translation_rules:
 
   DEIMOS_10K:
     z_flag_translation:
-      0: 0
-      1: 1
-      2: 2
-      3: 3
-      4: 4
-      9: 2
-      10: 0
-      11: 1
-      12: 2
-      13: 3
-      14: 4
-      19: 2
-      20: 0
-      21: 1
-      22: 2
-      23: 3
-      24: 4
-      29: 2
-      30: 0
-      31: 1
-      32: 2
-      33: 3
-      34: 4
-      39: 2
+      conditions:
+        - expr: "int(float(z_flag)) % 10 == 0"
+          value: 0
+        - expr: "int(float(z_flag)) % 10 == 1"
+          value: 1
+        - expr: "int(float(z_flag)) % 10 == 2"
+          value: 2
+        - expr: "int(float(z_flag)) % 10 == 3"
+          value: 3
+        - expr: "int(float(z_flag)) % 10 == 4"
+          value: 4
+        - expr: "int(float(z_flag)) % 10 == 9"
+          value: 2
+      default: 0
+
     instrument_type_translation:
       default: "s"
 
@@ -282,30 +276,21 @@ translation_rules:
 
   VANDELS:
     z_flag_translation:
-      0: 0
-      1: 1
-      2: 2
-      3: 4
-      4: 4
-      9: 3
-      10: 0
-      11: 1
-      12: 2
-      13: 4
-      14: 4
-      19: 3
-      20: 0
-      21: 1
-      22: 2
-      23: 4
-      24: 4
-      29: 3
-      210: 0
-      211: 1
-      212: 2
-      213: 4
-      214: 4
-      219: 3
+      conditions:
+        - expr: "int(float(z_flag)) % 10 == 0"
+          value: 0
+        - expr: "int(float(z_flag)) % 10 == 1"
+          value: 1
+        - expr: "int(float(z_flag)) % 10 == 2"
+          value: 2
+        - expr: "int(float(z_flag)) % 10 == 3"
+          value: 4
+        - expr: "int(float(z_flag)) % 10 == 4"
+          value: 4
+        - expr: "int(float(z_flag)) % 10 == 9"
+          value: 3
+      default: 0
+
     instrument_type_translation:
       default: "s"
 
@@ -321,60 +306,39 @@ translation_rules:
 
   VUDS:
     z_flag_translation:
-      1: 1
-      11: 1
-      21: 1
-      31: 1
-      41: 1
-      2: 2
-      12: 2
-      22: 2
-      32: 2
-      42: 2
-      9: 2
-      19: 2
-      29: 2
-      39: 2
-      49: 2
-      3: 3
-      13: 3
-      23: 3
-      33: 3
-      43: 3
-      4: 4
-      14: 4
-      24: 4
-      34: 4
-      44: 4
+      conditions:
+        - expr: "int(float(z_flag)) % 10 == 1"
+          value: 1
+        - expr: "int(float(z_flag)) % 10 == 2"
+          value: 2
+        - expr: "int(float(z_flag)) % 10 == 3"
+          value: 3
+        - expr: "int(float(z_flag)) % 10 == 4"
+          value: 4
+        - expr: "int(float(z_flag)) % 10 == 9"
+          value: 2
+      default: 0
+
     instrument_type_translation:
       default: "s"
 
   VVDS:
     z_flag_translation:
-      0: 0 
-      1: 1
-      2: 2
-      3: 3
-      4: 4
-      9: 2
-      10: 0
-      11: 1
-      12: 2
-      13: 3
-      14: 4
-      19: 2
-      20: 0
-      21: 1
-      22: 2
-      23: 3
-      24: 4
-      29: 2
-      210: 0
-      211: 1
-      212: 2
-      213: 3
-      214: 4
-      219: 2
+      conditions:
+        - expr: "int(float(z_flag)) % 10 == 0"
+          value: 0
+        - expr: "int(float(z_flag)) % 10 == 1"
+          value: 1
+        - expr: "int(float(z_flag)) % 10 == 2"
+          value: 2
+        - expr: "int(float(z_flag)) % 10 == 3"
+          value: 3
+        - expr: "int(float(z_flag)) % 10 == 4"
+          value: 4
+        - expr: "int(float(z_flag)) % 10 == 9"
+          value: 2
+      default: 0
+
     instrument_type_translation:
       default: "s"
 
