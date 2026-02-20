@@ -160,17 +160,17 @@ translation_rules:
   COSMOS_SRC:
     z_flag_translation:
       conditions:
-        - expr: "int(float(z_flag)) % 10 == 0"
+        - expr: "str(int(float(z_flag)))[-1] == '0'"
           value: 0
-        - expr: "int(float(z_flag)) % 10 == 1"
+        - expr: "str(int(float(z_flag)))[-1] == '1'"
           value: 1
-        - expr: "int(float(z_flag)) % 10 == 2"
+        - expr: "str(int(float(z_flag)))[-1] == '2'"
           value: 2
-        - expr: "int(float(z_flag)) % 10 == 3"
+        - expr: "str(int(float(z_flag)))[-1] == '3'"
           value: 3
-        - expr: "int(float(z_flag)) % 10 == 4"
+        - expr: "str(int(float(z_flag)))[-1] == '4'"
           value: 4
-        - expr: "int(float(z_flag)) % 10 == 9"
+        - expr: "str(int(float(z_flag)))[-1] == '9'"
           value: 2
       default: 0
 
@@ -199,17 +199,17 @@ translation_rules:
   DEIMOS_10K:
     z_flag_translation:
       conditions:
-        - expr: "int(float(z_flag)) % 10 == 0"
+        - expr: "str(int(float(z_flag)))[-1] == '0'"
           value: 0
-        - expr: "int(float(z_flag)) % 10 == 1"
+        - expr: "str(int(float(z_flag)))[-1] == '1'"
           value: 1
-        - expr: "int(float(z_flag)) % 10 == 2"
+        - expr: "str(int(float(z_flag)))[-1] == '2'"
           value: 2
-        - expr: "int(float(z_flag)) % 10 == 3"
+        - expr: "str(int(float(z_flag)))[-1] == '3'"
           value: 3
-        - expr: "int(float(z_flag)) % 10 == 4"
+        - expr: "str(int(float(z_flag)))[-1] == '4'"
           value: 4
-        - expr: "int(float(z_flag)) % 10 == 9"
+        - expr: "str(int(float(z_flag)))[-1] == '9'"
           value: 2
       default: 0
 
@@ -277,17 +277,17 @@ translation_rules:
   VANDELS:
     z_flag_translation:
       conditions:
-        - expr: "int(float(z_flag)) % 10 == 0"
+        - expr: "str(int(float(z_flag)))[-1] == '0'"
           value: 0
-        - expr: "int(float(z_flag)) % 10 == 1"
+        - expr: "str(int(float(z_flag)))[-1] == '1'"
           value: 1
-        - expr: "int(float(z_flag)) % 10 == 2"
+        - expr: "str(int(float(z_flag)))[-1] == '2'"
           value: 2
-        - expr: "int(float(z_flag)) % 10 == 3"
+        - expr: "str(int(float(z_flag)))[-1] == '3'"
           value: 4
-        - expr: "int(float(z_flag)) % 10 == 4"
+        - expr: "str(int(float(z_flag)))[-1] == '4'"
           value: 4
-        - expr: "int(float(z_flag)) % 10 == 9"
+        - expr: "str(int(float(z_flag)))[-1] == '9'"
           value: 3
       default: 0
 
@@ -307,15 +307,15 @@ translation_rules:
   VUDS:
     z_flag_translation:
       conditions:
-        - expr: "int(float(z_flag)) % 10 == 1"
+        - expr: "str(int(float(z_flag)))[-1] == '1'"
           value: 1
-        - expr: "int(float(z_flag)) % 10 == 2"
+        - expr: "str(int(float(z_flag)))[-1] == '2'"
           value: 2
-        - expr: "int(float(z_flag)) % 10 == 3"
+        - expr: "str(int(float(z_flag)))[-1] == '3'"
           value: 3
-        - expr: "int(float(z_flag)) % 10 == 4"
+        - expr: "str(int(float(z_flag)))[-1] == '4'"
           value: 4
-        - expr: "int(float(z_flag)) % 10 == 9"
+        - expr: "str(int(float(z_flag)))[-1] == '9'"
           value: 2
       default: 0
 
@@ -325,17 +325,17 @@ translation_rules:
   VVDS:
     z_flag_translation:
       conditions:
-        - expr: "int(float(z_flag)) % 10 == 0"
+        - expr: "str(int(float(z_flag)))[-1] == '0'"
           value: 0
-        - expr: "int(float(z_flag)) % 10 == 1"
+        - expr: "str(int(float(z_flag)))[-1] == '1'"
           value: 1
-        - expr: "int(float(z_flag)) % 10 == 2"
+        - expr: "str(int(float(z_flag)))[-1] == '2'"
           value: 2
-        - expr: "int(float(z_flag)) % 10 == 3"
+        - expr: "str(int(float(z_flag)))[-1] == '3'"
           value: 3
-        - expr: "int(float(z_flag)) % 10 == 4"
+        - expr: "str(int(float(z_flag)))[-1] == '4'"
           value: 4
-        - expr: "int(float(z_flag)) % 10 == 9"
+        - expr: "str(int(float(z_flag)))[-1] == '9'"
           value: 2
       default: 0
 
@@ -345,17 +345,17 @@ translation_rules:
   ZCOSMOS:
     z_flag_translation:
       conditions:
-        - expr: "int(float(z_flag)) % 10 == 0"
+        - expr: "str(int(float(z_flag)))[-1] == '0'"
           value: 0
-        - expr: "int(float(z_flag)) % 10 == 1"
+        - expr: "str(int(float(z_flag)))[-1] == '1'"
           value: 1
-        - expr: "int(float(z_flag)) % 10 == 2"
+        - expr: "str(int(float(z_flag)))[-1] == '2'"
           value: 2
-        - expr: "int(float(z_flag)) % 10 == 3"
+        - expr: "str(int(float(z_flag)))[-1] == '3'"
           value: 3
-        - expr: "int(float(z_flag)) % 10 == 4"
+        - expr: "str(int(float(z_flag)))[-1] == '4'"
           value: 4
-        - expr: "int(float(z_flag)) % 10 == 9"
+        - expr: "str(int(float(z_flag)))[-1] == '9'"
           value: 2
       default: 0
 
