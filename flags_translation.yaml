@@ -193,6 +193,35 @@ translation_rules:
     instrument_type_translation:
       default: "p"
 
+  DEIMOS_10K:
+    z_flag_translation:
+      0: 0
+      1: 1
+      2: 2
+      3: 3
+      4: 4
+      9: 2
+      10: 0
+      11: 1
+      12: 2
+      13: 3
+      14: 4
+      19: 2
+      20: 0
+      21: 1
+      22: 2
+      23: 3
+      24: 4
+      29: 2
+      30: 0
+      31: 1
+      32: 2
+      33: 3
+      34: 4
+      39: 2
+    instrument_type_translation:
+      default: "s"
+
   # TO BE REVIEWED
   DESI:
     z_flag_translation:
