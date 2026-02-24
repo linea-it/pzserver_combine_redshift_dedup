@@ -157,11 +157,68 @@ translation_rules:
           value: "p"
       default: "p"
 
+  COSMOS_SRC:
+    z_flag_translation:
+      conditions:
+        - expr: "np.trunc(float(z_flag)) - 10*np.trunc(np.trunc(float(z_flag))/10) == 0"
+          value: 0
+        - expr: "np.trunc(float(z_flag)) - 10*np.trunc(np.trunc(float(z_flag))/10) == 1"
+          value: 1
+        - expr: "np.trunc(float(z_flag)) - 10*np.trunc(np.trunc(float(z_flag))/10) == 2"
+          value: 2
+        - expr: "np.trunc(float(z_flag)) - 10*np.trunc(np.trunc(float(z_flag))/10) == 3"
+          value: 3
+        - expr: "np.trunc(float(z_flag)) - 10*np.trunc(np.trunc(float(z_flag))/10) == 4"
+          value: 4
+        - expr: "np.trunc(float(z_flag)) - 10*np.trunc(np.trunc(float(z_flag))/10) == 9"
+          value: 2
+      default: 0
+    instrument_type_translation:
+      default: "s"
+
+  COSMOS_Web:
+    z_flag_translation:
+      conditions:
+        - expr: "type != 1 and z_flag != 0"
+          value: 0
+        - expr: "type != 1 and z_flag == 0 and np.abs(zpdf_med - zchi2) > 0.1"
+          value: 1
+        - expr: "type != 1 and z_flag == 0 and np.abs(zpdf_med - zchi2) > 0.01 and np.abs(zpdf_med - zchi2) <= 0.1"
+          value: 2
+        - expr: "type != 1 and z_flag == 0 and np.abs(zpdf_med - zchi2) <= 0.01 and nbfilt < 30"
+          value: 2
+        - expr: "type != 1 and z_flag == 0 and np.abs(zpdf_med - zchi2) <= 0.01 and nbfilt > 30"
+          value: 3
+        - expr: "type == 1"
+          value: 6
+      default: 0
+    instrument_type_translation:
+      default: "p"
+
+  DEIMOS_10K:
+    z_flag_translation:
+      conditions:
+        - expr: "np.trunc(float(z_flag)) - 10*np.trunc(np.trunc(float(z_flag))/10) == 0"
+          value: 0
+        - expr: "np.trunc(float(z_flag)) - 10*np.trunc(np.trunc(float(z_flag))/10) == 1"
+          value: 1
+        - expr: "np.trunc(float(z_flag)) - 10*np.trunc(np.trunc(float(z_flag))/10) == 2"
+          value: 2
+        - expr: "np.trunc(float(z_flag)) - 10*np.trunc(np.trunc(float(z_flag))/10) == 3"
+          value: 3
+        - expr: "np.trunc(float(z_flag)) - 10*np.trunc(np.trunc(float(z_flag))/10) == 4"
+          value: 4
+        - expr: "np.trunc(float(z_flag)) - 10*np.trunc(np.trunc(float(z_flag))/10) == 9"
+          value: 2
+      default: 0
+    instrument_type_translation:
+      default: "s"
+
   # TO BE REVIEWED
   DESI:
     z_flag_translation:
       conditions:
-        - expr: "ZCAT_PRIMARY != True"
+        - expr: "z_flag != 0 and ZCAT_PRIMARY != True"
           value: 0
         - expr: "z_flag != 0 and ZCAT_PRIMARY == True"
           value: 1
@@ -170,6 +227,18 @@ translation_rules:
         - expr: "z_flag == 0 and ZCAT_PRIMARY == True and z_err >= 0.0005"
           value: 3
       default: 0
+    instrument_type_translation:
+      default: "s"
+
+  FMOS_COSMOS:
+    z_flag_translation:
+      -99: 0
+      0: 0
+      1: 1
+      2: 2
+      3: 3
+      4: 4
+      -1: 6
     instrument_type_translation:
       default: "s"
 
@@ -217,30 +286,20 @@ translation_rules:
 
   VANDELS:
     z_flag_translation:
-      0: 0
-      1: 1
-      2: 2
-      3: 4
-      4: 4
-      9: 3
-      10: 0
-      11: 1
-      12: 2
-      13: 4
-      14: 4
-      19: 3
-      20: 0
-      21: 1
-      22: 2
-      23: 4
-      24: 4
-      29: 3
-      210: 0
-      211: 1
-      212: 2
-      213: 4
-      214: 4
-      219: 3
+      conditions:
+        - expr: "np.trunc(float(z_flag)) - 10*np.trunc(np.trunc(float(z_flag))/10) == 0"
+          value: 0
+        - expr: "np.trunc(float(z_flag)) - 10*np.trunc(np.trunc(float(z_flag))/10) == 1"
+          value: 1
+        - expr: "np.trunc(float(z_flag)) - 10*np.trunc(np.trunc(float(z_flag))/10) == 2"
+          value: 2
+        - expr: "np.trunc(float(z_flag)) - 10*np.trunc(np.trunc(float(z_flag))/10) == 3"
+          value: 4
+        - expr: "np.trunc(float(z_flag)) - 10*np.trunc(np.trunc(float(z_flag))/10) == 4"
+          value: 4
+        - expr: "np.trunc(float(z_flag)) - 10*np.trunc(np.trunc(float(z_flag))/10) == 9"
+          value: 3
+      default: 0
     instrument_type_translation:
       default: "s"
 
@@ -256,60 +315,56 @@ translation_rules:
 
   VUDS:
     z_flag_translation:
-      1: 1
-      11: 1
-      21: 1
-      31: 1
-      41: 1
-      2: 2
-      12: 2
-      22: 2
-      32: 2
-      42: 2
-      9: 2
-      19: 2
-      29: 2
-      39: 2
-      49: 2
-      3: 3
-      13: 3
-      23: 3
-      33: 3
-      43: 3
-      4: 4
-      14: 4
-      24: 4
-      34: 4
-      44: 4
+      conditions:
+        - expr: "np.trunc(float(z_flag)) - 10*np.trunc(np.trunc(float(z_flag))/10) == 1"
+          value: 1
+        - expr: "np.trunc(float(z_flag)) - 10*np.trunc(np.trunc(float(z_flag))/10) == 2"
+          value: 2
+        - expr: "np.trunc(float(z_flag)) - 10*np.trunc(np.trunc(float(z_flag))/10) == 3"
+          value: 3
+        - expr: "np.trunc(float(z_flag)) - 10*np.trunc(np.trunc(float(z_flag))/10) == 4"
+          value: 4
+        - expr: "np.trunc(float(z_flag)) - 10*np.trunc(np.trunc(float(z_flag))/10) == 9"
+          value: 2
+      default: 0
     instrument_type_translation:
       default: "s"
 
   VVDS:
     z_flag_translation:
-      0: 0 
-      1: 1
-      2: 2
-      3: 3
-      4: 4
-      9: 2
-      10: 0
-      11: 1
-      12: 2
-      13: 3
-      14: 4
-      19: 2
-      20: 0
-      21: 1
-      22: 2
-      23: 3
-      24: 4
-      29: 2
-      210: 0
-      211: 1
-      212: 2
-      213: 3
-      214: 4
-      219: 2
+      conditions:
+        - expr: "np.trunc(float(z_flag)) - 10*np.trunc(np.trunc(float(z_flag))/10) == 0"
+          value: 0
+        - expr: "np.trunc(float(z_flag)) - 10*np.trunc(np.trunc(float(z_flag))/10) == 1"
+          value: 1
+        - expr: "np.trunc(float(z_flag)) - 10*np.trunc(np.trunc(float(z_flag))/10) == 2"
+          value: 2
+        - expr: "np.trunc(float(z_flag)) - 10*np.trunc(np.trunc(float(z_flag))/10) == 3"
+          value: 3
+        - expr: "np.trunc(float(z_flag)) - 10*np.trunc(np.trunc(float(z_flag))/10) == 4"
+          value: 4
+        - expr: "np.trunc(float(z_flag)) - 10*np.trunc(np.trunc(float(z_flag))/10) == 9"
+          value: 2
+      default: 0
+    instrument_type_translation:
+      default: "s"
+
+  ZCOSMOS:
+    z_flag_translation:
+      conditions:
+        - expr: "np.trunc(float(z_flag)) - 10*np.trunc(np.trunc(float(z_flag))/10) == 0"
+          value: 0
+        - expr: "np.trunc(float(z_flag)) - 10*np.trunc(np.trunc(float(z_flag))/10) == 1"
+          value: 1
+        - expr: "np.trunc(float(z_flag)) - 10*np.trunc(np.trunc(float(z_flag))/10) == 2"
+          value: 2
+        - expr: "np.trunc(float(z_flag)) - 10*np.trunc(np.trunc(float(z_flag))/10) == 3"
+          value: 3
+        - expr: "np.trunc(float(z_flag)) - 10*np.trunc(np.trunc(float(z_flag))/10) == 4"
+          value: 4
+        - expr: "np.trunc(float(z_flag)) - 10*np.trunc(np.trunc(float(z_flag))/10) == 9"
+          value: 2
+      default: 0
     instrument_type_translation:
       default: "s"
 
