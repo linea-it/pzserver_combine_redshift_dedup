@@ -51,6 +51,8 @@ if env_exists; then
       conda env create -n "$ENV_NAME" -f "$ENV_FILE"
 
       # ---------------- Salvar hash ----------------
+      ENV_PREFIX=$(conda info --base)/envs/$ENV_NAME
+      HASH_FILE="$ENV_PREFIX/.env_hash"
       echo "$ENV_HASH" > "$HASH_FILE"
     fi
   else
@@ -61,8 +63,19 @@ if env_exists; then
     conda env create -n "$ENV_NAME" -f "$ENV_FILE"
 
     # ---------------- Salvar hash ----------------
+    ENV_PREFIX=$(conda info --base)/envs/$ENV_NAME
+    HASH_FILE="$ENV_PREFIX/.env_hash"
     echo "$ENV_HASH" > "$HASH_FILE"
   fi
+else
+  # ---------------- Criar environment ----------------
+  log "📦 Creating environment '${ENV_NAME}'..."
+  conda env create -n "$ENV_NAME" -f "$ENV_FILE"
+
+  # ---------------- Salvar hash ----------------
+  ENV_PREFIX=$(conda info --base)/envs/$ENV_NAME
+  HASH_FILE="$ENV_PREFIX/.env_hash"
+  echo "$ENV_HASH" > "$HASH_FILE"
 fi
 
 log "✅ Installation complete."
