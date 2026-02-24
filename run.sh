@@ -216,6 +216,8 @@ ENV_NAME="pipe_crd"
 
 _enable_xtrace
 
+unset BASH_XTRACEFD
+
 conda run --no-capture-output -n "$ENV_NAME" bash -c "
   export PATH=${PIPE_BASE}/scripts:\$PATH
   export PYTHONPATH=${PIPE_BASE}/packages:\$PYTHONPATH
