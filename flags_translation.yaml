@@ -173,7 +173,6 @@ translation_rules:
         - expr: "np.trunc(float(z_flag)) - 10*np.trunc(np.trunc(float(z_flag))/10) == 9"
           value: 2
       default: 0
-
     instrument_type_translation:
       default: "s"
 
@@ -212,7 +211,6 @@ translation_rules:
         - expr: "np.trunc(float(z_flag)) - 10*np.trunc(np.trunc(float(z_flag))/10) == 9"
           value: 2
       default: 0
-
     instrument_type_translation:
       default: "s"
 
@@ -229,6 +227,18 @@ translation_rules:
         - expr: "z_flag == 0 and ZCAT_PRIMARY == True and z_err >= 0.0005"
           value: 3
       default: 0
+    instrument_type_translation:
+      default: "s"
+
+  FMOS_COSMOS:
+    z_flag_translation:
+      -99: 0
+      0: 0
+      1: 1
+      2: 2
+      3: 3
+      4: 4
+      -1: 6
     instrument_type_translation:
       default: "s"
 
@@ -290,7 +300,6 @@ translation_rules:
         - expr: "np.trunc(float(z_flag)) - 10*np.trunc(np.trunc(float(z_flag))/10) == 9"
           value: 3
       default: 0
-
     instrument_type_translation:
       default: "s"
 
@@ -318,7 +327,6 @@ translation_rules:
         - expr: "np.trunc(float(z_flag)) - 10*np.trunc(np.trunc(float(z_flag))/10) == 9"
           value: 2
       default: 0
-
     instrument_type_translation:
       default: "s"
 
@@ -338,7 +346,6 @@ translation_rules:
         - expr: "np.trunc(float(z_flag)) - 10*np.trunc(np.trunc(float(z_flag))/10) == 9"
           value: 2
       default: 0
-
     instrument_type_translation:
       default: "s"
 
@@ -358,7 +365,6 @@ translation_rules:
         - expr: "np.trunc(float(z_flag)) - 10*np.trunc(np.trunc(float(z_flag))/10) == 9"
           value: 2
       default: 0
-
     instrument_type_translation:
       default: "s"
 
