@@ -143,3 +143,6 @@ config.yml
 
 # process folders
 process*
+
+#env_hash
+.env_hash
