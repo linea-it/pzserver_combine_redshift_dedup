@@ -38,8 +38,7 @@ fi
 
 # ---------------- Hash do env.yaml ----------------
 ENV_HASH=$(sha256sum "$ENV_FILE" | awk '{print $1}')
-ENV_PREFIX=$(conda info --base)/envs/$ENV_NAME
-HASH_FILE="$ENV_PREFIX/.env_hash"
+HASH_FILE="$PIPELINE_DIR/.env_hash"
 
 log "Environment hash: $ENV_HASH"
 
