@@ -64,7 +64,6 @@ if env_exists; then
 
       # ---------------- Salvar hash ----------------
       ENV_PREFIX=$(conda info --base)/envs/$ENV_NAME
-      HASH_FILE="$ENV_PREFIX/.env_hash"
       echo "$ENV_HASH" > "$HASH_FILE"
     fi
   else
@@ -76,7 +75,6 @@ if env_exists; then
 
     # ---------------- Salvar hash ----------------
     ENV_PREFIX=$(conda info --base)/envs/$ENV_NAME
-    HASH_FILE="$ENV_PREFIX/.env_hash"
     echo "$ENV_HASH" > "$HASH_FILE"
   fi
 else
@@ -86,7 +84,6 @@ else
 
   # ---------------- Salvar hash ----------------
   ENV_PREFIX=$(conda info --base)/envs/$ENV_NAME
-  HASH_FILE="$ENV_PREFIX/.env_hash"
   echo "$ENV_HASH" > "$HASH_FILE"
 fi
 
