@@ -15,7 +15,7 @@ This repository currently contains a basic dataset, for testing purposes only. T
 
 ### Install
 
-The only requirement is to have miniconda or anaconda previously installed:
+The only requirement is to have `micromamba` available in `PATH`:
 
 ```bash
 git clone https://github.com/linea-it/pzserver_combine_redshift_dedup && cd pzserver_combine_redshift_dedup
@@ -31,7 +31,13 @@ To install all pipelines at once:
 
 The `setup.sh` will suggest a directory where the pipelines and datasets are installed, type 'yes' to confirm or 'no' to configure the desired path in each case with the respective environment variables and then run again `setup.sh`.
 
-The installation script creates new conda environment: `pipe_crd`.
+The installation script creates the `pipe_crd` environment with `micromamba`.
+
+By default the scripts use `MAMBA_ROOT_PREFIX="$HOME/.micromamba"`. On a Slurm cluster, point this variable to a persistent location visible to the jobs if needed:
+
+```bash
+export MAMBA_ROOT_PREFIX=/path/to/shared/or/persistent/micromamba
+```
 
 
 ## Run a pipeline

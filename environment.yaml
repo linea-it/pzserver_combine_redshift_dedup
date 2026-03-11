@@ -1,7 +1,6 @@
 name: pipe_crd
 channels:
   - conda-forge
-  - defaults
 dependencies:
   - python
   - pip
@@ -18,4 +17,3 @@ dependencies:
   - hats-import=0.7.3
   - tables-io
   - h5py
-
