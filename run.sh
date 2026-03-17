@@ -87,9 +87,6 @@ pick_next_process_dir() {
   done
 }
 
-# =========================
-# Error Trap
-# =========================
 trap '{
   code=$?
   { set +x; } 2>/dev/null
@@ -124,9 +121,6 @@ trap '{
   exit $code
 }' ERR
 
-# =========================
-# Args & basic checks
-# =========================
 if [ $# -lt 1 ]; then
   err "Usage: ./run.sh <config.yaml> [run_dir]"
   err "If [run_dir] is not provided, the script will pick process001, process002, ..."
@@ -141,42 +135,31 @@ PIPELINE_DIR=$(dirname "$SCRIPT_PATH")
 
 INSTALL_PIPE="$PIPELINE_DIR/install.sh"
 PIPE_BASE=$PIPELINE_DIR
+MICROMAMBA_BIN="${MICROMAMBA_BIN:-micromamba}"
+MAMBA_ROOT_PREFIX="${MAMBA_ROOT_PREFIX:-$HOME/.micromamba}"
 
 if [ ! -f "$INSTALL_PIPE" ]; then
   err "Error: Installation script not found at: $INSTALL_PIPE"
   exit 1
 fi
 
-# Auto-pick run directory if not supplied
 if [ -z "$BASE_DIR_OVERRIDE" ]; then
   BASE_DIR_OVERRIDE="$(pick_next_process_dir ".")"
   log "No run directory provided. Using '${BASE_DIR_OVERRIDE}'."
 fi
 mkdir -p "$BASE_DIR_OVERRIDE"
 
-# =========================
-# Logs wiring (shell level)
-# =========================
 LOGS_DIR="${BASE_DIR_OVERRIDE}/process_info"
 mkdir -p "$LOGS_DIR"
 LOG_FILE="$LOGS_DIR/process.log"
 
-# Replicate logs: both stdout and stderr go to terminal AND file
 exec > >(tee -a "$LOG_FILE") 2>&1
 
-# =========================
-# Install pipeline deps
-# =========================
 log "Installing pipeline..."
-# Don’t trust external DEBUG/BASH_XTRACEFD unless explicitly allowed
 _enable_xtrace
-# shellcheck disable=SC1090
-. "$INSTALL_PIPE"
+bash "$INSTALL_PIPE"
 _disable_xtrace
 
-# =========================
-# CRC_LOG_COLLECTOR auto-detection
-# =========================
 : "${CRC_LOG_COLLECTOR_PORT:=19997}"
 
 if [ -z "${CRC_LOG_COLLECTOR:-}" ]; then
@@ -191,14 +174,10 @@ fi
 
 log "CRC_LOG_COLLECTOR=${CRC_LOG_COLLECTOR}"
 
-# =========================
-# Verbosity toggles (CRC logger + Python warnings)
-# =========================
-# Aceita override via CLI: ex: CRC_LOG_LEVEL=INFO ./run.sh cfg.yaml
-: "${CRC_LOG_LEVEL:=DEBUG}"                 # DEBUG/INFO/WARNING/ERROR/CRITICAL or numeric (10/20/30/40/50)
-: "${CRC_LOG_INCLUDE_NONCRC_WARNINGS:=1}"   # 1 = allows third-party WARNING to pass through the filter
-: "${CRC_LOG_FORCE_RECONFIG:=1}"            # force recreate handlers on this PID (useful for re-runs)
-: "${PYTHONWARNINGS:=default}"              # ensures that warnings are not silenced by Python
+: "${CRC_LOG_LEVEL:=DEBUG}"
+: "${CRC_LOG_INCLUDE_NONCRC_WARNINGS:=1}"
+: "${CRC_LOG_FORCE_RECONFIG:=1}"
+: "${PYTHONWARNINGS:=default}"
 
 export CRC_LOG_LEVEL CRC_LOG_INCLUDE_NONCRC_WARNINGS CRC_LOG_FORCE_RECONFIG PYTHONWARNINGS
 
@@ -207,35 +186,27 @@ log "CRC_LOG_INCLUDE_NONCRC_WARNINGS=${CRC_LOG_INCLUDE_NONCRC_WARNINGS}"
 log "CRC_LOG_FORCE_RECONFIG=${CRC_LOG_FORCE_RECONFIG}"
 log "PYTHONWARNINGS=${PYTHONWARNINGS}"
 
-# =========================
-# Run the pipeline (via conda run)
-# =========================
 export CRC_LAUNCH_DIR="$PWD"
 
 ENV_NAME="pipe_crd"
 
 _enable_xtrace
-
 unset BASH_XTRACEFD
 
-conda run --no-capture-output -n "$ENV_NAME" bash -c "
-  export PATH=${PIPE_BASE}/scripts:\$PATH
-  export PYTHONPATH=${PIPE_BASE}/packages:\$PYTHONPATH
-  export CRC_LOG_COLLECTOR='${CRC_LOG_COLLECTOR}'
-  export CRC_LOG_LEVEL='${CRC_LOG_LEVEL}'
-  export CRC_LOG_INCLUDE_NONCRC_WARNINGS='${CRC_LOG_INCLUDE_NONCRC_WARNINGS}'
-  export CRC_LOG_FORCE_RECONFIG='${CRC_LOG_FORCE_RECONFIG}'
-  export PYTHONWARNINGS='${PYTHONWARNINGS}'
-  export CRC_LAUNCH_DIR='${CRC_LAUNCH_DIR}'
-  exec python '${PIPE_BASE}/scripts/crd-run.py' '${CONFIG_PATH}' --base_dir '${BASE_DIR_OVERRIDE}'
-"
+"$MICROMAMBA_BIN" run --root-prefix "$MAMBA_ROOT_PREFIX" -n "$ENV_NAME" bash -c '
+  export PATH="$1/scripts:$PATH"
+  export PYTHONPATH="$1/packages:$PYTHONPATH"
+  export CRC_LOG_COLLECTOR="$2"
+  export CRC_LOG_LEVEL="$3"
+  export CRC_LOG_INCLUDE_NONCRC_WARNINGS="$4"
+  export CRC_LOG_FORCE_RECONFIG="$5"
+  export PYTHONWARNINGS="$6"
+  export CRC_LAUNCH_DIR="$7"
+  exec python "$1/scripts/crd-run.py" "$8" --base_dir "$9"
+' bash "$PIPE_BASE" "$CRC_LOG_COLLECTOR" "$CRC_LOG_LEVEL" "$CRC_LOG_INCLUDE_NONCRC_WARNINGS" "$CRC_LOG_FORCE_RECONFIG" "$PYTHONWARNINGS" "$CRC_LAUNCH_DIR" "$CONFIG_PATH" "$BASE_DIR_OVERRIDE"
 
 _disable_xtrace
 
-# =========================
-# Epilogue
-# =========================
 log "Pipeline exited with code: 0"
 log "✅ Success (run dir: ${BASE_DIR_OVERRIDE})"
 exit 0
-
