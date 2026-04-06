@@ -237,11 +237,28 @@ translation_rules:
       2: 2
       3: 3
       4: 4
+      6: 6
     instrument_type_translation:
       conditions:
         - expr: "zfinal_type = 's'"
           value: "s"
         - expr: "zfinal_type = 'p'"
+          value: "p"
+      default: "p"
+
+  ELAISFBMC:
+    z_flag_translation:
+      0: 0
+      1: 1
+      2: 2
+      3: 3
+      4: 4
+      6: 6
+    instrument_type_translation:
+      conditions:
+        - expr: "zbest_type = 's'"
+          value: "s"
+        - expr: "zbest_type = 'p'"
           value: "p"
       default: "p"
 
