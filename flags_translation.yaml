@@ -97,7 +97,7 @@ translation_rules:
         - expr: "z_best_s == 0"
           value: 6
         - expr: "z_best_s == 1 and z_spec != -1"
-          value: 4
+          value: 3
         - expr: "z_best_s == 2 and use_zgrism == 1 and flag1 == 0 and flag2 == 0"
           value: 3
         - expr: "z_best_s == 3 and use_phot == 1"
@@ -128,7 +128,7 @@ translation_rules:
     z_flag_translation:
       conditions:
         - expr: "zspec_survey != '-'"
-          value: 4
+          value: 3
         - expr: "zspec_survey == '-'"
           value: 3
       default: 0
@@ -145,7 +145,7 @@ translation_rules:
     z_flag_translation:
       conditions:
         - expr: "zspec != -99 and z_flag < 400 and (len(str(int(z_flag))) <= 1 or int(str(int(z_flag))[-2]) <= 3)"
-          value: 4
+          value: 3
         - expr: "zspec == -99 and z_flag < 400 and (len(str(int(z_flag))) <= 1 or int(str(int(z_flag))[-2]) <= 3)"
           value: 3
       default: 0
