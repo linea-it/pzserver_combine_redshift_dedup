@@ -240,9 +240,9 @@ translation_rules:
       6: 6
     instrument_type_translation:
       conditions:
-        - expr: "zfinal_type = 's'"
+        - expr: "zfinal_type == 's'"
           value: "s"
-        - expr: "zfinal_type = 'p'"
+        - expr: "zfinal_type == 'p'"
           value: "p"
       default: "p"
 
@@ -256,9 +256,9 @@ translation_rules:
       6: 6
     instrument_type_translation:
       conditions:
-        - expr: "zbest_type = 's'"
+        - expr: "zbest_type == 's'"
           value: "s"
-        - expr: "zbest_type = 'p'"
+        - expr: "zbest_type == 'p'"
           value: "p"
       default: "p"
 
@@ -336,9 +336,9 @@ translation_rules:
       6: 6
     instrument_type_translation:
       conditions:
-        - expr: "zfinal_type = 's'"
+        - expr: "zfinal_type == 's'"
           value: "s"
-        - expr: "zfinal_type = 'p'"
+        - expr: "zfinal_type == 'p'"
           value: "p"
       default: "p"
 
