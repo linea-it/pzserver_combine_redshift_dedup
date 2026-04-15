@@ -11,10 +11,10 @@ tiebreaking_priority:
   # - Higher values are considered better; lower values are worse.
   # The columns will be evaluated in the order listed to resolve duplicates.
 
-delta_z_threshold: 0.0005    # Maximum allowed redshift difference (|z1 - z2|) to resolve hard ties
+delta_z_threshold: 0.001    # Maximum allowed redshift difference (|z1 - z2|) to resolve hard ties
                              # Applied only when initial tiebreaking via columns results in a tie (tie_result == 2)
 
-crossmatch_radius_arcsec: 0.75  # Angular radius (in arcseconds) used to perform spatial crossmatching.
+crossmatch_radius_arcsec: 0.5  # Angular radius (in arcseconds) used to perform spatial crossmatching.
 
 crossmatch_n_neighbors: 10      # Number of nearest neighbors to consider during crossmatching.
 
