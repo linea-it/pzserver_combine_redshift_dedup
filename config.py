@@ -82,6 +82,8 @@ class Param(BaseModel):
     combine_type: str = "concatenate"
     z_flag_homogenized_value_to_cut: float = 3.0
     flags_translation_file: str = str(Path(MAINDIR, "flags_translation.yaml"))
+    insert_DP1_footprint_flag: bool = False
+    insert_rubin_footprint_flag: bool = True
 
 
 class Config(BaseModel):

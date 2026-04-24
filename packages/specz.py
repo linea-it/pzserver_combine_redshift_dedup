@@ -3,7 +3,7 @@ from __future__ import annotations
 """Combine Redshift Catalogs - catalog preparation.
 
 Loads a raw spectroscopic catalog, validates/normalizes schema, derives
-standardized fields (IDs, homogenized flags, DP1 flags), optionally imports
+standardized fields (IDs, homogenized flags, footprint flags), optionally imports
 HATS and generates margin cache, and writes a prepared Parquet artifact.
 
 Public API:
@@ -90,6 +90,9 @@ DP1_REGIONS = [
     (95.00, -25.00, 2.5),  # Rubin SV 95 -25
     (106.23, -10.51, 2.5),  # Seagull
 ]
+RUBIN_FOOTPRINT_FILE = os.path.join(
+    os.path.dirname(os.path.dirname(__file__)), "examples", "rubin_footprint_ra_dec.txt"
+)
 
 
 # -----------------------
@@ -587,6 +590,26 @@ def _normalize_types(
 
 
 # -----------------------
+# Config helpers
+# -----------------------
+def _as_bool_config(value: Any, default: bool) -> bool:
+    """Parse bool-like config values robustly."""
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, np.integer)):
+        return bool(value)
+    if isinstance(value, str):
+        v = value.strip().lower()
+        if v in {"1", "true", "yes", "y", "on"}:
+            return True
+        if v in {"0", "false", "no", "n", "off", ""}:
+            return False
+    return default
+
+
+# -----------------------
 # CRD_ID generation
 # -----------------------
 def _generate_crd_ids(
@@ -710,8 +733,66 @@ def _validate_ra_dec_or_fail(df: dd.DataFrame, product_name: str) -> None:
 
 
 # -----------------------
-# DP1 flagging
+# Footprint flagging
 # -----------------------
+def _parse_array_from_footprint_file(text: str, var_name: str) -> np.ndarray:
+    """Extract a ``array([...])`` block by variable name from the footprint file."""
+    pat = rf"{re.escape(var_name)}\s*array\((\[[\s\S]*?\])\)"
+    m = re.search(pat, text)
+    if not m:
+        raise ValueError(f"Could not find {var_name} array(...) block in footprint file")
+    values = _ast.literal_eval(m.group(1))
+    return np.asarray(values, dtype=float)
+
+
+def _load_rubin_border_arrays(footprint_file: str = RUBIN_FOOTPRINT_FILE) -> tuple[np.ndarray, np.ndarray]:
+    """Load Rubin border RA/DEC arrays from ``examples/rubin_footprint_ra_dec.txt``."""
+    with open(footprint_file, "r", encoding="utf-8") as f:
+        text = f.read()
+    border_ra = _parse_array_from_footprint_file(text, "border_ra")
+    border_dec = _parse_array_from_footprint_file(text, "border_dec")
+    if border_ra.shape != border_dec.shape:
+        raise ValueError(
+            f"Rubin footprint arrays have mismatched sizes: "
+            f"len(border_ra)={len(border_ra)} vs len(border_dec)={len(border_dec)}"
+        )
+    return border_ra, border_dec
+
+
+def _build_rubin_dec_limit_interpolator(
+    border_ra: np.ndarray,
+    border_dec: np.ndarray,
+    *,
+    bin_width: float = 0.5,
+    margin_deg: float = 1.0,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Build RA/DEC lookup arrays to evaluate Rubin footprint membership."""
+    border = pd.DataFrame(
+        {
+            "ra": np.asarray(border_ra, dtype=float) % 360.0,
+            "dec": np.asarray(border_dec, dtype=float),
+        }
+    )
+    border["ra_bin"] = np.floor(border["ra"] / bin_width) * bin_width
+
+    upper = (
+        border.groupby("ra_bin", as_index=False)
+        .agg(dec_upper=("dec", "max"))
+        .sort_values("ra_bin")
+        .reset_index(drop=True)
+    )
+    upper["ra_center"] = upper["ra_bin"] + bin_width / 2.0
+    upper["dec_limit"] = upper["dec_upper"] + margin_deg
+
+    ra_grid = upper["ra_center"].to_numpy(dtype=float)
+    dec_grid = upper["dec_limit"].to_numpy(dtype=float)
+
+    # Handle 0/360 wrap-around in interpolation.
+    ra_ext = np.concatenate([ra_grid - 360.0, ra_grid, ra_grid + 360.0])
+    dec_ext = np.concatenate([dec_grid, dec_grid, dec_grid])
+    return ra_ext, dec_ext
+
+
 def _flag_dp1(df: dd.DataFrame) -> dd.DataFrame:
     """Flag rows within predefined DP1 circular fields.
 
@@ -740,6 +821,35 @@ def _flag_dp1(df: dd.DataFrame) -> dd.DataFrame:
         return p
 
     meta = df._meta.assign(is_in_DP1_fields=pd.Series(pd.array([], dtype=DTYPE_INT)))
+    return df.map_partitions(_compute, meta=meta)
+
+
+def _flag_rubin_footprint(df: dd.DataFrame) -> dd.DataFrame:
+    """Flag rows that lie inside Rubin footprint from examples/rubin_footprint_ra_dec.txt.
+
+    The footprint rule follows the reference file logic: object is inside when
+    ``dec <= dec_limit_at_ra`` where ``dec_limit_at_ra`` is interpolated from the
+    upper boundary binned in 0.5 deg in RA and expanded by +1 deg in DEC.
+    """
+    border_ra, border_dec = _load_rubin_border_arrays()
+    ra_ext, dec_ext = _build_rubin_dec_limit_interpolator(
+        border_ra, border_dec, bin_width=0.5, margin_deg=1.0
+    )
+
+    def _compute(part: pd.DataFrame) -> pd.DataFrame:
+        p = part.copy()
+        ra = p["ra"].to_numpy(dtype=float) % 360.0
+        dec = p["dec"].to_numpy(dtype=float)
+        dec_limit = np.interp(ra, ra_ext, dec_ext)
+        in_footprint = np.isfinite(ra) & np.isfinite(dec) & (dec <= dec_limit)
+        p["is_in_rubin_footprint"] = pd.Series(
+            np.where(in_footprint, 1, 0), index=p.index, dtype=DTYPE_INT
+        )
+        return p
+
+    meta = df._meta.assign(
+        is_in_rubin_footprint=pd.Series(pd.array([], dtype=DTYPE_INT))
+    )
     return df.map_partitions(_compute, meta=meta)
 
 
@@ -784,7 +894,7 @@ def _select_output_columns(
     """Assemble final output schema and coerce optional expression columns.
 
     Args:
-      df: Frame after tie-breaking and DP1 flagging.
+      df: Frame after tie-breaking and footprint flagging.
       translation_rules_uc: Upper-cased translation rules.
       tiebreaking_priority: Priority columns to append if present.
       used_type_fastpath: Whether `type` was reused for instrument_type.
@@ -808,6 +918,7 @@ def _select_output_columns(
         "source",
         "tie_result",
         "is_in_DP1_fields",
+        "is_in_rubin_footprint",
         "compared_to",
         # New optional current component label (will only be kept if present)
         "group_id",
@@ -959,6 +1070,7 @@ def _build_arrow_schema_for_catalog(
         "z_flag_homogenized": pa.float64(),
         "tie_result": pa.int8(),
         "is_in_DP1_fields": pa.int64(),
+        "is_in_rubin_footprint": pa.int64(),
         "compared_to": pa.string(),
     }
 
@@ -1152,6 +1264,7 @@ def _build_collection_with_retry(
                 ("z_flag_homogenized", DTYPE_FLOAT),
                 ("tie_result", DTYPE_INT8),
                 ("is_in_DP1_fields", DTYPE_INT),
+                ("is_in_rubin_footprint", DTYPE_INT),
                 ("compared_to", DTYPE_STR),
             ]:
                 if col in dfp.columns:
@@ -1407,8 +1520,18 @@ def prepare_catalog(
     # 10) Geometry validation
     _validate_ra_dec_or_fail(df, product_name)
 
-    # 11) DP1 flag
-    df = _flag_dp1(df)
+    # 11) Footprint flags
+    insert_dp1 = _as_bool_config(
+        param_config.get("insert_DP1_footprint_flag", False), default=False
+    )
+    insert_rubin = _as_bool_config(
+        param_config.get("insert_rubin_footprint_flag", True), default=True
+    )
+
+    if insert_dp1:
+        df = _flag_dp1(df)
+    if insert_rubin:
+        df = _flag_rubin_footprint(df)
 
     # 12) Assemble final columns
     df = _select_output_columns(
