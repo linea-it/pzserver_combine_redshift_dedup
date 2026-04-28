@@ -546,18 +546,36 @@ def main(
         path_to_translation_file = os.path.abspath(
             os.path.join(os.path.dirname(config_path), path_to_translation_file)
         )
-    exists = os.path.isfile(path_to_translation_file)
-    size_kb = (os.path.getsize(path_to_translation_file) / 1024.0) if exists else 0.0
-    log_init.info(
-        "flags_translation_file=%s (exists=%s, size=%.1f KB)",
-        path_to_translation_file,
-        exists,
-        size_kb,
+    source_translation_file = path_to_translation_file
+    source_exists = os.path.isfile(source_translation_file)
+    source_size_kb = (
+        os.path.getsize(source_translation_file) / 1024.0 if source_exists else 0.0
     )
-    if not exists:
+    log_init.info(
+        "flags_translation_file source=%s (exists=%s, size=%.1f KB)",
+        source_translation_file,
+        source_exists,
+        source_size_kb,
+    )
+    if not source_exists:
         raise FileNotFoundError(
-            f"flags_translation_file not found: {path_to_translation_file}"
+            f"flags_translation_file not found: {source_translation_file}"
         )
+
+    # Stage translation file inside base_dir and always use that staged copy.
+    path_to_translation_file = os.path.join(
+        base_dir, os.path.basename(source_translation_file)
+    )
+    try:
+        _copy_file(source_translation_file, path_to_translation_file, log_init)
+    except Exception as e:
+        log_init.error(
+            "Failed to stage flags_translation_file into base_dir: %s",
+            e,
+            exc_info=True,
+        )
+        raise
+
     try:
         translation_config = load_yml(path_to_translation_file)
     except Exception as e:
@@ -1908,7 +1926,19 @@ def main(
         publish_logger.error("FAILED to copy config.yaml: %s", e)
         raise
 
-    # 4) final output
+    # 4) flags_translation.yaml
+    try:
+        if os.path.exists(path_to_translation_file):
+            _copy_file(
+                path_to_translation_file,
+                os.path.join(out_root_and_dir, "flags_translation.yaml"),
+                publish_logger,
+            )
+    except Exception as e:
+        publish_logger.error("FAILED to copy flags_translation.yaml: %s", e)
+        raise
+
+    # 5) final output
     try:
         src_out = f"{staged_output_base}.{output_format}"
         dst_out = os.path.join(out_root_and_dir, f"{output_name}.{output_format}")
