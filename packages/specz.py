@@ -1606,19 +1606,42 @@ def prepare_catalog(
     ):
         try:
             cut_val = float(z_flag_homogenized_value_to_cut)
-            if 0.0 < cut_val <= 4.0:
-                initial_count = df.shape[0].compute()
+        except (TypeError, ValueError):
+            lg.warning(
+                "Invalid z_flag_homogenized_value_to_cut=%s; skipping cut.",
+                z_flag_homogenized_value_to_cut,
+            )
+        else:
+            if cut_val > 0.0:
+                initial_count, min_flag, max_flag = dask.compute(
+                    df.shape[0],
+                    df["z_flag_homogenized"].min(),
+                    df["z_flag_homogenized"].max(),
+                )
                 df = df[df["z_flag_homogenized"] >= cut_val]
                 final_count = df.shape[0].compute()
                 lg.info(
-                    f"Applied z_flag_homogenized cut >= {cut_val}: {initial_count} -> {final_count} rows"
+                    "Applied z_flag_homogenized cut >= %s: %s -> %s rows",
+                    cut_val,
+                    initial_count,
+                    final_count,
                 )
+                if final_count == 0:
+                    msg = (
+                        f"[{product_name}] Catalog preparation failed: no objects "
+                        "remain after applying the homogenized flag filter "
+                        f"(z_flag_homogenized >= {cut_val}). Rows before filter: "
+                        f"{initial_count}; rows after filter: 0; observed "
+                        "z_flag_homogenized range before filter: "
+                        f"{min_flag} to {max_flag}."
+                    )
+                    lg.error(msg)
+                    raise ValueError(msg)
             else:
-                lg.warning(
-                    f"Invalid z_flag_homogenized_value_to_cut={z_flag_homogenized_value_to_cut}; skipping cut."
+                lg.info(
+                    "Skipping z_flag_homogenized cut because configured value is %s.",
+                    cut_val,
                 )
-        except Exception as e:
-            lg.warning(f"Could not apply z_flag_homogenized cut ({e}); skipping cut.")
 
     # 8) Persist + repartition
     part_size = "256MB"
