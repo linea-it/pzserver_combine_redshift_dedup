@@ -99,6 +99,28 @@ def _filesize_mb(path: str) -> float:
         return float("inf")
 
 
+def _ensure_non_empty_final_dataframe(
+    df: pd.DataFrame,
+    logger: logging.LoggerAdapter,
+    *,
+    context: str,
+) -> None:
+    """Fail clearly if the final dataframe has no rows."""
+    try:
+        n_rows = int(len(df))
+    except Exception as e:
+        logger.warning("Could not compute final dataframe row count: %s", e)
+        return
+
+    if n_rows == 0:
+        msg = (
+            "Final catalog is empty before export "
+            f"({context}). Nothing can be consolidated."
+        )
+        logger.error(msg)
+        raise RuntimeError(msg)
+
+
 def _is_collection_root(path: str) -> bool:
     """Return True if path contains collection.properties (HATS root)."""
     return (
@@ -786,6 +808,15 @@ def main(
         ]
 
         if not prepared_info:
+            if len(empty_results) == len(results) and all(
+                r[4] == "empty_after_cut" for r in empty_results
+            ):
+                names = ", ".join(r[3] for r in empty_results)
+                raise RuntimeError(
+                    "All input catalogs became empty after applying the "
+                    "z_flag_homogenized cut; no non-empty catalogs remain for "
+                    f"downstream processing. Empty catalogs: {names}."
+                )
             raise RuntimeError(
                 "All input catalogs were excluded during preparation; no non-empty "
                 "catalogs remain for downstream processing."
@@ -1573,6 +1604,12 @@ def main(
     except Exception as e:
         log_cons.warning("Could not compute len(df_final): %s", e)
 
+    _ensure_non_empty_final_dataframe(
+        df_final,
+        log_cons,
+        context="after crossmatch/deduplication and before consolidation filters",
+    )
+
     if combine_mode == "concatenate" and "tie_result" in df_final.columns:
         log_cons.info("Dropping 'tie_result' (concatenate mode)")
         try:
@@ -1753,9 +1790,23 @@ def main(
                     kept,
                     dropped,
                 )
+                _ensure_non_empty_final_dataframe(
+                    df_final,
+                    log_cons,
+                    context=(
+                        "after concatenate_and_remove_duplicates "
+                        f"tie_treatment_option={tie_treatment_option}"
+                    ),
+                )
             except Exception as e:
                 log_cons.error("FAILED while filtering by tie_treatment_option: %s", e)
                 raise
+
+    _ensure_non_empty_final_dataframe(
+        df_final,
+        log_cons,
+        context="immediately before final export",
+    )
 
     if USE_ARROW_TYPES:
         log_cons.info(
