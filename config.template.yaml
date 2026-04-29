@@ -74,7 +74,7 @@ output_format: "parquet" # Output format: csv, parquet, hdf5, or fits
 param:
   combine_type: "concatenate_and_mark_duplicates" # Options: "concatenate", "concatenate_and_mark_duplicates", or "concatenate_and_remove_duplicates"
   tie_treatment_option: "remove_all" # Options (only for concatenate_and_remove_duplicates): "remove_all", "keep_all", "draw_one"
-  z_flag_homogenized_value_to_cut: 0.0 # Value to cut in the homogenized z_flag (cut >= value). 0.0 or null means keep all.
+  z_flag_homogenized_value_to_cut: 0.0 # Valid cuts are 1, 2, 3, 4, 5, 6. Invalid values (<=0, >6, non-integer) skip the cut with a warning.
   insert_DP1_footprint_flag: false # Adds is_in_DP1_fields (1/0)
   insert_rubin_footprint_flag: true # Adds is_in_rubin_footprint (1/0)
   flags_translation_file: flags_translation.yaml # File with homogenization rules for z_flag and type

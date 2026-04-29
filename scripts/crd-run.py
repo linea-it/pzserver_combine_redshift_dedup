@@ -671,6 +671,14 @@ def main(
 
         def _prebuilt_result_tuple(entry: dict) -> tuple[str, str, str, str, str]:
             base = os.path.join(temp_dir, f"prepared_{entry['internal_name']}")
+            empty_marker = f"{base}.empty"
+            if os.path.exists(empty_marker):
+                log_prep.warning(
+                    "Skipping previously prepared empty catalog %s; marker=%s",
+                    entry["internal_name"],
+                    empty_marker,
+                )
+                return ("", "ra", "dec", entry["internal_name"], "empty_after_cut")
             hats = f"{base}_hats"
             if os.path.isdir(hats):
                 return (hats, "ra", "dec", entry["internal_name"], "")
@@ -749,6 +757,22 @@ def main(
         if len(results) != len(catalogs):
             raise RuntimeError("Internal error: prepared results count mismatch.")
 
+        empty_results = [r for r in results if r[4]]
+        if empty_results:
+            for r in empty_results:
+                log_prep.warning(
+                    "Catalog %s was excluded from subsequent steps because "
+                    "preparation returned status=%s.",
+                    r[3],
+                    r[4],
+                )
+            log_prep.warning(
+                "Excluded %d empty catalog(s) after preparation; continuing with "
+                "%d catalog(s).",
+                len(empty_results),
+                len(results) - len(empty_results),
+            )
+
         prepared_info = [
             {
                 "collection_path": r[0],
@@ -758,7 +782,14 @@ def main(
                 "internal_name": r[3],
             }
             for r in results
+            if not r[4]
         ]
+
+        if not prepared_info:
+            raise RuntimeError(
+                "All input catalogs were excluded during preparation; no non-empty "
+                "catalogs remain for downstream processing."
+            )
 
         # Mark prepares as done
         resume_log = os.path.join(temp_dir, "process_resume.log")

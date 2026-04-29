@@ -80,6 +80,7 @@ class Inputs(BaseModel):
 
 class Param(BaseModel):
     combine_type: str = "concatenate"
+    # Valid cuts are 1, 2, 3, 4, 5, 6. Invalid values skip the cut with a warning.
     z_flag_homogenized_value_to_cut: float = 3.0
     flags_translation_file: str = str(Path(MAINDIR, "flags_translation.yaml"))
     insert_DP1_footprint_flag: bool = False
