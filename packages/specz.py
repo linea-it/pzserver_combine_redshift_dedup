@@ -1606,19 +1606,68 @@ def prepare_catalog(
     ):
         try:
             cut_val = float(z_flag_homogenized_value_to_cut)
-            if 0.0 < cut_val <= 4.0:
-                initial_count = df.shape[0].compute()
+        except (TypeError, ValueError):
+            lg.warning(
+                "Invalid z_flag_homogenized_value_to_cut=%s; skipping cut.",
+                z_flag_homogenized_value_to_cut,
+            )
+        else:
+            if cut_val not in {1.0, 2.0, 3.0, 4.0, 5.0, 6.0}:
+                lg.warning(
+                    "Invalid z_flag_homogenized_value_to_cut=%s; valid cut values "
+                    "are 1, 2, 3, 4, 5, 6. Skipping cut.",
+                    z_flag_homogenized_value_to_cut,
+                )
+            else:
+                initial_count, min_flag, max_flag = dask.compute(
+                    df.shape[0],
+                    df["z_flag_homogenized"].min(),
+                    df["z_flag_homogenized"].max(),
+                )
                 df = df[df["z_flag_homogenized"] >= cut_val]
                 final_count = df.shape[0].compute()
                 lg.info(
-                    f"Applied z_flag_homogenized cut >= {cut_val}: {initial_count} -> {final_count} rows"
+                    "Applied z_flag_homogenized cut >= %s: %s -> %s rows",
+                    cut_val,
+                    initial_count,
+                    final_count,
                 )
-            else:
-                lg.warning(
-                    f"Invalid z_flag_homogenized_value_to_cut={z_flag_homogenized_value_to_cut}; skipping cut."
-                )
-        except Exception as e:
-            lg.warning(f"Could not apply z_flag_homogenized cut ({e}); skipping cut.")
+                if final_count == 0:
+                    marker_path = os.path.join(
+                        temp_dir, f"prepared_{product_name}.empty"
+                    )
+                    try:
+                        with open(marker_path, "w", encoding="utf-8") as fp:
+                            fp.write(
+                                "empty_after_z_flag_homogenized_cut\n"
+                                f"product={product_name}\n"
+                                f"z_flag_homogenized_value_to_cut={cut_val}\n"
+                                f"rows_before={initial_count}\n"
+                                "rows_after=0\n"
+                                f"min_flag_before={min_flag}\n"
+                                f"max_flag_before={max_flag}\n"
+                            )
+                    except Exception as e:
+                        lg.warning(
+                            "Could not write empty-catalog marker %s: %s",
+                            marker_path,
+                            e,
+                        )
+                    lg.warning(
+                        "[%s] Catalog is empty after z_flag_homogenized cut >= %s; "
+                        "excluding it from subsequent HATS, crossmatch, and "
+                        "deduplication steps. Rows before filter: %s; observed "
+                        "z_flag_homogenized range before filter: %s to %s.",
+                        product_name,
+                        cut_val,
+                        initial_count,
+                        min_flag,
+                        max_flag,
+                    )
+                    lg.info(
+                        f"END prepare_catalog product={product_name} empty_after_cut"
+                    )
+                    return "", "ra", "dec", product_name, "empty_after_cut"
 
     # 8) Persist + repartition
     part_size = "256MB"
