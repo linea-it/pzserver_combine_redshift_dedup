@@ -64,6 +64,13 @@ import yaml          # kept for other utilities in this module
 _CRC_LOG_LOCK = threading.RLock()
 
 
+def _close_logger_handlers(logger: logging.Logger) -> None:
+    """Remove and close all handlers attached directly to a logger."""
+    for handler in logger.handlers[:]:
+        logger.removeHandler(handler)
+        handler.close()
+
+
 # -----------------------
 # Formatters & Filters
 # -----------------------
@@ -311,12 +318,12 @@ def ensure_crc_logger(log_dir: str, level: int = logging.INFO) -> logging.Logger
             if isinstance(obj, logging.Logger) and name.startswith("crc.") and name != "crc":
                 obj.propagate = True
                 if obj.handlers:
-                    obj.handlers.clear()
+                    _close_logger_handlers(obj)
                 obj.setLevel(logging.NOTSET)
 
         # Fresh handler set.
         if logger.handlers:
-            logger.handlers.clear()
+            _close_logger_handlers(logger)
 
         # Console handler:
         # - Driver: always add console.

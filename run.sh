@@ -17,12 +17,14 @@ export BASH_XTRACEFD=9
 _enable_xtrace() {
   # Enable xtrace ONLY if explicitly requested, and only on interactive TTYs.
   if [ "${DEBUG:-0}" = "1" ] && [ "${ALLOW_XTRACE:-0}" = "1" ] && [ -t 2 ]; then
-    export BASH_XTRACEFD=2
+    exec 9>&2
+    export BASH_XTRACEFD=9
     set -x
   fi
 }
 _disable_xtrace() {
   { set +x; } 2>/dev/null
+  exec 9>/dev/null
   export BASH_XTRACEFD=9
 }
 

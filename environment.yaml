@@ -2,19 +2,19 @@ name: pipe_crd
 channels:
   - conda-forge
 dependencies:
-  - python
-  - pip
-  - bokeh==3.5
-  - dask==2025.3.0
-  - distributed==2025.3.0
-  - dask-jobqueue==0.9.0
-  - pandas
-  - cdshealpix==0.7.2
-  - nested-pandas==0.6.6
-  - numpy
-  - pyyaml
-  - lsdb=0.7.3
-  - hats=0.7.3
-  - hats-import=0.7.3
-  - tables-io
-  - h5py
+  - python=3.14.4
+  - pip=26.0.1
+  - bokeh=3.5.0
+  - dask=2025.3.1
+  - distributed=2025.3.1
+  - dask-jobqueue=0.9.0
+  - pandas=2.3.3
+  - cdshealpix=0.8.1
+  - nested-pandas=0.6.9
+  - numpy=2.4.3
+  - pyyaml=6.0.3
+  - lsdb=0.9.0
+  - hats=0.9.0
+  - hats-import=0.9.0
+  - tables-io=1.1.0
+  - h5py=3.16.0
