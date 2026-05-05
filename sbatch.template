@@ -9,7 +9,6 @@
 #SBATCH --error={err}
 #SBATCH --partition=cpu_pipelines
 #SBATCH --propagate
-#SBATCH --exclusive
 
 {cmd} .
 
