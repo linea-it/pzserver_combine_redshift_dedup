@@ -8,23 +8,23 @@ executor:
   args:
     n_workers: 3
     threads_per_worker: 2
-    memory_limit: "6GB"
+    memory_limit: "4GB"
 
 #executor:
-#  name: "slurm" # Name of the job scheduler
+#  name: "slurm"
 #  args:
 #    instance:
-#      cores: 25 # Number of cores per job
-#      processes: 1 # Number of processes per job
-#      memory: "50GB" # Memory allocated per job
-#      queue: "cpu" # Queue name
-#      account: "hpc-bpglsst"
-#      job_extra_directives: # Extra directives for Slurm
+#      cores: 16
+#      processes: 4
+#      memory: "48GB"
+#      queue: "cpu_small"
+#      account: "hpc-public"
+#      job_extra_directives:
 #        - "--propagate"
 #        - "--time=2:00:00"
 #    scale:
-#      minimum_jobs: 10
-#      maximum_jobs: 20
+#      minimum_jobs: 4
+#      maximum_jobs: 12
 
 inputs:
   specz:
