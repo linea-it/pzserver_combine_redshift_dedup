@@ -301,6 +301,54 @@ translation_rules:
     instrument_type_translation:
       default: "s"
 
+  JADES_DR5_PHOTOZ:
+    z_flag_translation:
+      conditions:
+        # Flag 0: no usable photometric redshift measurement.
+        - expr: "not np.isfinite(z) or not np.isfinite(z_ml) or not np.isfinite(chi_a) or not np.isfinite(nfilt) or nfilt <= 0"
+          value: 0
+
+        # Flag 1: valid photo-z exists, but with weaker/more ambiguous constraints.
+        - expr: "np.isfinite(z) and np.isfinite(z_ml) and np.isfinite(chi_a) and np.isfinite(nfilt) and nfilt > 0"
+          value: 1
+
+        # Flag 2: usable photo-z. Main EAZY point estimates agree within the 95% confidence interval.
+        - expr: "np.isfinite(l95) and np.isfinite(u95) and np.isfinite(z_peak) and np.isfinite(z500) and l95 <= z_ml <= u95 and l95 <= z_peak <= u95 and l95 <= z500 <= u95"
+          value: 2
+
+        # Flag 3: robust photo-z. Main EAZY point estimates agree within the 68% confidence interval.
+        - expr: "np.isfinite(l68) and np.isfinite(u68) and np.isfinite(z_peak) and np.isfinite(z500) and l68 <= z_ml <= u68 and l68 <= z_peak <= u68 and l68 <= z500 <= u68"
+          value: 3
+
+      default: 0
+
+    instrument_type_translation:
+      default: "p"
+
+  JADES_DR5_PHOTOZ_KRON:
+    z_flag_translation:
+      conditions:
+        # Flag 0: no usable photometric redshift measurement.
+        - expr: "not np.isfinite(z) or not np.isfinite(z_ml) or not np.isfinite(chi_a) or not np.isfinite(nfilt) or nfilt <= 0"
+          value: 0
+
+        # Flag 1: valid photo-z exists, but with weaker/more ambiguous constraints.
+        - expr: "np.isfinite(z) and np.isfinite(z_ml) and np.isfinite(chi_a) and np.isfinite(nfilt) and nfilt > 0"
+          value: 1
+
+        # Flag 2: usable photo-z. Main EAZY point estimates agree within the 95% confidence interval.
+        - expr: "np.isfinite(l95) and np.isfinite(u95) and np.isfinite(z_peak) and np.isfinite(z500) and l95 <= z_ml <= u95 and l95 <= z_peak <= u95 and l95 <= z500 <= u95"
+          value: 2
+
+        # Flag 3: robust photo-z. Main EAZY point estimates agree within the 68% confidence interval.
+        - expr: "np.isfinite(l68) and np.isfinite(u68) and np.isfinite(z_peak) and np.isfinite(z500) and l68 <= z_ml <= u68 and l68 <= z_peak <= u68 and l68 <= z500 <= u68"
+          value: 3
+
+      default: 0
+
+    instrument_type_translation:
+      default: "p"
+
   MOSDEF:
     z_flag_translation:
       7: 4
