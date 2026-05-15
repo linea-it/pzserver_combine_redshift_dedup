@@ -137,7 +137,6 @@ translation_rules:
           value: "p"
       default: "p"
       
-  # TO BE REVIEWED
   ASTRODEEP-JWST:
     z_flag_translation:
       conditions:
@@ -209,7 +208,6 @@ translation_rules:
     instrument_type_translation:
       default: "s"
 
-  # TO BE REVIEWED
   DESI:
     z_flag_translation:
       conditions:
@@ -397,6 +395,23 @@ translation_rules:
       4: 3
     instrument_type_translation:
       default: "g"
+
+  SDSS_DR17:
+    z_flag_translation:
+      conditions:
+        - expr: "CLASS != 'STAR' and z_flag != 0 and SPECPRIMARY != 1"
+          value: 0
+        - expr: "CLASS != 'STAR' and z_flag != 0 and SPECPRIMARY == 1"
+          value: 1
+        - expr: "CLASS != 'STAR' and z_flag == 0 and SPECPRIMARY == 1 and z_err >= 0.001"
+          value: 3
+        - expr: "CLASS != 'STAR' and z_flag == 0 and SPECPRIMARY == 1 and z_err < 0.001"
+          value: 4
+        - expr: "CLASS == 'STAR'"
+          value: 6
+      default: 0
+    instrument_type_translation:
+      default: "s"
 
   SWIRE-REVISED:
     z_flag_translation:
