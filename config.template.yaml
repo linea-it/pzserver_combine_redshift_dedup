@@ -14,17 +14,17 @@ executor:
 #  name: "slurm"
 #  args:
 #    instance:
-#      cores: 16
-#      processes: 4
-#      memory: "48GB"
+#      cores: 4
+#      processes: 1
+#      memory: "32GB"
 #      queue: "cpu_small"
 #      account: "hpc-public"
 #      job_extra_directives:
 #        - "--propagate"
 #        - "--time=2:00:00"
 #    scale:
-#      minimum_jobs: 4
-#      maximum_jobs: 12
+#      minimum_jobs: 7
+#      maximum_jobs: 21
 
 inputs:
   specz:
