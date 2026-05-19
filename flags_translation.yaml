@@ -153,6 +153,23 @@ translation_rules:
           value: "p"
       default: "p"
 
+  COSMOS2020_CLASSIC:
+    z_flag_translation:
+      conditions:
+        - expr: "lp_type == -9 or not np.isfinite(z)"
+          value: 0
+        - expr: "lp_type == 1"
+          value: 6
+        - expr: "(lp_type != 1 and lp_type != -9) and np.isfinite(z)"
+          value: 1
+        - expr: "(lp_type != 1 and lp_type != -9) and np.isfinite(z) and np.isfinite(lp_zPDF) and np.isfinite(lp_zMinChi2) and np.isfinite(lp_zPDF_l68) and np.isfinite(lp_zPDF_u68) and lp_zPDF_l68 <= z <= lp_zPDF_u68 and lp_zPDF_l68 <= lp_zPDF <= lp_zPDF_u68 and lp_zPDF_l68 <= lp_zMinChi2 <= lp_zPDF_u68"
+          value: 2
+        - expr: "(lp_type != 1 and lp_type != -9) and np.isfinite(lp_NbFilt) and lp_NbFilt > 30 and np.isfinite(z) and np.isfinite(lp_zPDF) and np.isfinite(lp_zMinChi2) and np.isfinite(lp_zPDF_l68) and np.isfinite(lp_zPDF_u68) and lp_zPDF_l68 <= z <= lp_zPDF_u68 and lp_zPDF_l68 <= lp_zPDF <= lp_zPDF_u68 and lp_zPDF_l68 <= lp_zMinChi2 <= lp_zPDF_u68"
+          value: 3
+      default: 0
+    instrument_type_translation:
+      default: "p"
+
   COSMOS_SRC:
     z_flag_translation:
       conditions:
@@ -319,48 +336,30 @@ translation_rules:
   JADES_DR5_PHOTOZ:
     z_flag_translation:
       conditions:
-        # Flag 0: no usable photometric redshift measurement.
         - expr: "not np.isfinite(z) or not np.isfinite(z_ml) or not np.isfinite(chi_a) or not np.isfinite(nfilt) or nfilt <= 0"
           value: 0
-
-        # Flag 1: valid photo-z exists, but with weaker/more ambiguous constraints.
         - expr: "np.isfinite(z) and np.isfinite(z_ml) and np.isfinite(chi_a) and np.isfinite(nfilt) and nfilt > 0"
           value: 1
-
-        # Flag 2: usable photo-z. Main EAZY point estimates agree within the 95% confidence interval.
         - expr: "np.isfinite(l95) and np.isfinite(u95) and np.isfinite(z_peak) and np.isfinite(z500) and l95 <= z_ml <= u95 and l95 <= z_peak <= u95 and l95 <= z500 <= u95"
           value: 2
-
-        # Flag 3: robust photo-z. Main EAZY point estimates agree within the 68% confidence interval.
         - expr: "np.isfinite(l68) and np.isfinite(u68) and np.isfinite(z_peak) and np.isfinite(z500) and l68 <= z_ml <= u68 and l68 <= z_peak <= u68 and l68 <= z500 <= u68"
           value: 3
-
       default: 0
-
     instrument_type_translation:
       default: "p"
 
   JADES_DR5_PHOTOZ_KRON:
     z_flag_translation:
       conditions:
-        # Flag 0: no usable photometric redshift measurement.
         - expr: "not np.isfinite(z) or not np.isfinite(z_ml) or not np.isfinite(chi_a) or not np.isfinite(nfilt) or nfilt <= 0"
           value: 0
-
-        # Flag 1: valid photo-z exists, but with weaker/more ambiguous constraints.
         - expr: "np.isfinite(z) and np.isfinite(z_ml) and np.isfinite(chi_a) and np.isfinite(nfilt) and nfilt > 0"
           value: 1
-
-        # Flag 2: usable photo-z. Main EAZY point estimates agree within the 95% confidence interval.
         - expr: "np.isfinite(l95) and np.isfinite(u95) and np.isfinite(z_peak) and np.isfinite(z500) and l95 <= z_ml <= u95 and l95 <= z_peak <= u95 and l95 <= z500 <= u95"
           value: 2
-
-        # Flag 3: robust photo-z. Main EAZY point estimates agree within the 68% confidence interval.
         - expr: "np.isfinite(l68) and np.isfinite(u68) and np.isfinite(z_peak) and np.isfinite(z500) and l68 <= z_ml <= u68 and l68 <= z_peak <= u68 and l68 <= z500 <= u68"
           value: 3
-
       default: 0
-
     instrument_type_translation:
       default: "p"
 
@@ -546,18 +545,3 @@ translation_rules:
       default: 0
     instrument_type_translation:
       default: "s"
-
-  example_survey:
-    z_flag_translation:
-      88: 4
-      77: 3
-      66: 2
-      conditions:
-        - expr: "z_err < 0.001"
-          value: 4
-        - expr: "z_err >= 0.001"
-          value: 3
-    instrument_type_translation:
-      "SPEC": "s"
-      "GRISM": "g"
-      "PHOTO": "p"
