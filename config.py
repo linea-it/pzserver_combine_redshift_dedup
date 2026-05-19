@@ -12,16 +12,16 @@ DASK_EXECUTOR = os.getenv("DASK_EXECUTOR", "local")
 class Slurm(BaseModel):
 
     class Instance(BaseModel):
-        cores: int = 4
-        processes: int = 1
-        memory: str = "32GB"
+        cores: int = 8
+        processes: int = 2
+        memory: str = "64GB"
         queue: str = "cpu_pipelines"
         account: str = "hpc-pipelines"
         job_extra_directives: list[str] = ["--propagate", "--time=2:00:00"]
 
     class Scale(BaseModel):
-        minimum_jobs: int = 7
-        maximum_jobs: int = 21
+        minimum_jobs: int = 3
+        maximum_jobs: int = 6
 
     instance: Instance = Instance()
     scale: Scale = Scale()
