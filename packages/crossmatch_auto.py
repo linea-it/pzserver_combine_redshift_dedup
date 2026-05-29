@@ -53,6 +53,15 @@ def _get_logger() -> logging.LoggerAdapter:
 # -----------------------
 # Internal helpers
 # -----------------------
+def _is_collection_root(path: str) -> bool:
+    """Return True when `path` looks like a complete HATS collection root."""
+    return (
+        bool(path)
+        and os.path.isdir(path)
+        and os.path.exists(os.path.join(path, "collection.properties"))
+    )
+
+
 def _adjacency_from_pairs(
     left_ids: pd.Series, right_ids: pd.Series
 ) -> Dict[str, Set[str]]:
@@ -266,6 +275,13 @@ def crossmatch_auto(
         parent_dir = "."
     artifact_auto = f"{artifact}_auto"
     collection_path_auto = os.path.join(parent_dir, artifact_auto)
+
+    if _is_collection_root(collection_path_auto):
+        logger.info(
+            "Skip automatch: output already exists and is a valid collection: %s",
+            collection_path_auto,
+        )
+        return collection_path_auto
 
     # START (per-catalog)
     t0 = time.time()

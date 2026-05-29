@@ -237,10 +237,11 @@ def _cleanup_previous_step(
     For every step k < step_index, removes:
       - prepared_<internal_name>
       - prepared_<internal_name>_hats
-      - prepared_<internal_name>_hats_auto
       - merged_step<k>
       - merged_step<k>_hats
     Also removes any recorded collection_path for previous prepared entries.
+    Auto-crossmatch roots are intentionally kept until final cleanup so Dask
+    retries can reuse them instead of recomputing expensive self-crossmatches.
     """
 
     def _rm_path(p: str) -> None:
@@ -293,11 +294,10 @@ def _cleanup_previous_step(
         if base_prepared:
             _rm_path(base_prepared)
             _rm_path(base_prepared + "_hats")
-            _rm_path(base_prepared + "_hats_auto")
 
         # Recorded collection_path (may point to hats/auto variants)
         coll = prev.get("collection_path")
-        if coll:
+        if coll and not os.path.basename(os.path.normpath(coll)).endswith("_hats_auto"):
             _rm_path(coll)
 
 
@@ -368,6 +368,8 @@ def _cleanup_inputs_of_merge(
     """
     Remove only the two input collections that were just merged.
     Accepts either a collection root or a subcatalog and normalizes to root.
+    Keeps prepared *_hats_auto roots until final cleanup; they are expensive to
+    recompute and may be needed if Dask retries old tasks.
     """
 
     def _to_root(p: str) -> str:
@@ -376,6 +378,10 @@ def _cleanup_inputs_of_merge(
 
     def _rm_root(p: str) -> None:
         if not p:
+            return
+        name = os.path.basename(os.path.normpath(p))
+        if name.startswith("prepared_") and name.endswith("_hats_auto"):
+            lg.info("Keeping auto-crossmatch collection for retry safety: %s", p)
             return
         try:
             if os.path.isdir(p) and _is_collection_root(p):
