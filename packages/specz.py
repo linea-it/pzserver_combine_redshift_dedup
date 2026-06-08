@@ -15,7 +15,6 @@ Public API:
 # -----------------------
 import ast as _ast
 import difflib
-import glob
 import logging
 import os
 import re
@@ -38,8 +37,10 @@ os.environ.setdefault("DASK_DISTRIBUTED__SHUFFLE__METHOD", "tasks")
 # Project (lsdb/hats/CRC)
 # -----------------------
 import hats  # noqa: F401
-import lsdb
-from product_handle import ProductHandle
+from product_handle import (
+    ProductHandle,
+    build_collection_with_retry as _build_collection_with_retry,
+)
 from utils import ensure_crc_logger
 from specz_homogenization import (
     JADES_LETTER_TO_SCORE,
@@ -47,8 +48,6 @@ from specz_homogenization import (
     _honor_user_homogenized_mapping,
     _homogenize,
 )
-from hats_import import CollectionArguments
-from hats_import.collection.run_import import run as run_collection_import
 
 if TYPE_CHECKING:
     from dask.distributed import Client  # noqa: F401
@@ -57,7 +56,6 @@ if TYPE_CHECKING:
 # Arrow-backed dtypes (pandas >= 2.x)
 # -----------------------
 import pyarrow as pa
-import pyarrow.parquet as pq
 
 USE_ARROW_TYPES = True
 
@@ -342,7 +340,7 @@ def _validate_and_rename(
         logger.info(f"{product_name} No non-null column mappings; skipping rename.")
 
     # Tag source and ensure minimal base schema
-    df["source"] = product_name
+    df = df.assign(source=product_name)
     base_schema = {
         "id": DTYPE_STR,
         "instrument_type": DTYPE_STR,
@@ -1163,333 +1161,6 @@ def _save_parquet(df: dd.DataFrame, temp_dir: str, product_name: str) -> str:
     with dask.config.set({"dataframe.shuffle.method": "tasks"}):
         df.to_parquet(out_path, write_index=False, engine="pyarrow")
     return out_path
-
-
-# -----------------------
-# Arrow schema builder
-# -----------------------
-def _build_arrow_schema_for_catalog(
-    df: pd.DataFrame, schema_hints: dict | None = None
-) -> pa.Schema:
-    """Build a robust Arrow schema for lsdb.from_dataframe.
-
-    Args:
-        df: Sample pandas frame to infer types.
-        schema_hints: Optional hints for expression columns.
-
-    Returns:
-        pa.Schema: Arrow schema.
-    """
-    canonical = {
-        "CRD_ID": pa.string(),
-        "id": pa.string(),
-        "source": pa.string(),
-        "survey": pa.string(),
-        "instrument_type": pa.string(),
-        "instrument_type_homogenized": pa.string(),
-        "ra": pa.float64(),
-        "dec": pa.float64(),
-        "z": pa.float64(),
-        "z_err": pa.float64(),
-        "z_flag": pa.float64(),
-        "z_flag_homogenized": pa.float64(),
-        "tie_result": pa.int8(),
-        "is_in_DP1_fields": pa.int64(),
-        "is_in_rubin_footprint": pa.int64(),
-        "compared_to": pa.string(),
-    }
-
-    def _hint_to_pa(dt: str) -> pa.DataType:
-        k = str(dt).lower()
-        if k == "str":
-            return pa.string()
-        if k == "float":
-            return pa.float64()
-        if k == "int":
-            return pa.int64()
-        if k == "bool":
-            return pa.bool_()
-        return pa.string()
-
-    schema_hints = schema_hints or {}
-    fields: list[pa.Field] = []
-
-    for col in df.columns:
-        name = str(col)
-
-        if name in canonical:
-            fields.append(pa.field(name, canonical[name], nullable=True))
-            continue
-
-        if name.startswith("CRD_ID_prev") or name.startswith("compared_to_prev"):
-            fields.append(pa.field(name, pa.string(), nullable=True))
-            continue
-
-        if name in schema_hints:
-            fields.append(
-                pa.field(name, _hint_to_pa(schema_hints[name]), nullable=True)
-            )
-            continue
-
-        dt = df[name].dtype
-        if isinstance(dt, pd.ArrowDtype):
-            fields.append(pa.field(name, dt.pyarrow_dtype, nullable=True))
-            continue
-
-        s = str(dt)
-        if s.startswith("Float") or s == "float64":
-            fields.append(pa.field(name, pa.float64(), nullable=True))
-        elif s.startswith("Int") or s in {"int64", "int32", "int16", "int8"}:
-            fields.append(
-                pa.field(name, pa.int64() if "8" not in s else pa.int8(), nullable=True)
-            )
-        elif s in {"boolean", "bool"}:
-            fields.append(pa.field(name, pa.bool_(), nullable=True))
-        else:
-            fields.append(pa.field(name, pa.string(), nullable=True))
-
-    seen = set()
-    uniq_fields = []
-    for f in fields:
-        if f.name not in seen:
-            uniq_fields.append(f)
-            seen.add(f.name)
-
-    return pa.schema(uniq_fields)
-
-
-# -----------------------
-# Collections
-# -----------------------
-def _write_schema_file_for_collection(
-    parquet_path: str,
-    schema_out_path: str,
-    logger: logging.Logger,
-    schema_hints: dict | None = None,
-) -> str:
-    """Create a minimal Parquet file containing only the desired Arrow schema.
-
-    Args:
-        parquet_path: Directory with prepared Parquet files.
-        schema_out_path: Destination file for schema-only Parquet.
-        logger: Logger.
-        schema_hints: Optional expr hints.
-
-    Returns:
-        str: Path to the written schema file.
-
-    Raises:
-        ValueError: If no Parquet files are found.
-    """
-    base_path = os.path.join(parquet_path, "base")
-    pattern = (
-        os.path.join(base_path, "*.parquet")
-        if os.path.exists(base_path)
-        else os.path.join(parquet_path, "*.parquet")
-    )
-    files = glob.glob(pattern)
-    files.sort()
-    if not files:
-        raise ValueError(f"No Parquet files found at '{parquet_path}' to infer schema")
-
-    sample_df = pd.read_parquet(files[0])
-    sample_df = _rename_duplicate_columns_pd(sample_df, logger)
-
-    schema = _build_arrow_schema_for_catalog(sample_df, schema_hints=schema_hints or {})
-
-    os.makedirs(os.path.dirname(schema_out_path), exist_ok=True)
-    empty_tbl = pa.Table.from_arrays(
-        [pa.array([], type=f.type) for f in schema],
-        names=[f.name for f in schema],
-    )
-    pq.write_table(empty_tbl, schema_out_path)
-
-    logger.info(f"Wrote schema file for collection: {schema_out_path}")
-    return schema_out_path
-
-
-def _build_collection_with_retry(
-    parquet_path: str,
-    logs_dir: str,
-    logger: logging.Logger,
-    client,
-    try_margin: bool = True,
-    *,
-    schema_hints: dict | None = None,
-    size_threshold_mb: int = 200,
-) -> str:
-    """Build a HATS Collection from a Parquet folder.
-
-    Args:
-        parquet_path: Prepared parquet path (e.g., .../merged_stepX or prepared_*).
-        logs_dir: Logs directory (unused here, kept for parity).
-        logger: Logger.
-        client: Dask client or None.
-        try_margin: Try margin import first.
-        schema_hints: Expr hints for importer schema.
-        size_threshold_mb: Fast-path threshold.
-
-    Returns:
-        str: Collection path written as "<parquet_path>_hats".
-
-    Raises:
-        RuntimeError: If both fast-path and importer fallback fail.
-    """
-    parquet_path = os.path.normpath(parquet_path)
-    parent_dir = os.path.dirname(parquet_path) or "."
-    base_name = os.path.basename(parquet_path)
-    output_artifact_name = f"{base_name}_hats"
-    collection_path = os.path.join(parent_dir, output_artifact_name)
-
-    base_path = os.path.join(parquet_path, "base")
-    pattern = (
-        os.path.join(base_path, "*.parquet")
-        if os.path.exists(base_path)
-        else os.path.join(parquet_path, "*.parquet")
-    )
-    in_file_paths = glob.glob(pattern)
-    in_file_paths.sort()
-    if not in_file_paths:
-        raise ValueError(f"No Parquet files found at '{parquet_path}'")
-
-    try:
-        total_size_mb = sum(os.path.getsize(f) for f in in_file_paths) / 1024**2
-    except Exception:
-        total_size_mb = float("inf")
-
-    # FAST PATH
-    if total_size_mb <= size_threshold_mb:
-        try:
-            logger.info(
-                f"Small catalog ({total_size_mb:.1f} MB). Building collection via fast path -> {collection_path}"
-            )
-            
-            pdf_list = [pd.read_parquet(p) for p in in_file_paths]
-            
-            dfp = (
-                pd.concat(pdf_list, ignore_index=True)
-                if len(pdf_list) > 1
-                else pdf_list[0]
-            )
-           
-            dfp = _rename_duplicate_columns_pd(dfp, logger)
-
-            for col, pd_dtype in [
-                ("CRD_ID", DTYPE_STR),
-                ("id", DTYPE_STR),
-                ("source", DTYPE_STR),
-                ("survey", DTYPE_STR),
-                ("instrument_type", DTYPE_STR),
-                ("instrument_type_homogenized", DTYPE_STR),
-                ("ra", DTYPE_FLOAT),
-                ("dec", DTYPE_FLOAT),
-                ("z", DTYPE_FLOAT),
-                ("z_err", DTYPE_FLOAT),
-                ("z_flag", DTYPE_FLOAT),
-                ("z_flag_homogenized", DTYPE_FLOAT),
-                ("tie_result", DTYPE_INT8),
-                ("is_in_DP1_fields", DTYPE_INT),
-                ("is_in_rubin_footprint", DTYPE_INT),
-                ("compared_to", DTYPE_STR),
-            ]:
-                if col in dfp.columns:
-                    try:
-                        dfp[col] = dfp[col].astype(pd_dtype)
-                    except Exception:
-                        pass
-
-            for c in map(str, dfp.columns):
-                if c.startswith("CRD_ID_prev") or c.startswith("compared_to_prev"):
-                    try:
-                        dfp[c] = dfp[c].astype(DTYPE_STR)
-                    except Exception:
-                        pass
-
-            #schema = _build_arrow_schema_for_catalog(
-            #    dfp, schema_hints=_normalize_schema_hints(schema_hints or {})
-            #)
-
-            catalog = lsdb.from_dataframe(
-                dfp,
-                catalog_name=output_artifact_name,
-                ra_column="ra",
-                dec_column="dec",
-                use_pyarrow_types=True,
-                #schema=schema,
-            )
-            
-            catalog.write_catalog(collection_path, as_collection=True, overwrite=True)
-
-            logger.info(f"Finished collection fast-path: {collection_path}")
-            return collection_path
-
-        except Exception as e:
-            logger.warning(
-                f"Collection fast-path failed for {output_artifact_name} ({type(e).__name__}: {e}). Falling back to hats_import."
-            )
-
-    # FALLBACK
-    def _clean_partial():
-        try:
-            if os.path.isdir(collection_path):
-                shutil.rmtree(collection_path)
-        except Exception as e:
-            logger.warning(f"Failed to remove partial '{collection_path}': {e}")
-
-    #schema_file = os.path.join(parent_dir, f"{output_artifact_name}_schema.parquet")
-    #try:
-    #    _write_schema_file_for_collection(
-    #        parquet_path=parquet_path,
-    #        schema_out_path=schema_file,
-    #        logger=logger,
-    #        schema_hints=_normalize_schema_hints(schema_hints or {}),
-    #    )
-    #except Exception as e:
-    #    logger.warning(
-    #        f"Could not build schema file for fallback import ({type(e).__name__}: {e}). Proceeding without it."
-    #    )
-    #    schema_file = None
-
-    schema_file = None
-
-    def _make_args(with_margin: bool):
-        kw = dict(
-            input_file_list=in_file_paths,
-            file_reader="parquet",
-            ra_column="ra",
-            dec_column="dec",
-        )
-        if schema_file:
-            kw["use_schema_file"] = schema_file
-        args = CollectionArguments(
-            output_artifact_name=output_artifact_name,
-            output_path=parent_dir,
-            resume=False,
-        ).catalog(**kw)
-        if with_margin:
-            args = args.add_margin(margin_threshold=5.0, is_default=True)
-        return args
-
-    if try_margin:
-        try:
-            logger.info(
-                f"Building collection WITH margin (import pipeline): {output_artifact_name}"
-            )
-            run_collection_import(_make_args(with_margin=True), client)
-            return collection_path
-        except Exception as e:
-            logger.warning(f"WITH margin failed: {e}. Retrying WITHOUT margin...")
-            _clean_partial()
-
-    try:
-        logger.info(
-            f"Building collection WITHOUT margin (import pipeline): {output_artifact_name}"
-        )
-        run_collection_import(_make_args(with_margin=False), client)
-        return collection_path
-    except Exception as e:
-        _clean_partial()
-        raise RuntimeError(f"Failed to build collection '{output_artifact_name}': {e}")
 
 
 def _maybe_collection(

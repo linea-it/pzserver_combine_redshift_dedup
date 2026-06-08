@@ -1879,7 +1879,14 @@ def main(
         except Exception as e_head:
             log_cons.debug("Could not preview df_final.head(3): %s", e_head)
 
-        save_dataframe(df_final, staged_output_base, output_format)
+        save_dataframe(
+            df_final,
+            staged_output_base,
+            output_format,
+            temp_dir=temp_dir,
+            client=client,
+            logger=log_cons,
+        )
         log_cons.info("Staged final output at %s.%s", staged_output_base, output_format)
     except Exception as e:
         import traceback as _tb
@@ -2031,7 +2038,10 @@ def main(
         src_out = f"{staged_output_base}.{output_format}"
         dst_out = os.path.join(out_root_and_dir, f"{output_name}.{output_format}")
         publish_logger.info("Copying final output: %s -> %s", src_out, dst_out)
-        _copy_file(src_out, dst_out, publish_logger)
+        if output_format == "hats":
+            _copy_tree(src_out, dst_out, publish_logger)
+        else:
+            _copy_file(src_out, dst_out, publish_logger)
     except Exception as e:
         publish_logger.error("FAILED to copy final output to publish dir: %s", e)
         raise
