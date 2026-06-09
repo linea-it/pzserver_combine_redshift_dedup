@@ -1,0 +1,42 @@
+executor:
+  name: "local"
+  args:
+    n_workers: 3
+    threads_per_worker: 2
+    memory_limit: "4GB"
+
+inputs:
+  specz:
+    - path: "./test_data/elaisfbmc.parquet"
+      internal_name: "001_elaisfbmc"
+      columns:
+        id: "ELAIS"
+        ra: "RAdeg"
+        dec: "DEdeg"
+        z: "zbest"
+        z_flag: "zbest_quality"
+        z_err: null
+        survey: "survey_name"
+
+    - path: "./test_data/elaiss1oid.parquet"
+      internal_name: "002_elaiss1oid"
+      columns:
+        id: "XMMES1"
+        ra: "RAdeg"
+        dec: "DEdeg"
+        z: "zfinal"
+        z_flag: "zfinal_quality"
+        z_err: null
+        survey: "survey_name"
+
+output_root_dir: "storage"
+output_dir: "outputs"
+output_name: "crd"
+output_format: "parquet"
+
+param:
+  combine_type: "concatenate_and_mark_duplicates"
+  z_flag_homogenized_value_to_cut: 0.0
+  insert_DP1_footprint_flag: false
+  insert_rubin_footprint_flag: true
+  flags_translation_file: ./flags_translation.yaml

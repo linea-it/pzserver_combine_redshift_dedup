@@ -1,0 +1,18 @@
+#HATS catalog
+obs_collection=margin_10arcs
+dataproduct_type=margin
+hats_nrows=0
+hats_col_ra=RAdeg
+hats_col_dec=DEdeg
+hats_col_healpix=_healpix_29
+hats_col_healpix_order=29
+hats_primary_table_url=/home/luigi/linea/pzserver_combine_redshift_dedup/test_data/elaisfbmc_collection/catalog
+hats_margin_threshold=10.0
+hats_npix_suffix=.parquet
+moc_sky_fraction=0.0
+hats_order=0
+hats_builder=hats-import v0.9.0, hats v0.9.0
+hats_creation_date=2026-06-01T19:08UTC
+hats_estsize=14
+hats_release_date=2025-08-22
+hats_version=v1.0
