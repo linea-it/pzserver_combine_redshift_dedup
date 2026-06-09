@@ -1,7 +1,7 @@
 """File ingestion helpers for CRC products.
 
 Provides a unified interface to read Parquet/CSV/HDF5/FITS/plain-text files
-and return Dask DataFrames with normalized dtypes.
+and HATS catalogs, returning Dask DataFrames with normalized dtypes.
 
 Public API:
     - ProductHandle
@@ -11,8 +11,11 @@ Public API:
 # Standard library
 # -----------------------
 import csv
+import glob
 import io
 import json
+import os
+import shutil
 from pathlib import Path
 
 # -----------------------
@@ -26,7 +29,7 @@ import pyarrow.parquet as pq
 import tables_io
 from astropy.table import Table
 
-__all__ = ["ProductHandle"]
+__all__ = ["ProductHandle", "build_collection_with_retry", "save_dataframe"]
 
 
 # -----------------------
@@ -34,13 +37,17 @@ __all__ = ["ProductHandle"]
 # -----------------------
 # NA tokens normalized to pd.NA after decoding from bytes/text
 _NA_TOKENS = {"", "na", "nan", "null", "none", "<na>"}
+_HATS_DTYPE_STR = pd.ArrowDtype(pa.string())
+_HATS_DTYPE_FLOAT = pd.ArrowDtype(pa.float64())
+_HATS_DTYPE_INT = pd.ArrowDtype(pa.int64())
+_HATS_DTYPE_INT8 = pd.ArrowDtype(pa.int8())
 
 
 # -----------------------
 # Reader: unified handle + format-specific readers
 # -----------------------
 class ProductHandle:
-    """Unified interface to read Parquet/CSV/HDF5/FITS/plain text into a Dask DataFrame."""
+    """Unified interface to read Parquet/CSV/HDF5/FITS/plain text/HATS into a Dask DataFrame."""
 
     def __init__(self, filepath):
         """Initialize.
@@ -70,6 +77,12 @@ class ProductHandle:
     # -----------------------
     def to_ddf(self):
         """Read the file and return a Dask DataFrame."""
+        if self.filepath.is_dir():
+            hats_root = self._resolve_hats_catalog_root(self.filepath)
+            if hats_root:
+                return self._read_hats_to_ddf(hats_root)
+            raise ValueError(f"Unsupported directory input: {self.filepath}")
+
         if self.base_ext == ".parquet":
             return dd.read_parquet(self.filepath)
 
@@ -118,6 +131,126 @@ class ProductHandle:
         else:
             raise ValueError(f"Unsupported file extension: {self.filepath}")
 
+    def _resolve_hats_catalog_root(self, path: Path) -> Path | None:
+        """Resolve HATS root using collection/object properties priority."""
+        max_depth = 3
+        candidates = [
+            p
+            for p in path.rglob("*")
+            if p.is_file() and self._relative_depth(path, p) <= max_depth
+        ]
+
+        collection_candidates = [
+            p for p in candidates if p.name.lower() == "collection.properties"
+        ]
+        if collection_candidates:
+            return sorted(collection_candidates)[0].parent
+
+        hats_properties = [
+            p for p in candidates if p.name.lower() == "hats.properties"
+        ]
+        for candidate in sorted(hats_properties):
+            if self._is_object_hats_properties_file(candidate):
+                return candidate.parent
+
+        legacy_properties = [
+            p for p in candidates if p.name.lower() == "properties"
+        ]
+        for candidate in sorted(legacy_properties):
+            if self._is_object_hats_properties_file(candidate):
+                return candidate.parent
+
+        return None
+
+    def _relative_depth(self, root_path: Path, file_path: Path) -> int:
+        return len(file_path.relative_to(root_path).parts) - 1
+
+    def _is_object_hats_properties_file(self, filepath: Path) -> bool:
+        try:
+            with filepath.open("rb") as handle:
+                text = handle.read(262144).decode("utf-8", errors="ignore")
+        except Exception:
+            return False
+        return self._properties_value(text, "dataproduct_type") == "object"
+
+    def _properties_value(self, text: str, key_name: str) -> str | None:
+        wanted = key_name.lower()
+        for raw_line in text.splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key = line.split("=", 1)[0].strip().lower()
+            if not key:
+                continue
+            if key == wanted:
+                return line.split("=", 1)[1].strip().lower()
+        return None
+
+    def _read_hats_to_ddf(self, hats_root: Path):
+        """Read the object catalog parquet payload from a HATS directory."""
+        object_root = self._resolve_object_catalog_root(hats_root) or hats_root
+        read_path = self._resolve_hats_parquet_payload_path(object_root)
+
+        ddf = dd.read_parquet(read_path)
+
+        hats_partition_cols = {"Norder", "Dir", "Npix"}
+        drop_cols = [col for col in hats_partition_cols if col in ddf.columns]
+        if drop_cols:
+            ddf = ddf.drop(columns=drop_cols, errors="ignore")
+
+        return ddf
+
+    def _resolve_hats_parquet_payload_path(self, object_root: Path) -> Path:
+        """Resolve the parquet payload directory inside a HATS object catalog."""
+        candidates = [p for p in object_root.iterdir() if p.is_dir()]
+
+        metadata_candidates = [
+            p for p in candidates
+            if (p / "_metadata").exists() or (p / "_common_metadata").exists()
+        ]
+        if metadata_candidates:
+            return sorted(metadata_candidates)[0]
+
+        partition_candidates = [
+            p for p in candidates
+            if any(child.is_dir() and child.name.startswith("Norder=") for child in p.iterdir())
+        ]
+        if partition_candidates:
+            return sorted(partition_candidates)[0]
+
+        if any(object_root.glob("*.parquet")):
+            return object_root
+
+        recursive_parquet = sorted(object_root.rglob("*.parquet"))
+        if recursive_parquet:
+            return recursive_parquet[0].parent
+
+        raise ValueError(f"No parquet payload found inside HATS object catalog: {object_root}")
+
+    def _infer_hats_data_columns(self, catalog_path: Path):
+        """Infer HATS data columns from parquet schema, excluding partition columns."""
+        hats_partition_cols = {"Norder", "Dir", "Npix"}
+        object_root = self._resolve_object_catalog_root(catalog_path) or catalog_path
+        parquet_files = sorted(object_root.rglob("*.parquet"))
+        if not parquet_files:
+            return None
+        schema = pq.read_schema(parquet_files[0])
+        columns = [name for name in schema.names if name not in hats_partition_cols]
+        return columns or None
+
+    def _resolve_object_catalog_root(self, catalog_path: Path) -> Path | None:
+        candidates = [
+            p
+            for p in catalog_path.rglob("*")
+            if p.is_file()
+            and p.name.lower() in {"hats.properties", "properties"}
+            and self._relative_depth(catalog_path, p) <= 3
+        ]
+        for candidate in sorted(candidates, key=lambda p: (p.name.lower() != "hats.properties", str(p))):
+            if self._is_object_hats_properties_file(candidate):
+                return candidate.parent
+        return None
+
     # -----------------------
     # CSV helpers
     # -----------------------
@@ -141,7 +274,9 @@ class ProductHandle:
 
         # Header?
         try:
-            df_head = pd.read_csv(io.StringIO(sample), delimiter=self.delimiter, nrows=5, header=None)
+            df_head = pd.read_csv(
+                io.StringIO(sample), delimiter=self.delimiter, nrows=5, header=None
+            )
         except Exception:
             df_head = pd.DataFrame()
 
@@ -164,7 +299,9 @@ class ProductHandle:
             self.has_header = True
         else:
             self.has_header = False
-            self.column_names = [f"col_{i}" for i in range(df_head.shape[1] if not df_head.empty else 0)]
+            self.column_names = [
+                f"col_{i}" for i in range(df_head.shape[1] if not df_head.empty else 0)
+            ]
 
     # -----------------------
     # FITS reader (+ postprocess)
@@ -182,9 +319,13 @@ class ProductHandle:
         # 3) Dynamic check: does this Dask preserve pandas BooleanDtype with NA?
         def _dask_preserves_nullable_boolean() -> bool:
             try:
-                probe = pd.DataFrame({"_p": pd.Series([True, pd.NA, False], dtype="boolean")})
+                probe = pd.DataFrame(
+                    {"_p": pd.Series([True, pd.NA, False], dtype="boolean")}
+                )
                 res = dd.from_pandas(probe, npartitions=1).compute()
-                return (str(res["_p"].dtype) == "boolean") and bool(res["_p"].isna().iloc[1])
+                return (str(res["_p"].dtype) == "boolean") and bool(
+                    res["_p"].isna().iloc[1]
+                )
             except Exception:
                 return False
 
@@ -239,8 +380,14 @@ def _normalize_na_tokens_frame(pdf: pd.DataFrame) -> pd.DataFrame:
         s = pdf[c]
         if s.dtype == "object" or pd.api.types.is_string_dtype(s):
             pdf[c] = s.map(
-                lambda x: pd.NA if (x is None or (isinstance(x, str) and x.strip().lower() in _NA_TOKENS))
-                else x
+                lambda x: (
+                    pd.NA
+                    if (
+                        x is None
+                        or (isinstance(x, str) and x.strip().lower() in _NA_TOKENS)
+                    )
+                    else x
+                )
             )
     return pdf
 
@@ -264,7 +411,16 @@ def _infer_csv_schema(pdf: pd.DataFrame, *, frac_threshold: float = 0.995) -> di
             continue
 
         # Normalize NA tokens and ensure string dtype for checks
-        s2 = s.map(lambda x: pd.NA if (x is None or (isinstance(x, str) and x.strip().lower() in _NA_TOKENS)) else x)
+        s2 = s.map(
+            lambda x: (
+                pd.NA
+                if (
+                    x is None
+                    or (isinstance(x, str) and x.strip().lower() in _NA_TOKENS)
+                )
+                else x
+            )
+        )
         s2 = s2.astype("string").map(lambda x: x.strip() if isinstance(x, str) else x)
 
         # Strict textual boolean detection
@@ -305,8 +461,16 @@ def _apply_csv_schema(pdf: pd.DataFrame, schema: dict) -> pd.DataFrame:
             continue
 
         # Normalize NA tokens and trim
-        s2 = s.map(lambda x: pd.NA if (x is None or (isinstance(x, str) and x.strip().lower() in _NA_TOKENS))
-                   else (x.strip() if isinstance(x, str) else x))
+        s2 = s.map(
+            lambda x: (
+                pd.NA
+                if (
+                    x is None
+                    or (isinstance(x, str) and x.strip().lower() in _NA_TOKENS)
+                )
+                else (x.strip() if isinstance(x, str) else x)
+            )
+        )
         target = schema.get(c, "string")
 
         if target == "Int64":
@@ -358,17 +522,23 @@ def _normalize_na_tokens_to_pdna(s: pd.Series) -> pd.Series:
     """Normalize common NA tokens (case-insensitive) to pd.NA on a string Series."""
     if not pd.api.types.is_string_dtype(s):
         s = s.astype("string")
-    return s.map(lambda x: pd.NA if x is None or str(x).strip().lower() in _NA_TOKENS else x)
+    return s.map(
+        lambda x: pd.NA if x is None or str(x).strip().lower() in _NA_TOKENS else x
+    )
 
 
-def _decode_byteslike_to_string(series: pd.Series, *, encoding: str, errors: str = "replace") -> pd.Series:
+def _decode_byteslike_to_string(
+    series: pd.Series, *, encoding: str, errors: str = "replace"
+) -> pd.Series:
     """Decode fixed-width or object-bytes to pandas StringDtype and normalize NA tokens."""
     if _is_fixed_bytes(series):
         it = series.astype("O")
         as_str = it.map(
-            lambda b: b.decode(encoding, errors=errors)
-            if isinstance(b, (bytes, bytearray))
-            else ("" if b is None else str(b))
+            lambda b: (
+                b.decode(encoding, errors=errors)
+                if isinstance(b, (bytes, bytearray))
+                else ("" if b is None else str(b))
+            )
         )
     elif _is_object_bytes_series(series):
         as_str = series.map(
@@ -381,7 +551,9 @@ def _decode_byteslike_to_string(series: pd.Series, *, encoding: str, errors: str
     else:
         return series
 
-    as_str = as_str.map(lambda x: x.strip() if isinstance(x, str) else x).astype("string")
+    as_str = as_str.map(lambda x: x.strip() if isinstance(x, str) else x).astype(
+        "string"
+    )
     as_str = _normalize_na_tokens_to_pdna(as_str)
     return as_str
 
@@ -419,7 +591,9 @@ def _normalize_after_read(df: pd.DataFrame, *, source: str) -> pd.DataFrame:
         # Case 1: bytes-like -> decode
         was_bytes = _is_fixed_bytes(s) or _is_object_bytes_series(s)
         if was_bytes:
-            decoded = _decode_byteslike_to_string(s, encoding=text_encoding, errors="replace")
+            decoded = _decode_byteslike_to_string(
+                s, encoding=text_encoding, errors="replace"
+            )
             if _looks_like_bool_text(decoded):
                 df[c] = _bytes_bool_to_boolean(decoded)
             else:
@@ -471,7 +645,9 @@ def _astropy_table_to_pandas_nullable(table: Table) -> pd.DataFrame:
                 if frac_num >= 0.995:
                     non_na = s_try.dropna()
                     has_frac = (non_na % 1 != 0).any()
-                    out[name] = (s_try.astype("Float64") if has_frac else s_try.astype("Int64"))
+                    out[name] = (
+                        s_try.astype("Float64") if has_frac else s_try.astype("Int64")
+                    )
                     continue
             out[name] = s
         else:
@@ -483,8 +659,15 @@ def _astropy_table_to_pandas_nullable(table: Table) -> pd.DataFrame:
 # -----------------------
 # Writer helpers (fixed-bytes encoders + sanitizers)
 # -----------------------
-def _to_fixed_bytes(series: pd.Series, safety_cap: int = 1 << 16, *, encoding: str = "utf-8", errors: str = "replace") -> pd.Series:
+def _to_fixed_bytes(
+    series: pd.Series,
+    safety_cap: int = 1 << 16,
+    *,
+    encoding: str = "utf-8",
+    errors: str = "replace",
+) -> pd.Series:
     """Convert string-like series to fixed-width NumPy bytes (|S{N})."""
+
     def _to_text(x):
         if isinstance(x, (dict, list, tuple, set)):
             return json.dumps(x, ensure_ascii=False)
@@ -509,13 +692,18 @@ def _to_fixed_bytes(series: pd.Series, safety_cap: int = 1 << 16, *, encoding: s
     max_len = max(1, min(safety_cap, max_len))
     dtype_s = f"|S{max_len}"
 
-    arr = np.fromiter((v.encode(encoding, errors=errors) for v in s), dtype=dtype_s, count=len(s))
+    arr = np.fromiter(
+        (v.encode(encoding, errors=errors) for v in s), dtype=dtype_s, count=len(s)
+    )
     return pd.Series(arr, index=series.index)
 
 
 def _bool_to_fixed_bytes(series: pd.Series, *, encoding: str) -> pd.Series:
     """Encode BooleanDtype/boolean as fixed-width bytes 'true'/'false'/''."""
-    if not (pd.api.types.is_bool_dtype(series) or getattr(series.dtype, "name", "") == "BooleanDtype"):
+    if not (
+        pd.api.types.is_bool_dtype(series)
+        or getattr(series.dtype, "name", "") == "BooleanDtype"
+    ):
         return series
 
     s = series.astype("boolean")
@@ -551,7 +739,7 @@ def _sanitize_for_hdf5(df: pd.DataFrame) -> pd.DataFrame:
                 else:
                     name = s.dtype.name.lower()
                     if name.endswith("8"):
-                        df[c] = s.astype("int16")   # avoid 8-bit pitfalls
+                        df[c] = s.astype("int16")  # avoid 8-bit pitfalls
                     elif name.endswith("16"):
                         df[c] = s.astype("int16")
                     elif name.endswith("32"):
@@ -563,7 +751,10 @@ def _sanitize_for_hdf5(df: pd.DataFrame) -> pd.DataFrame:
             continue
 
         # Booleans (strict)
-        if pd.api.types.is_bool_dtype(s) or getattr(s.dtype, "name", "") == "BooleanDtype":
+        if (
+            pd.api.types.is_bool_dtype(s)
+            or getattr(s.dtype, "name", "") == "BooleanDtype"
+        ):
             df[c] = _bool_to_fixed_bytes(s, encoding="utf-8")
             continue
 
@@ -591,7 +782,9 @@ def _sanitize_for_hdf5(df: pd.DataFrame) -> pd.DataFrame:
 
     bad = [c for c in df.columns if df[c].dtype == "object"]
     if bad:
-        raise TypeError(f"HDF5 sanitizer: unsupported object dtypes after conversion: {bad}")
+        raise TypeError(
+            f"HDF5 sanitizer: unsupported object dtypes after conversion: {bad}"
+        )
 
     return df
 
@@ -624,7 +817,9 @@ def _sanitize_for_fits(df: pd.DataFrame) -> pd.DataFrame:
                 else:
                     name = s.dtype.name.lower()
                     if name.endswith("8"):
-                        df[c] = s.astype("int16")  # promote 8-bit -> 16-bit (avoid FITS LOGICAL)
+                        df[c] = s.astype(
+                            "int16"
+                        )  # promote 8-bit -> 16-bit (avoid FITS LOGICAL)
                     elif name.endswith("16"):
                         df[c] = s.astype("int16")
                     elif name.endswith("32"):
@@ -634,11 +829,14 @@ def _sanitize_for_fits(df: pd.DataFrame) -> pd.DataFrame:
             else:
                 npname = str(s.dtype).lower()
                 if npname.endswith("8"):
-                    df[c] = s.astype("int16")      # promote 8-bit -> 16-bit
+                    df[c] = s.astype("int16")  # promote 8-bit -> 16-bit
             continue
 
         # Booleans (strict)
-        if pd.api.types.is_bool_dtype(s) or getattr(s.dtype, "name", "") == "BooleanDtype":
+        if (
+            pd.api.types.is_bool_dtype(s)
+            or getattr(s.dtype, "name", "") == "BooleanDtype"
+        ):
             df[c] = _bool_to_fixed_bytes(s, encoding="ascii")
             continue
 
@@ -666,24 +864,40 @@ def _sanitize_for_fits(df: pd.DataFrame) -> pd.DataFrame:
 
     bad = [c for c in df.columns if df[c].dtype == "object"]
     if bad:
-        raise TypeError(f"FITS sanitizer: unsupported object dtypes after conversion: {bad}")
+        raise TypeError(
+            f"FITS sanitizer: unsupported object dtypes after conversion: {bad}"
+        )
 
     return df
 
 
 # -----------------------
-# Save API (Parquet/CSV/HDF5/FITS) + placement of writer helpers
+# Save API (Parquet/CSV/HDF5/FITS/HATS) + placement of writer helpers
 # -----------------------
-def save_dataframe(df, output_path, format_):
+def save_dataframe(
+    df,
+    output_path,
+    format_,
+    *,
+    temp_dir=None,
+    client=None,
+    logger=None,
+    hats_size_threshold_mb=200,
+):
     """Save DataFrame to disk in the requested format.
 
     Parquet: write via PyArrow directly.
     CSV/HDF5/FITS: sanitize dtypes for compatibility.
+    HATS: write LSDB catalog directory.
 
     Args:
-        df: Input pandas DataFrame.
+        df: Input pandas or Dask DataFrame.
         output_path: Path without extension.
-        format_: Output format (parquet, csv, hdf5, fits).
+        format_: Output format (parquet, csv, hdf5, fits, hats).
+        temp_dir: Temporary directory used to stage parquet for large HATS outputs.
+        client: Dask client used by hats-import for large HATS outputs.
+        logger: Logger-like object.
+        hats_size_threshold_mb: Max in-memory fast-path size for HATS output.
 
     Raises:
         ValueError: If the output format is unsupported.
@@ -705,6 +919,19 @@ def save_dataframe(df, output_path, format_):
         tables_io.write(df_h5, f"{output_path}.hdf5")
         return
 
+    if ext == "hats":
+        _write_hats_output(
+            df,
+            f"{output_path}.hats",
+            ra_column="ra",
+            dec_column="dec",
+            temp_dir=temp_dir,
+            client=client,
+            logger=logger,
+            size_threshold_mb=hats_size_threshold_mb,
+        )
+        return
+
     # CSV/FITS start from numpy_nullable to stabilize null semantics
     df_np = df.convert_dtypes(dtype_backend="numpy_nullable", convert_boolean=False)
 
@@ -720,3 +947,476 @@ def save_dataframe(df, output_path, format_):
         return
 
     raise ValueError(f"Unsupported output format: {format_}")
+
+
+def _write_hats_output(
+    data,
+    output_dir: str,
+    ra_column: str = "ra",
+    dec_column: str = "dec",
+    *,
+    temp_dir=None,
+    client=None,
+    logger=None,
+    size_threshold_mb: int = 200,
+):
+    """Persist output dataframe as a HATS catalog directory."""
+    output_path = Path(output_dir)
+
+    if output_path.exists():
+        if output_path.is_dir():
+            shutil.rmtree(output_path, ignore_errors=True)
+        else:
+            output_path.unlink(missing_ok=True)
+
+    if not hasattr(data, "columns") or not {ra_column, dec_column}.issubset(set(data.columns)):
+        raise ValueError(
+            f"HATS output requires '{ra_column}' and '{dec_column}' columns in the final data."
+        )
+
+    if _is_dask_dataframe(data):
+        _log_info(
+            logger,
+            "Writing lazy HATS output via parquet staging before threshold-based HATS build: %s",
+            output_path,
+        )
+        parquet_path = _stage_hats_output_parquet(data, output_path, temp_dir, logger)
+        build_collection_with_retry(
+            parquet_path=parquet_path,
+            output_path=output_path,
+            output_artifact_name=output_path.name,
+            catalog_artifact_name="catalog",
+            margin_artifact_name=_margin_artifact_name(),
+            client=client,
+            logger=logger,
+            ra_column=ra_column,
+            dec_column=dec_column,
+            try_margin=True,
+            size_threshold_mb=size_threshold_mb,
+        )
+        return
+
+    data_size_mb = _dataframe_memory_mb(data)
+    if data_size_mb > size_threshold_mb:
+        _log_info(
+            logger,
+            "HATS output dataframe is %.1f MB; using parquet staging and hats-import: %s",
+            data_size_mb,
+            output_path,
+        )
+        parquet_path = _stage_hats_output_parquet(data, output_path, temp_dir, logger)
+        build_collection_with_retry(
+            parquet_path=parquet_path,
+            output_path=output_path,
+            output_artifact_name=output_path.name,
+            catalog_artifact_name="catalog",
+            margin_artifact_name=_margin_artifact_name(),
+            client=client,
+            logger=logger,
+            ra_column=ra_column,
+            dec_column=dec_column,
+            try_margin=True,
+            size_threshold_mb=0,
+        )
+        return
+
+    try:
+        import lsdb
+    except Exception as error:
+        raise RuntimeError(
+            "lsdb is required to export HATS output in combine_redshift_dedup."
+        ) from error
+
+    try:
+        data = data.convert_dtypes(dtype_backend="numpy_nullable", convert_boolean=False)
+    except Exception:
+        pass
+
+    _log_info(
+        logger,
+        "HATS output dataframe is %.1f MB; using in-memory LSDB fast path: %s",
+        data_size_mb,
+        output_path,
+    )
+    catalog = lsdb.from_dataframe(
+        data,
+        catalog_name="catalog",
+        use_pyarrow_types=False,
+        ra_column=ra_column,
+        dec_column=dec_column,
+    )
+    _write_catalog_like_to_hats(catalog, output_path)
+    _normalize_collection_margin_name(
+        output_path,
+        old_margin_name="catalog_5arcs",
+        new_margin_name=_margin_artifact_name(),
+    )
+
+
+def _is_dask_dataframe(data):
+    return isinstance(data, dd.DataFrame) or (
+        hasattr(data, "to_parquet") and hasattr(data, "map_partitions")
+    )
+
+
+def _dataframe_memory_mb(data):
+    try:
+        return float(data.memory_usage(deep=True).sum()) / 1024**2
+    except Exception:
+        return float("inf")
+
+
+def _rename_duplicate_columns_pd(pdf: pd.DataFrame, logger) -> pd.DataFrame:
+    """Make pandas columns unique by appending __dupN."""
+    cols = pd.Index(map(str, pdf.columns))
+    if not cols.has_duplicates:
+        return pdf
+
+    seen: dict[str, int] = {}
+    new_cols: list[str] = []
+    renamed: list[tuple[str, str]] = []
+
+    for col in cols:
+        if col not in seen:
+            seen[col] = 0
+            new_cols.append(col)
+            continue
+
+        seen[col] += 1
+        new_col = f"{col}__dup{seen[col]}"
+        while new_col in seen:
+            seen[col] += 1
+            new_col = f"{col}__dup{seen[col]}"
+        seen[new_col] = 0
+        new_cols.append(new_col)
+        renamed.append((col, new_col))
+
+    if renamed:
+        sample = ", ".join([f"{old}->{new}" for old, new in renamed[:6]])
+        _log_warning(
+            logger,
+            "Renamed duplicate columns (pandas): %s%s",
+            sample,
+            " ..." if len(renamed) > 6 else "",
+        )
+
+    out = pdf.copy()
+    out.columns = new_cols
+    return out
+
+
+def _cast_hats_fast_path_columns(dfp: pd.DataFrame) -> pd.DataFrame:
+    """Apply stable dtypes before the in-memory LSDB fast path."""
+    for col, pd_dtype in [
+        ("CRD_ID", _HATS_DTYPE_STR),
+        ("id", _HATS_DTYPE_STR),
+        ("source", _HATS_DTYPE_STR),
+        ("survey", _HATS_DTYPE_STR),
+        ("instrument_type", _HATS_DTYPE_STR),
+        ("instrument_type_homogenized", _HATS_DTYPE_STR),
+        ("ra", _HATS_DTYPE_FLOAT),
+        ("dec", _HATS_DTYPE_FLOAT),
+        ("z", _HATS_DTYPE_FLOAT),
+        ("z_err", _HATS_DTYPE_FLOAT),
+        ("z_flag", _HATS_DTYPE_FLOAT),
+        ("z_flag_homogenized", _HATS_DTYPE_FLOAT),
+        ("tie_result", _HATS_DTYPE_INT8),
+        ("is_in_DP1_fields", _HATS_DTYPE_INT),
+        ("is_in_rubin_footprint", _HATS_DTYPE_INT),
+        ("compared_to", _HATS_DTYPE_STR),
+    ]:
+        if col in dfp.columns:
+            try:
+                dfp[col] = dfp[col].astype(pd_dtype)
+            except Exception:
+                pass
+
+    for col in map(str, dfp.columns):
+        if col.startswith("CRD_ID_prev") or col.startswith("compared_to_prev"):
+            try:
+                dfp[col] = dfp[col].astype(_HATS_DTYPE_STR)
+            except Exception:
+                pass
+
+    return dfp
+
+
+def _margin_artifact_name(margin_threshold: float = 5.0) -> str:
+    threshold = int(margin_threshold) if float(margin_threshold).is_integer() else margin_threshold
+    return f"margin_{threshold}arcs"
+
+
+def _normalize_collection_margin_name(
+    collection_path: Path,
+    old_margin_name: str,
+    new_margin_name: str,
+):
+    """Rename LSDB-generated margin directory and update collection metadata."""
+    old_margin_path = collection_path / old_margin_name
+    new_margin_path = collection_path / new_margin_name
+
+    if old_margin_path.is_dir() and old_margin_path != new_margin_path:
+        if new_margin_path.exists():
+            shutil.rmtree(new_margin_path, ignore_errors=True)
+        old_margin_path.rename(new_margin_path)
+
+    properties_path = collection_path / "collection.properties"
+    if not properties_path.exists():
+        return
+
+    text = properties_path.read_text(encoding="utf-8")
+    text = text.replace(f"all_margins={old_margin_name}", f"all_margins={new_margin_name}")
+    text = text.replace(f"default_margin={old_margin_name}", f"default_margin={new_margin_name}")
+    properties_path.write_text(text, encoding="utf-8")
+
+
+def _stage_hats_output_parquet(data, output_path: Path, temp_dir, logger):
+    """Write final output as parquet parts for hats-import without full materialization."""
+    staging_root = Path(temp_dir) if temp_dir else output_path.parent / "temp"
+    parquet_path = staging_root / f"{output_path.stem}_hats_parquet"
+
+    if parquet_path.exists():
+        shutil.rmtree(parquet_path, ignore_errors=True)
+    parquet_path.mkdir(parents=True, exist_ok=True)
+
+    _log_info(logger, "Staging HATS output parquet at %s", parquet_path)
+    if _is_dask_dataframe(data):
+        data.to_parquet(
+            str(parquet_path),
+            engine="pyarrow",
+            write_index=False,
+            overwrite=True,
+        )
+    else:
+        table = pa.Table.from_pandas(data.reset_index(drop=True), preserve_index=False)
+        pq.write_table(table, parquet_path / "part-0.parquet")
+
+    return parquet_path
+
+
+def build_collection_with_retry(
+    parquet_path,
+    logs_dir=None,
+    logger=None,
+    client=None,
+    try_margin: bool = True,
+    *,
+    schema_hints: dict | None = None,
+    size_threshold_mb: int = 200,
+    output_path=None,
+    output_artifact_name: str | None = None,
+    catalog_artifact_name: str | None = None,
+    margin_artifact_name: str | None = None,
+    margin_threshold: float = 5.0,
+    ra_column: str = "ra",
+    dec_column: str = "dec",
+) -> str:
+    """Build a HATS collection from a Parquet folder.
+
+    Small parquet inputs are loaded in memory and written with LSDB. Larger
+    inputs use hats-import, which can run through the provided Dask client.
+    """
+    del logs_dir, schema_hints  # Kept for API compatibility with specz callers.
+
+    parquet_path = Path(parquet_path).resolve()
+    if output_path is not None:
+        collection_path = Path(output_path).resolve()
+        parent_dir = collection_path.parent
+        collection_artifact_name = output_artifact_name or collection_path.name
+        catalog_artifact_name = catalog_artifact_name or collection_path.stem
+    else:
+        parent_dir = parquet_path.parent
+        collection_artifact_name = output_artifact_name or f"{parquet_path.name}_hats"
+        catalog_artifact_name = catalog_artifact_name or collection_artifact_name
+        collection_path = parent_dir / collection_artifact_name
+    margin_artifact_name = margin_artifact_name or f"{catalog_artifact_name}_{int(margin_threshold)}arcs"
+
+    base_path = parquet_path / "base"
+    pattern = str(base_path / "*.parquet") if base_path.exists() else str(parquet_path / "*.parquet")
+    in_file_paths = sorted(glob.glob(pattern))
+    if not in_file_paths:
+        raise ValueError(f"No Parquet files found at '{parquet_path}'")
+
+    try:
+        total_size_mb = sum(os.path.getsize(path) for path in in_file_paths) / 1024**2
+    except Exception:
+        total_size_mb = float("inf")
+
+    if total_size_mb <= size_threshold_mb:
+        try:
+            import lsdb
+
+            _log_info(
+                logger,
+                "Small catalog (%.1f MB). Building collection via fast path -> %s",
+                total_size_mb,
+                collection_path,
+            )
+            pdf_list = [pd.read_parquet(path) for path in in_file_paths]
+            dfp = (
+                pd.concat(pdf_list, ignore_index=True)
+                if len(pdf_list) > 1
+                else pdf_list[0]
+            )
+            dfp = _rename_duplicate_columns_pd(dfp, logger)
+            dfp = _cast_hats_fast_path_columns(dfp)
+
+            catalog = lsdb.from_dataframe(
+                dfp,
+                catalog_name=catalog_artifact_name,
+                ra_column=ra_column,
+                dec_column=dec_column,
+                use_pyarrow_types=True,
+            )
+            catalog.write_catalog(str(collection_path), as_collection=True, overwrite=True)
+            _log_info(logger, "Finished collection fast-path: %s", collection_path)
+            return str(collection_path)
+        except Exception as error:
+            _log_warning(
+                logger,
+                "Collection fast-path failed for %s (%s: %s). Falling back to hats_import.",
+                collection_artifact_name,
+                type(error).__name__,
+                error,
+            )
+
+    try:
+        from hats_import import CollectionArguments
+        from hats_import.collection.run_import import run as run_collection_import
+    except Exception as error:
+        raise RuntimeError(
+            "hats-import is required to export large HATS output in combine_redshift_dedup."
+        ) from error
+
+    def _clean_partial():
+        try:
+            if collection_path.is_dir():
+                shutil.rmtree(collection_path, ignore_errors=True)
+        except Exception as error:
+            _log_warning(logger, "Failed to remove partial '%s': %s", collection_path, error)
+
+    _clean_partial()
+
+    def _make_args(with_margin: bool):
+        args = CollectionArguments(
+            output_artifact_name=collection_artifact_name,
+            output_path=str(parent_dir),
+            resume=False,
+        ).catalog(
+            input_file_list=in_file_paths,
+            file_reader="parquet",
+            output_artifact_name=catalog_artifact_name,
+            ra_column=ra_column,
+            dec_column=dec_column,
+        )
+        if with_margin:
+            args = args.add_margin(
+                margin_threshold=margin_threshold,
+                output_artifact_name=margin_artifact_name,
+                is_default=True,
+            )
+        return args
+
+    if try_margin:
+        try:
+            _log_info(
+                logger,
+                "Building collection WITH margin (import pipeline): %s",
+                collection_artifact_name,
+            )
+            run_collection_import(_make_args(with_margin=True), client)
+            return str(collection_path)
+        except Exception as error:
+            _log_warning(logger, "WITH margin failed: %s. Retrying WITHOUT margin...", error)
+            _clean_partial()
+
+    try:
+        _log_info(
+            logger,
+            "Building collection WITHOUT margin (import pipeline): %s",
+            collection_artifact_name,
+        )
+        run_collection_import(_make_args(with_margin=False), client)
+    except Exception as error:
+        _clean_partial()
+        raise RuntimeError(f"Failed to build collection '{collection_artifact_name}': {error}") from error
+
+    if not collection_path.is_dir():
+        raise RuntimeError(f"hats-import did not create expected HATS output: {collection_path}")
+
+    return str(collection_path)
+
+
+def _log_info(logger, message, *args):
+    if logger is not None:
+        try:
+            logger.info(message, *args)
+            return
+        except Exception:
+            pass
+
+
+def _log_warning(logger, message, *args):
+    if logger is not None:
+        try:
+            logger.warning(message, *args)
+            return
+        except Exception:
+            pass
+
+
+def _write_catalog_like_to_hats(catalog_like, output_path: Path):
+    """Write an LSDB catalog-like object as HATS."""
+    write_catalog = getattr(catalog_like, "write_catalog", None)
+    to_hats = getattr(catalog_like, "to_hats", None)
+
+    attempts = []
+    if callable(write_catalog):
+        attempts.extend(
+            [
+                lambda: write_catalog(str(output_path), as_collection=True, overwrite=True),
+                lambda: write_catalog(str(output_path), overwrite=True),
+                lambda: write_catalog(str(output_path)),
+            ]
+        )
+    if callable(to_hats):
+        attempts.extend(
+            [
+                lambda: to_hats(
+                    str(output_path),
+                    catalog_name=output_path.stem,
+                    overwrite=True,
+                    progress_bar=False,
+                    as_collection=False,
+                ),
+                lambda: to_hats(
+                    str(output_path),
+                    catalog_name=output_path.stem,
+                    overwrite=True,
+                    progress_bar=False,
+                ),
+                lambda: to_hats(str(output_path), overwrite=True, progress_bar=False),
+                lambda: to_hats(str(output_path)),
+            ]
+        )
+
+    if not attempts:
+        raise RuntimeError("Could not find a compatible lsdb HATS writer in this environment.")
+
+    last_error = None
+    for run in attempts:
+        try:
+            result = run()
+            if hasattr(result, "compute") and callable(result.compute):
+                result.compute()
+            return
+        except TypeError as error:
+            last_error = error
+            continue
+        except Exception as error:
+            last_error = error
+            continue
+
+    raise RuntimeError(
+        f"Could not write HATS output with available lsdb writer method: {last_error}"
+    )

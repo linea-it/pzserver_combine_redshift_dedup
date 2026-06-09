@@ -121,6 +121,13 @@ def _ensure_non_empty_final_dataframe(
         raise RuntimeError(msg)
 
 
+def _is_dask_dataframe(df: Any) -> bool:
+    """Return True when df is a Dask DataFrame-like object."""
+    return isinstance(df, dd.DataFrame) or (
+        hasattr(df, "map_partitions") and hasattr(df, "to_parquet")
+    )
+
+
 def _is_collection_root(path: str) -> bool:
     """Return True if path contains collection.properties (HATS root)."""
     return (
@@ -1063,10 +1070,18 @@ def main(
                     [dd.read_parquet(i["prepared_path"]) for i in prepared_info]
                 )
                 _ = df_final.head(1, compute=True)  # small schema sanity
-                df_final = df_final.compute()
-                log_cross.info(
-                    "Concatenate compute finished: shape=%s", tuple(df_final.shape)
-                )
+                if output_format == "hats":
+                    log_cross.info(
+                        "Concatenate graph built lazily for HATS output "
+                        "(npartitions=%s).",
+                        getattr(df_final, "npartitions", "unknown"),
+                    )
+                else:
+                    df_final = df_final.compute()
+                    log_cross.info(
+                        "Concatenate compute finished: shape=%s",
+                        tuple(df_final.shape),
+                    )
             except Exception as e:
                 import traceback as _tb
 
@@ -1532,24 +1547,33 @@ def main(
                     )
                     raise
 
-                # Final materialization: compute only once, at the very end
+                # Final materialization: avoid pulling the full dataframe to the
+                # driver when HATS output can consume a Dask dataframe directly.
                 try:
                     # Small sanity check without pulling everything
                     _ = merged.head(1)
-                    df_final = merged.compute()
-
-                    if "group_id" in df_final.columns:
-                        dup = df_final["group_id"].value_counts(dropna=True)
-                        n_big = int((dup > 1).sum())
+                    if output_format == "hats":
+                        df_final = merged
                         log_dedup.info(
-                            "Sanity group_id: uniques=%d, ids_with_>1_occurrences=%d",
-                            int(dup.size),
-                            n_big,
+                            "Keeping final merged dataframe lazy for HATS output "
+                            "(npartitions=%s).",
+                            getattr(df_final, "npartitions", "unknown"),
                         )
                     else:
-                        log_dedup.info(
-                            "No group_id column present after dedup; skipping sanity counts."
-                        )
+                        df_final = merged.compute()
+
+                        if "group_id" in df_final.columns:
+                            dup = df_final["group_id"].value_counts(dropna=True)
+                            n_big = int((dup > 1).sum())
+                            log_dedup.info(
+                                "Sanity group_id: uniques=%d, ids_with_>1_occurrences=%d",
+                                int(dup.size),
+                                n_big,
+                            )
+                        else:
+                            log_dedup.info(
+                                "No group_id column present after dedup; skipping sanity counts."
+                            )
 
                     current_workers = len(client.scheduler_info().get("workers", {}))
                     log_dedup.info("WORKERS STILL RUNNING=%d.", current_workers)
@@ -1583,17 +1607,25 @@ def main(
         "START consolidation: staging artifacts into process dir (base_dir=%s)",
         base_dir,
     )
+    lazy_hats_output = output_format == "hats" and _is_dask_dataframe(df_final)
 
     # Snapshot about df_final to aid debugging
     try:
-        log_cons.info("df_final shape: %s", tuple(df_final.shape))
-        try:
-            mem_bytes = int(df_final.memory_usage(deep=True).sum())
+        if lazy_hats_output:
             log_cons.info(
-                "df_final memory footprint: %.2f MB", mem_bytes / (1024 * 1024)
+                "df_final is a lazy Dask dataframe for HATS output "
+                "(npartitions=%s).",
+                getattr(df_final, "npartitions", "unknown"),
             )
-        except Exception as e_mem:
-            log_cons.debug("Could not compute memory footprint: %s", e_mem)
+        else:
+            log_cons.info("df_final shape: %s", tuple(df_final.shape))
+            try:
+                mem_bytes = int(df_final.memory_usage(deep=True).sum())
+                log_cons.info(
+                    "df_final memory footprint: %.2f MB", mem_bytes / (1024 * 1024)
+                )
+            except Exception as e_mem:
+                log_cons.debug("Could not compute memory footprint: %s", e_mem)
         try:
             dtypes_preview = {
                 str(k): str(v) for k, v in list(df_final.dtypes.items())[:20]
@@ -1604,17 +1636,20 @@ def main(
     except Exception as e_snap:
         log_cons.warning("Could not snapshot df_final: %s", e_snap)
 
-    try:
-        n_rows_final = int(len(df_final))
-        log_cons.info("Rows in final dataframe (in-memory): %d", n_rows_final)
-    except Exception as e:
-        log_cons.warning("Could not compute len(df_final): %s", e)
+    if lazy_hats_output:
+        log_cons.info("Skipping full row-count materialization before HATS export.")
+    else:
+        try:
+            n_rows_final = int(len(df_final))
+            log_cons.info("Rows in final dataframe (in-memory): %d", n_rows_final)
+        except Exception as e:
+            log_cons.warning("Could not compute len(df_final): %s", e)
 
-    _ensure_non_empty_final_dataframe(
-        df_final,
-        log_cons,
-        context="after crossmatch/deduplication and before consolidation filters",
-    )
+        _ensure_non_empty_final_dataframe(
+            df_final,
+            log_cons,
+            context="after crossmatch/deduplication and before consolidation filters",
+        )
 
     if combine_mode == "concatenate" and "tie_result" in df_final.columns:
         log_cons.info("Dropping 'tie_result' (concatenate mode)")
@@ -1625,11 +1660,6 @@ def main(
             raise
 
     if combine_mode == "concatenate_and_remove_duplicates":
-        if not df_final.index.is_unique:
-            log_cons.info(
-                "Resetting df_final index (duplicates found) before tie filtering."
-            )
-            df_final = df_final.reset_index(drop=True)
         tie_treatment_option = (
             str(param_config.get("tie_treatment_option", "remove_all") or "remove_all")
             .strip()
@@ -1642,7 +1672,58 @@ def main(
             )
             tie_treatment_option = "remove_all"
 
-        if "tie_result" not in df_final.columns:
+        if lazy_hats_output and tie_treatment_option == "draw_one":
+            log_cons.info(
+                "tie_treatment_option=draw_one requires pandas consolidation; "
+                "computing final dataframe before draw-one filtering."
+            )
+            df_final = df_final.compute()
+            lazy_hats_output = False
+
+        if lazy_hats_output:
+            if "tie_result" not in df_final.columns:
+                log_cons.warning(
+                    "Expected 'tie_result' column for removal mode, but it is missing; skipping row filter."
+                )
+            else:
+                log_cons.info(
+                    "Applying lazy Dask tie_result filter for HATS output "
+                    "(tie_treatment_option=%s).",
+                    tie_treatment_option,
+                )
+                try:
+                    tie_num = (
+                        dd.to_numeric(df_final["tie_result"], errors="coerce")
+                        .fillna(0)
+                        .astype("int8")
+                    )
+                    if tie_treatment_option == "keep_all":
+                        keep_mask = tie_num.isin([1, 2])
+                        log_cons.info(
+                            "Filtering rows lazily by tie_result in {1,2} (keep_all)."
+                        )
+                    else:
+                        keep_mask = tie_num.eq(1)
+                        log_cons.info(
+                            "Filtering rows lazily by tie_result == 1 (%s).",
+                            tie_treatment_option,
+                        )
+                    df_final = df_final.loc[keep_mask]
+                except Exception as e:
+                    log_cons.error(
+                        "FAILED while applying lazy tie_result filter: %s", e
+                    )
+                    raise
+
+        if not lazy_hats_output and not df_final.index.is_unique:
+            log_cons.info(
+                "Resetting df_final index (duplicates found) before tie filtering."
+            )
+            df_final = df_final.reset_index(drop=True)
+
+        if lazy_hats_output:
+            pass
+        elif "tie_result" not in df_final.columns:
             log_cons.warning(
                 "Expected 'tie_result' column for removal mode, but it is missing; skipping row filter."
             )
@@ -1808,13 +1889,35 @@ def main(
                 log_cons.error("FAILED while filtering by tie_treatment_option: %s", e)
                 raise
 
-    _ensure_non_empty_final_dataframe(
-        df_final,
-        log_cons,
-        context="immediately before final export",
-    )
+    if lazy_hats_output:
+        try:
+            sample = df_final.head(1, npartitions=-1, compute=True)
+            if len(sample) == 0:
+                msg = (
+                    "Final catalog is empty before HATS export. "
+                    "Nothing can be consolidated."
+                )
+                log_cons.error(msg)
+                raise RuntimeError(msg)
+        except RuntimeError:
+            raise
+        except Exception as e:
+            log_cons.warning(
+                "Could not sample lazy final dataframe before HATS export: %s", e
+            )
+    else:
+        _ensure_non_empty_final_dataframe(
+            df_final,
+            log_cons,
+            context="immediately before final export",
+        )
 
-    if USE_ARROW_TYPES:
+    if USE_ARROW_TYPES and lazy_hats_output:
+        log_cons.info(
+            "Skipping pandas convert_dtypes before HATS export; "
+            "save_dataframe will stage the Dask dataframe directly."
+        )
+    elif USE_ARROW_TYPES:
         log_cons.info(
             "Converting dtypes with dtype_backend='pyarrow' (USE_ARROW_TYPES=True)"
         )
@@ -1834,37 +1937,44 @@ def main(
             )
             raise
 
-    # Drop all-empty columns
-    try:
-        to_drop = []
-        for col in df_final.columns:
-            dt = df_final[col].dtype
-            try:
-                if str(dt) == "string[pyarrow]" or str(dt) == "object":
-                    all_missing = df_final[col].apply(
-                        lambda x: (pd.isna(x) or str(x).strip() == "")
+    if lazy_hats_output:
+        log_cons.info(
+            "Skipping all-missing column scan before HATS export to avoid "
+            "materializing the Dask dataframe."
+        )
+    else:
+        # Drop all-empty columns
+        try:
+            to_drop = []
+            for col in df_final.columns:
+                dt = df_final[col].dtype
+                try:
+                    if str(dt) == "string[pyarrow]" or str(dt) == "object":
+                        all_missing = df_final[col].apply(
+                            lambda x: (pd.isna(x) or str(x).strip() == "")
+                        )
+                    else:
+                        all_missing = df_final[col].isna()
+                    if bool(all_missing.all()):
+                        to_drop.append(col)
+                except Exception as e_col:
+                    log_cons.debug(
+                        "Skip emptiness check for column '%s' (dtype=%s): %s",
+                        col,
+                        dt,
+                        e_col,
                     )
-                else:
-                    all_missing = df_final[col].isna()
-                if bool(all_missing.all()):
-                    to_drop.append(col)
-            except Exception as e_col:
-                log_cons.debug(
-                    "Skip emptiness check for column '%s' (dtype=%s): %s",
-                    col,
-                    dt,
-                    e_col,
+            if to_drop:
+                log_cons.info(
+                    "Dropping all-missing columns: %s",
+                    ", ".join(sorted(map(str, to_drop))),
                 )
-        if to_drop:
-            log_cons.info(
-                "Dropping all-missing columns: %s", ", ".join(sorted(map(str, to_drop)))
-            )
-            df_final = df_final.drop(columns=to_drop)
-        else:
-            log_cons.info("No all-missing columns to drop.")
-    except Exception as e:
-        log_cons.error("FAILED while dropping all-missing columns: %s", e)
-        raise
+                df_final = df_final.drop(columns=to_drop)
+            else:
+                log_cons.info("No all-missing columns to drop.")
+        except Exception as e:
+            log_cons.error("FAILED while dropping all-missing columns: %s", e)
+            raise
 
     # Stage final output with your save_dataframe
     staged_output_base = os.path.join(base_dir, output_name)
@@ -1879,7 +1989,14 @@ def main(
         except Exception as e_head:
             log_cons.debug("Could not preview df_final.head(3): %s", e_head)
 
-        save_dataframe(df_final, staged_output_base, output_format)
+        save_dataframe(
+            df_final,
+            staged_output_base,
+            output_format,
+            temp_dir=temp_dir,
+            client=client,
+            logger=log_cons,
+        )
         log_cons.info("Staged final output at %s.%s", staged_output_base, output_format)
     except Exception as e:
         import traceback as _tb
@@ -2031,7 +2148,10 @@ def main(
         src_out = f"{staged_output_base}.{output_format}"
         dst_out = os.path.join(out_root_and_dir, f"{output_name}.{output_format}")
         publish_logger.info("Copying final output: %s -> %s", src_out, dst_out)
-        _copy_file(src_out, dst_out, publish_logger)
+        if output_format == "hats":
+            _copy_tree(src_out, dst_out, publish_logger)
+        else:
+            _copy_file(src_out, dst_out, publish_logger)
     except Exception as e:
         publish_logger.error("FAILED to copy final output to publish dir: %s", e)
         raise
