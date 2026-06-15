@@ -291,6 +291,29 @@ translation_rules:
           value: "p"
       default: "p"
 
+  ELG_FIGS:
+    z_flag_translation:
+      default: 3
+    instrument_type_translation:
+      default: "s"
+
+  EUCLID_Q1:
+    z_flag_translation:
+      conditions:
+        - expr: "z_flag == 0.0"
+          value: 0
+        - expr: "0.0 < z_flag < 0.7"
+          value: 1
+        - expr: "0.7 <= z_flag < 0.9"
+          value: 2
+        - expr: "0.9 <= z_flag < 0.99"
+          value: 3
+        - expr: "z_flag >= 0.99"
+          value: 4
+      default: 0
+    instrument_type_translation:
+      default: "s"
+
   FMOS_COSMOS:
     z_flag_translation:
       -99: 0
