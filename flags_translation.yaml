@@ -153,6 +153,14 @@ translation_rules:
           value: "p"
       default: "p"
 
+  C3R2_DR3:
+    z_flag_translation:
+      4.0: 4
+      3.5: 3
+      3: 3
+    instrument_type_translation:
+      default: "s"
+
   COSMOS2020_CLASSIC:
     z_flag_translation:
       conditions:
