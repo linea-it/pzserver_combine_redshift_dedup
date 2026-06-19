@@ -478,6 +478,11 @@ def main(
     # --- Load config ---
     config = load_yml(config_path)
     param_config = config.get("param", {})
+    configured_extra_columns = set(
+        (param_config.get("extra_columns") or {}).keys()
+        if isinstance(param_config.get("extra_columns"), dict)
+        else []
+    )
     if base_dir_override is None:
         raise ValueError("You must specify --base_dir via the command line.")
     base_dir = base_dir_override
@@ -1936,6 +1941,8 @@ def main(
         try:
             to_drop = []
             for col in df_final.columns:
+                if col in configured_extra_columns:
+                    continue
                 dt = df_final[col].dtype
                 try:
                     if str(dt) == "string[pyarrow]" or str(dt) == "object":

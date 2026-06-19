@@ -573,6 +573,152 @@ def _normalize_schema_hints(hints: dict | None) -> dict:
     return norm
 
 
+def _normalize_extra_columns_config(value: Any) -> dict[str, dict[str, str]]:
+    """Validate and normalize ``param.extra_columns``.
+
+    Args:
+        value: Configured mapping of output column names to dtypes.
+
+    Returns:
+        Mapping of output names to normalized ``source`` and ``type`` values.
+
+    Raises:
+        TypeError: If the configured value is not a mapping.
+        ValueError: If a column has an unsupported dtype.
+    """
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise TypeError("param.extra_columns must be a mapping of column names to dtypes")
+
+    normalized: dict[str, dict[str, str]] = {}
+    for output_name, raw_spec in value.items():
+        output = str(output_name).strip()
+        if not output:
+            raise ValueError("param.extra_columns cannot contain an empty output name")
+
+        if isinstance(raw_spec, dict):
+            unknown = sorted(set(raw_spec) - {"source", "type"})
+            if unknown:
+                raise ValueError(
+                    f"Unknown option(s) for param.extra_columns.{output}: {unknown}"
+                )
+            source = str(raw_spec.get("source", output)).strip()
+            raw_type = raw_spec.get("type")
+        else:
+            source = output
+            raw_type = raw_spec
+
+        normalized_type = _normalize_schema_hints({output: raw_type}).get(output)
+        if normalized_type is None:
+            raise ValueError(
+                "Unsupported dtype in param.extra_columns for column "
+                f"'{output}'. Supported types: str, float, int, bool."
+            )
+        if not source:
+            raise ValueError(
+                f"param.extra_columns.{output}.source cannot be empty"
+            )
+        normalized[output] = {"source": source, "type": normalized_type}
+
+    reserved = {
+        "CRD_ID",
+        "id",
+        "ra",
+        "dec",
+        "z",
+        "z_flag",
+        "z_err",
+        "instrument_type",
+        "survey",
+        "source",
+        "tie_result",
+        "compared_to",
+        "group_id",
+        "z_flag_homogenized",
+        "instrument_type_homogenized",
+        "is_in_DP1_fields",
+        "is_in_rubin_footprint",
+    }
+    conflicts = sorted(set(normalized) & reserved)
+    if conflicts:
+        raise ValueError(
+            f"param.extra_columns cannot redefine pipeline columns: {conflicts}"
+        )
+    return normalized
+
+
+def _copy_extra_columns_from_sources(
+    df: dd.DataFrame,
+    columns: dict[str, dict[str, str]],
+    logger: logging.Logger,
+) -> dd.DataFrame:
+    """Copy configured source columns before standard-column renaming."""
+    for output, spec in columns.items():
+        source = spec["source"]
+        if source == output:
+            continue
+        if source not in df.columns:
+            if output in df.columns:
+                logger.info(
+                    "Discard extra output column '%s': configured source '%s' "
+                    "is absent",
+                    output,
+                    source,
+                )
+                df = df.drop(columns=[output])
+            continue
+        if output in df.columns:
+            logger.info(
+                "Replace extra output column '%s' with configured source '%s'",
+                output,
+                source,
+            )
+        else:
+            logger.info("Copy extra column '%s' -> '%s'", source, output)
+        df[output] = df[source]
+    return df
+
+
+def _apply_configured_columns(
+    df: dd.DataFrame, columns: dict[str, dict[str, str]]
+) -> dd.DataFrame:
+    """Cast configured columns or create typed null columns when absent."""
+    for col, spec in columns.items():
+        kind = spec["type"]
+        if col not in df.columns:
+            dtype = {
+                "str": DTYPE_STR,
+                "float": DTYPE_FLOAT,
+                "int": DTYPE_INT,
+                "bool": DTYPE_BOOL,
+            }[kind]
+            df = _add_missing_with_dtype(df, col, dtype)
+        elif kind == "str":
+            df[col] = df[col].map_partitions(
+                _normalize_string_series_to_na,
+                meta=pd.Series(pd.array([], dtype=DTYPE_STR)),
+            )
+        elif kind == "float":
+            coerced = dd.to_numeric(df[col], errors="coerce")
+            df[col] = coerced.map_partitions(
+                lambda s: s.astype(DTYPE_FLOAT),
+                meta=pd.Series(pd.array([], dtype=DTYPE_FLOAT)),
+            )
+        elif kind == "int":
+            coerced = dd.to_numeric(df[col], errors="coerce")
+            df[col] = coerced.map_partitions(
+                lambda s: s.astype(DTYPE_INT),
+                meta=pd.Series(pd.array([], dtype=DTYPE_INT)),
+            )
+        elif kind == "bool":
+            df[col] = df[col].map_partitions(
+                _to_nullable_boolean_strict,
+                meta=pd.Series(pd.array([], dtype=DTYPE_BOOL)),
+            )
+    return df
+
+
 def _normalize_types(
     df: dd.DataFrame, product_name: str, logger: logging.Logger
 ) -> tuple[dd.DataFrame, bool]:
@@ -966,6 +1112,7 @@ def _select_output_columns(
     used_type_fastpath: bool,
     save_expr_columns: bool = False,
     schema_hints: dict | None = None,
+    extra_columns: dict[str, dict[str, str]] | None = None,
 ) -> dd.DataFrame:
     """Assemble final output schema and coerce optional expression columns.
 
@@ -976,6 +1123,7 @@ def _select_output_columns(
       used_type_fastpath: Whether `type` was reused for instrument_type.
       save_expr_columns: Keep variables used in YAML expressions.
       schema_hints: Normalized hints {'int','float','str','bool'}.
+      extra_columns: Configured columns to preserve or create as typed nulls.
 
     Returns:
       dd.DataFrame: Subset with deterministic column order.
@@ -1038,6 +1186,11 @@ def _select_output_columns(
     needed = [c for c in extra_expr_cols if c not in standard and c not in already]
     if save_expr_columns:
         final_cols += needed
+
+    # User-requested output columns are independent of translation and deduplication.
+    extra_columns = extra_columns or {}
+    df = _apply_configured_columns(df, extra_columns)
+    final_cols += list(extra_columns)
 
     # Optional dtype coercions for expression vars (guided by schema_hints).
     schema_hints = schema_hints or {}
@@ -1186,9 +1339,12 @@ def prepare_catalog(
     # ===== START PHASE (per catalog) =====
     lg.info(f"START prepare_catalog product={product_name}")
 
+    extra_columns = _normalize_extra_columns_config(param_config.get("extra_columns"))
+
     # 1) Load product
     ph = ProductHandle(entry["path"])
     df = ph.to_ddf()
+    df = _copy_extra_columns_from_sources(df, extra_columns, lg)
 
     # 2) Validate & rename, base schema
     df = _validate_and_rename(df, entry, lg)
@@ -1333,6 +1489,7 @@ def prepare_catalog(
         schema_hints=_normalize_schema_hints(
             translation_config.get("expr_column_schema")
         ),
+        extra_columns=extra_columns,
     )
 
     # Coalesce partitions for write
@@ -1360,7 +1517,10 @@ def prepare_catalog(
     out_path = _save_parquet(df_to_write, temp_dir, product_name)
 
     # 14) Build collection (always)
-    schema_hints_raw = translation_config.get("expr_column_schema")
+    schema_hints_raw = dict(translation_config.get("expr_column_schema") or {})
+    schema_hints_raw.update(
+        {output: spec["type"] for output, spec in extra_columns.items()}
+    )
     collection_path = _build_collection_with_retry(
         parquet_path=out_path,
         logs_dir=logs_dir,
