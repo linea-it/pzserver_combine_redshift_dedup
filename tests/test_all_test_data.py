@@ -74,7 +74,6 @@ def _temporary_config(tmp_path: Path) -> Path:
     config["output_root_dir"] = str(tmp_path / "storage")
     config["output_dir"] = "outputs"
     config["param"]["flags_translation_file"] = str(REPO_ROOT / "flags_translation.yaml")
-
     config_path = tmp_path / "config.all.yaml"
     with config_path.open("w") as fp:
         yaml.safe_dump(config, fp, sort_keys=False)

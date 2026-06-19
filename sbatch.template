@@ -5,14 +5,17 @@
 #SBATCH --account=hpc-pipelines
 #SBATCH --time=04:00:00
 #SBATCH --ntasks=1
+#SBATCH --cpus-per-task=4
+#SBATCH --mem=48G
 #SBATCH --output={out}
 #SBATCH --error={err}
 #SBATCH --partition=cpu_pipelines
 #SBATCH --propagate
-#SBATCH --mem-per-cpu=16G
 
 {cmd} .
+status=$?
 
-echo $? >> return.code
+echo "$status" > return.code
+echo "Done with exit code $status"
 
-echo "Done!"
+exit "$status"
