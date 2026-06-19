@@ -1131,13 +1131,6 @@ def _cast_hats_fast_path_columns(dfp: pd.DataFrame) -> pd.DataFrame:
             except Exception:
                 pass
 
-    for col in map(str, dfp.columns):
-        if col.startswith("CRD_ID_prev") or col.startswith("compared_to_prev"):
-            try:
-                dfp[col] = dfp[col].astype(_HATS_DTYPE_STR)
-            except Exception:
-                pass
-
     return dfp
 
 

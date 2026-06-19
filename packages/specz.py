@@ -18,7 +18,6 @@ import difflib
 import logging
 import os
 import re
-import shutil
 from typing import TYPE_CHECKING, Any
 
 # -----------------------
@@ -451,78 +450,32 @@ def _rename_duplicate_columns_pd(
     return pdf
 
 
-def _next_available_prev_name(existing: list[str], base: str) -> str:
-    """Return a unique previous-result column name based on base.
-
-    Args:
-        existing: Current columns.
-        base: Desired base name.
-
-    Returns:
-        Unique column name.
-    """
-    if base not in existing:
-        return base
-    i = 2
-    while f"{base}{i}" in existing:
-        i += 1
-    return f"{base}{i}"
-
-
-def _stash_previous_results(
-    df: dd.DataFrame, entry: dict, logger: logging.Logger
+def _drop_previous_results(
+    df: dd.DataFrame, logger: logging.Logger
 ) -> dd.DataFrame:
-    """Stash previous-run results into CRD_ID_prev*/compared_to_prev*/group_id_prev*.
+    """Discard result columns produced by earlier pipeline runs.
+
+    This runs after the configured input mapping, so an input ``CRD_ID`` mapped
+    to ``id`` is retained as the source identifier. All current and historical
+    pipeline result columns are otherwise removed before new results are built.
 
     Args:
         df: Frame after rename.
-        entry: YAML node for product.
         logger: Logger.
 
     Returns:
-        dd.DataFrame: Frame with stashed previous columns when applicable.
+        dd.DataFrame: Frame without results from previous runs.
     """
-    cols = list(map(str, df.columns))
-    columns_cfg = entry.get("columns") or {}
-    non_null_map = {
-        str(std): str(src)
-        for std, src in columns_cfg.items()
-        if src not in (None, "", "null")
-    }
-
-    mapped_id_from_crd = str(non_null_map.get("id", "")).strip().lower() == "crd_id"
-
-    # Handle YAML-mapped id -> CRD_ID
-    if mapped_id_from_crd and "id" in cols:
-        new_name = _next_available_prev_name(cols, "CRD_ID_prev")
-        logger.info(f"Stash CRD_ID from YAML-mapped 'id' -> {new_name} (keep 'id')")
-        df[new_name] = df["id"]
-        cols.append(new_name)
-
-    # Handle CRD_ID
-    if "CRD_ID" in cols:
-        new_name = _next_available_prev_name(cols, "CRD_ID_prev")
-        if new_name != "CRD_ID":
-            logger.info(f"Stash previous CRD_ID -> {new_name}")
-            df = df.rename(columns={"CRD_ID": new_name})
-            cols.append(new_name)
-
-    # Handle compared_to
-    if "compared_to" in cols:
-        new_name = _next_available_prev_name(cols, "compared_to_prev")
-        if new_name != "compared_to":
-            logger.info(f"Stash previous compared_to -> {new_name}")
-            df = df.rename(columns={"compared_to": new_name})
-            cols.append(new_name)
-
-    # Handle group_id
-    if "group_id" in cols:
-        new_name = _next_available_prev_name(cols, "group_id_prev")
-        if new_name != "group_id":
-            logger.info(f"Stash previous group_id -> {new_name}")
-            df = df.rename(columns={"group_id": new_name})
-            cols.append(new_name)
-
+    result_columns = {"CRD_ID", "compared_to", "group_id"}
+    historical_prefixes = ("CRD_ID_prev", "compared_to_prev", "group_id_prev")
+    to_drop = [
+        col
+        for col in map(str, df.columns)
+        if col in result_columns or col.startswith(historical_prefixes)
+    ]
+    if to_drop:
+        logger.info("Discard previous pipeline result columns: %s", to_drop)
+        df = df.drop(columns=to_drop)
     return df
 
 
@@ -1086,14 +1039,6 @@ def _select_output_columns(
     if save_expr_columns:
         final_cols += needed
 
-    # --- Include *_prev columns if present (now also for group_id). ---
-    prev_like = [c for c in df.columns if str(c).startswith("CRD_ID_prev")]
-    prev_like += [c for c in df.columns if str(c).startswith("compared_to_prev")]
-    prev_like += [c for c in df.columns if str(c).startswith("group_id_prev")]  # NEW
-    for c in prev_like:
-        if c not in final_cols:
-            final_cols.append(c)
-
     # Optional dtype coercions for expression vars (guided by schema_hints).
     schema_hints = schema_hints or {}
     if save_expr_columns and schema_hints:
@@ -1247,7 +1192,7 @@ def prepare_catalog(
 
     # 2) Validate & rename, base schema
     df = _validate_and_rename(df, entry, lg)
-    df = _stash_previous_results(df, entry, lg)
+    df = _drop_previous_results(df, lg)
 
     # 3) Honor user-provided homogenized columns
     df = _honor_user_homogenized_mapping(df, entry, product_name, lg)
