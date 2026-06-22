@@ -43,6 +43,7 @@ from crossmatch_cross import crossmatch_tiebreak_safe
 from deduplication import run_dedup_with_lsdb_map_partitions
 from executor import get_executor
 from product_handle import save_dataframe
+from resource_usage import ResourceUsageMonitor
 from specz import DTYPE_STR, USE_ARROW_TYPES, prepare_catalog
 from utils import (
     configure_exception_hook,
@@ -57,6 +58,8 @@ from utils import (
 )
 
 __all__ = ["main"]
+
+_resource_usage_monitor: ResourceUsageMonitor | None = None
 
 
 # -----------------------
@@ -473,6 +476,8 @@ def main(
     config_path: str, cwd: str = ".", base_dir_override: str | None = None
 ) -> None:
     """Run the CRC pipeline end-to-end."""
+    global _resource_usage_monitor
+
     delete_temp_files = True  # set True to aggressively clean intermediates
 
     # --- Load config ---
@@ -658,6 +663,8 @@ def main(
     # --- Dask cluster/client ---
     cluster = get_executor(config["executor"], logs_dir=logs_dir)
     client = Client(cluster)
+    _resource_usage_monitor = ResourceUsageMonitor(client)
+    _resource_usage_monitor.start()
 
     # Ensure the minimum number of workers start within 10 seconds
     exec_args = config.get("executor", {}).get("args", {}) or {}
@@ -2058,6 +2065,9 @@ def main(
         log_cons.error("FAILED to update process_info: %s\n%s", e, _tb.format_exc())
         raise
 
+    # Record resource peaks before process_info is copied to the published output.
+    _resource_usage_monitor.report(_phase_logger(base_logger, "resources"))
+
     # -----------------------
     # Publish step
     # -----------------------
@@ -2224,6 +2234,10 @@ if __name__ == "__main__":
     finally:
         dur = time.time() - start_ts
         lg = logging.getLogger("crc")
+        if _resource_usage_monitor is not None:
+            _resource_usage_monitor.report(
+                logging.LoggerAdapter(lg, {"phase": "resources"})
+            )
         msg = f"Pipeline {'completed successfully' if ok else 'terminated with errors'} in {dur:.2f} seconds. (run dir: {base_dir})"
         if lg.handlers:
             logging.LoggerAdapter(lg, {"phase": "consolidation"}).info(msg)
