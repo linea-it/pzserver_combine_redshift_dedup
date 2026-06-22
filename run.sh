@@ -137,13 +137,38 @@ PIPELINE_DIR=$(dirname "$SCRIPT_PATH")
 
 INSTALL_PIPE="$PIPELINE_DIR/install.sh"
 PIPE_BASE=$PIPELINE_DIR
-MICROMAMBA_BIN="${MICROMAMBA_BIN:-micromamba}"
+MICROMAMBA_BIN="${MICROMAMBA_BIN:-${MAMBA_EXE:-micromamba}}"
 MAMBA_ROOT_PREFIX="${MAMBA_ROOT_PREFIX:-$HOME/.micromamba}"
+
+resolve_micromamba() {
+  local resolved
+
+  if resolved="$(command -v "$MICROMAMBA_BIN" 2>/dev/null)" && [ -n "$resolved" ]; then
+    printf '%s\n' "$resolved"
+    return 0
+  fi
+
+  return 1
+}
 
 if [ ! -f "$INSTALL_PIPE" ]; then
   err "Error: Installation script not found at: $INSTALL_PIPE"
   exit 1
 fi
+
+if [ -z "$CONFIG_PATH" ]; then
+  err "Error: config path is empty."
+  err "Usage: ./run.sh <config.yaml> [run_dir]"
+  exit 1
+fi
+
+if [ ! -f "$CONFIG_PATH" ]; then
+  err "Error: config file not found: $CONFIG_PATH"
+  exit 1
+fi
+
+CONFIG_PATH="$(readlink -f "$CONFIG_PATH")"
+log "Using config: ${CONFIG_PATH}"
 
 if [ -z "$BASE_DIR_OVERRIDE" ]; then
   BASE_DIR_OVERRIDE="$(pick_next_process_dir ".")"
@@ -161,6 +186,12 @@ log "Installing pipeline..."
 _enable_xtrace
 bash "$INSTALL_PIPE"
 _disable_xtrace
+
+if ! MICROMAMBA_BIN="$(resolve_micromamba)"; then
+  err "micromamba not found"
+  err "Add micromamba to PATH or set MICROMAMBA_BIN=/path/to/micromamba."
+  exit 1
+fi
 
 : "${CRC_LOG_COLLECTOR_PORT:=19997}"
 

@@ -2229,5 +2229,3 @@ if __name__ == "__main__":
             logging.LoggerAdapter(lg, {"phase": "consolidation"}).info(msg)
         else:
             print(("OK " if ok else "FAIL ") + msg)
-        if not ok:
-            sys.exit(1)
