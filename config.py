@@ -20,8 +20,8 @@ class Slurm(BaseModel):
         job_extra_directives: list[str] = ["--propagate", "--time=04:00:00"]
 
     class Scale(BaseModel):
-        minimum_jobs: int = 16
-        maximum_jobs: int = 20
+        minimum_jobs: int = 8
+        maximum_jobs: int = 16
 
     instance: Instance = Instance()
     scale: Scale = Scale()
