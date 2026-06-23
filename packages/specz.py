@@ -273,6 +273,48 @@ def _phase_logger(
 # -----------------------
 # YAML mapping validation
 # -----------------------
+def _looks_like_pipeline_output(columns: list[str]) -> bool:
+    """Return True when columns match this pipeline's output schema."""
+    have = set(map(str, columns))
+    required = {"CRD_ID", "ra", "dec", "z", "source"}
+    markers = {
+        "tie_result",
+        "compared_to",
+        "group_id",
+        "z_flag_homogenized",
+        "instrument_type_homogenized",
+        "is_in_DP1_fields",
+        "is_in_rubin_footprint",
+    }
+    return required.issubset(have) and bool(markers & have)
+
+
+def _prefer_pipeline_output_id_mapping(
+    entry: dict, columns: list[str], logger: logging.Logger
+) -> dict:
+    """Prefer original ``id`` over previous ``CRD_ID`` for pipeline outputs."""
+    if not _looks_like_pipeline_output(columns):
+        return entry
+
+    have = set(map(str, columns))
+    source_id = "id" if "id" in have else "CRD_ID"
+    columns_cfg = dict(entry.get("columns") or {})
+    current = columns_cfg.get("id")
+
+    if current != source_id:
+        logger.info(
+            "%s Detected previous pipeline output; using '%s' as input id "
+            "instead of configured '%s'.",
+            entry["internal_name"],
+            source_id,
+            current,
+        )
+        columns_cfg["id"] = source_id
+        entry = {**entry, "columns": columns_cfg}
+
+    return entry
+
+
 def _validate_and_rename(
     df: dd.DataFrame, entry: dict, logger: logging.Logger
 ) -> dd.DataFrame:
@@ -1344,6 +1386,7 @@ def prepare_catalog(
     # 1) Load product
     ph = ProductHandle(entry["path"])
     df = ph.to_ddf()
+    entry = _prefer_pipeline_output_id_mapping(entry, list(df.columns), lg)
     df = _copy_extra_columns_from_sources(df, extra_columns, lg)
 
     # 2) Validate & rename, base schema
