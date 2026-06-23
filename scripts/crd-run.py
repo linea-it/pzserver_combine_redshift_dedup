@@ -171,8 +171,14 @@ def _phase_logger(base_logger: logging.Logger, phase: str) -> logging.LoggerAdap
 
 
 def _filesize_mb(path: str) -> float:
-    """Return file size in MB. On error, inf."""
+    """Return file or directory tree size in MB. On error, inf."""
     try:
+        if os.path.isdir(path):
+            total_size = 0
+            for root, _, files in os.walk(path):
+                for filename in files:
+                    total_size += os.path.getsize(os.path.join(root, filename))
+            return total_size / 1024 / 1024
         return os.path.getsize(path) / 1024 / 1024
     except Exception:
         return float("inf")
