@@ -14,6 +14,7 @@ from specz import (  # noqa: E402
     _drop_previous_results,
     _copy_extra_columns_from_sources,
     _normalize_extra_columns_config,
+    _prefer_pipeline_output_id_mapping,
     _select_output_columns,
     _validate_and_rename,
 )
@@ -71,6 +72,75 @@ def test_crd_id_mapped_to_id_is_retained_before_cleanup():
         or col.startswith(("CRD_ID_prev", "compared_to_prev", "group_id_prev"))
         for col in result.columns
     )
+
+
+def test_pipeline_output_prefers_existing_id_over_crd_id_mapping():
+    pdf = pd.DataFrame(
+        {
+            "CRD_ID": ["CRD011_162"],
+            "id": ["original-source-id"],
+            "ra": [34.49],
+            "dec": [-5.56],
+            "z": [0.45],
+            "source": ["011_ozdes_dr2"],
+            "tie_result": [1],
+            "compared_to": [pd.NA],
+        }
+    )
+    entry = {
+        "internal_name": "019_pipeline_sample",
+        "columns": {
+            "id": "CRD_ID",
+            "ra": "ra",
+            "dec": "dec",
+            "z": "z",
+        },
+    }
+    frame = dd.from_pandas(pdf, npartitions=1)
+
+    resolved = _prefer_pipeline_output_id_mapping(
+        entry, list(frame.columns), logging.getLogger()
+    )
+    renamed = _validate_and_rename(frame, resolved, logging.getLogger())
+    result = _drop_previous_results(renamed, logging.getLogger()).compute()
+
+    assert resolved["columns"]["id"] == "id"
+    assert result.loc[0, "id"] == "original-source-id"
+    assert "CRD_ID" not in result.columns
+
+
+def test_pipeline_output_without_id_falls_back_to_crd_id_mapping():
+    pdf = pd.DataFrame(
+        {
+            "CRD_ID": ["CRD011_162"],
+            "ra": [34.49],
+            "dec": [-5.56],
+            "z": [0.45],
+            "source": ["011_ozdes_dr2"],
+            "tie_result": [1],
+            "compared_to": [pd.NA],
+        }
+    )
+    entry = {
+        "internal_name": "019_pipeline_sample",
+        "columns": {
+            "id": "some_missing_id",
+            "ra": "ra",
+            "dec": "dec",
+            "z": "z",
+        },
+    }
+    frame = dd.from_pandas(pdf, npartitions=1)
+
+    resolved = _prefer_pipeline_output_id_mapping(
+        entry, list(frame.columns), logging.getLogger()
+    )
+    renamed = _validate_and_rename(frame, resolved, logging.getLogger())
+    result = _drop_previous_results(renamed, logging.getLogger()).compute()
+
+    assert resolved["columns"]["id"] == "CRD_ID"
+    assert result.loc[0, "id"] == "CRD011_162"
+    assert "CRD_ID" not in result.columns
 
 
 def test_extra_column_is_preserved_and_cast():

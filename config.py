@@ -14,7 +14,7 @@ class Slurm(BaseModel):
     class Instance(BaseModel):
         cores: int = 2
         processes: int = 1
-        memory: str = "50GB"
+        memory: str = "48GB"
         queue: str = "cpu_pipelines"
         account: str = "hpc-pipelines"
         job_extra_directives: list[str] = ["--propagate", "--time=04:00:00"]
