@@ -14,14 +14,14 @@ class Slurm(BaseModel):
     class Instance(BaseModel):
         cores: int = 2
         processes: int = 1
-        memory: str = "32GB"
+        memory: str = "50GB"
         queue: str = "cpu_pipelines"
         account: str = "hpc-pipelines"
         job_extra_directives: list[str] = ["--propagate", "--time=04:00:00"]
 
     class Scale(BaseModel):
-        minimum_jobs: int = 6
-        maximum_jobs: int = 13
+        minimum_jobs: int = 4
+        maximum_jobs: int = 9
 
     instance: Instance = Instance()
     scale: Scale = Scale()
