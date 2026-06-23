@@ -10,6 +10,7 @@ from __future__ import annotations
 # Standard library
 # -----------------------
 import argparse
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 import glob
 import json
 import os
@@ -42,6 +43,7 @@ from crossmatch_cross import crossmatch_tiebreak_safe
 from deduplication import run_dedup_with_lsdb_map_partitions
 from executor import get_executor
 from product_handle import save_dataframe
+from resource_usage import ResourceUsageMonitor
 from specz import DTYPE_STR, USE_ARROW_TYPES, prepare_catalog
 from utils import (
     configure_exception_hook,
@@ -56,6 +58,8 @@ from utils import (
 )
 
 __all__ = ["main"]
+
+_resource_usage_monitor: ResourceUsageMonitor | None = None
 
 
 # -----------------------
@@ -309,59 +313,62 @@ def _cleanup_previous_step(
 
 
 # -----------------------
-# Worker task for auto self-crossmatch
+# Driver task for auto self-crossmatch
 # -----------------------
 
 
-def _auto_cross_worker(info: dict, logs_dir: str, translation_config: dict):
-    """Run self-crossmatch from prepared_*_hats and write prepared_*_hats_auto."""
-    ensure_crc_logger(logs_dir)
-    hats_path = info["prepared_path"] + "_hats"
-    if not os.path.isdir(hats_path):
-        raise FileNotFoundError(f"Expected prepared collection not found: {hats_path}")
-    cat = lsdb.open_catalog(hats_path)
-    out_auto = crossmatch_auto(
-        catalog=cat,
-        collection_path=hats_path,  # base; writes "<base>_auto"
-        logs_dir=logs_dir,
-        translation_config=translation_config,
-    )
-    return out_auto
+def _run_auto_cross(
+    info: dict, logs_dir: str, client: Client, translation_config: dict
+):
+    """Run one self-crossmatch from the driver.
+
+    LSDB submits its internal Dask graph to the active distributed client. This
+    function must not itself be submitted as a Dask task, otherwise its
+    ``compute`` and ``write_catalog`` calls create nested scheduler submissions
+    from a worker.
+    """
+    with client.as_current():
+        hats_path = info["prepared_path"] + "_hats"
+        if not os.path.isdir(hats_path):
+            raise FileNotFoundError(
+                f"Expected prepared collection not found: {hats_path}"
+            )
+        cat = lsdb.open_catalog(hats_path)
+        return crossmatch_auto(
+            catalog=cat,
+            collection_path=hats_path,  # base; writes "<base>_auto"
+            logs_dir=logs_dir,
+            translation_config=translation_config,
+        )
 
 
 # -----------------------
-# Parallel crossmatch worker
+# Driver task for one crossmatch pair
 # -----------------------
-def _xmatch_worker(
+def _run_crossmatch_pair(
     left_collection_path: str,
     right_collection_path: str,
     logs_dir: str,
     temp_dir: str,
     step: int,
+    client: Client,
     translation_config: dict,
 ) -> str:
-    """
-    Open two HATS collections and run crossmatch_tiebreak_safe.
-    Returns a collection path (root or subcatalog).
-    """
-    try:
-        ensure_crc_logger(logs_dir)
-    except Exception:
-        pass
+    """Open two collections and submit their LSDB graph from the driver."""
+    with client.as_current():
+        left_cat = lsdb.open_catalog(left_collection_path)
+        right_cat = lsdb.open_catalog(right_collection_path)
 
-    left_cat = lsdb.open_catalog(left_collection_path)
-    right_cat = lsdb.open_catalog(right_collection_path)
-
-    return crossmatch_tiebreak_safe(
-        left_cat=left_cat,
-        right_cat=right_cat,
-        logs_dir=logs_dir,
-        temp_dir=temp_dir,
-        step=step,
-        client=None,  # not needed on LSDB path
-        translation_config=translation_config,
-        do_import=True,
-    )
+        return crossmatch_tiebreak_safe(
+            left_cat=left_cat,
+            right_cat=right_cat,
+            logs_dir=logs_dir,
+            temp_dir=temp_dir,
+            step=step,
+            client=client,
+            translation_config=translation_config,
+            do_import=True,
+        )
 
 
 # -----------------------
@@ -469,11 +476,18 @@ def main(
     config_path: str, cwd: str = ".", base_dir_override: str | None = None
 ) -> None:
     """Run the CRC pipeline end-to-end."""
+    global _resource_usage_monitor
+
     delete_temp_files = True  # set True to aggressively clean intermediates
 
     # --- Load config ---
     config = load_yml(config_path)
     param_config = config.get("param", {})
+    configured_extra_columns = set(
+        (param_config.get("extra_columns") or {}).keys()
+        if isinstance(param_config.get("extra_columns"), dict)
+        else []
+    )
     if base_dir_override is None:
         raise ValueError("You must specify --base_dir via the command line.")
     base_dir = base_dir_override
@@ -649,6 +663,8 @@ def main(
     # --- Dask cluster/client ---
     cluster = get_executor(config["executor"], logs_dir=logs_dir)
     client = Client(cluster)
+    _resource_usage_monitor = ResourceUsageMonitor(client)
+    _resource_usage_monitor.start()
 
     # Ensure the minimum number of workers start within 10 seconds
     exec_args = config.get("executor", {}).get("args", {}) or {}
@@ -911,7 +927,9 @@ def main(
                         else:
                             queue_auto.append(info)
 
-                    max_inflight_auto = int(param_config.get("auto_cross_max_inflight", 5))
+                    max_inflight_auto = int(param_config.get("auto_cross_max_inflight", 2))
+                    if max_inflight_auto < 1:
+                        raise ValueError("auto_cross_max_inflight must be at least 1")
                     log_auto.info(
                         "Concurrency for auto-cross: max_inflight=%d, to_run=%d, already_done=%d",
                         max_inflight_auto,
@@ -920,77 +938,68 @@ def main(
                     )
 
                     if queue_auto:
-                        ac2 = as_completed()
-                        inflight2 = []
-                        fut2info: dict[Any, dict] = {}
+                        auto_done_now = 0
 
-                        def _submit_auto(i: dict):
-                            """Submit a self-crossmatch job for a single prepared catalog."""
+                        def _submit_auto(executor: ThreadPoolExecutor, i: dict):
+                            """Start one driver-side LSDB submission."""
                             log_auto.info(
                                 "Submitting AUTO-CROSS for %s | prepared_path=%s",
                                 i.get("internal_name"),
                                 i.get("prepared_path"),
                             )
-                            return client.submit(
-                                _auto_cross_worker,
+                            return executor.submit(
+                                _run_auto_cross,
                                 i,
                                 logs_dir,
+                                client,
                                 translation_config,
-                                pure=False,
                             )
 
-                        # Prime the inflight queue
-                        for _ in range(min(max_inflight_auto, len(queue_auto))):
-                            info = queue_auto.pop(0)
-                            fut = _submit_auto(info)
-                            ac2.add(fut)
-                            inflight2.append(fut)
-                            fut2info[fut] = info
+                        with ThreadPoolExecutor(
+                            max_workers=max_inflight_auto,
+                            thread_name_prefix="crc-auto",
+                        ) as auto_executor:
+                            inflight2: dict[Any, dict] = {}
 
-                        auto_done_now = 0
-                        while inflight2:
-                            fut = next(ac2)
-                            inflight2.remove(fut)
+                            for _ in range(min(max_inflight_auto, len(queue_auto))):
+                                info = queue_auto.pop(0)
+                                inflight2[_submit_auto(auto_executor, info)] = info
 
-                            # Retrieve context for this future (for logging on both success and failure)
-                            info_ctx = fut2info.get(fut, {})
-                            name = info_ctx.get("internal_name", "<unknown>")
-                            prepared_path = info_ctx.get("prepared_path", "<unknown>")
-
-                            try:
-                                out_path = fut.result()
-                            except Exception:
-                                # Log remote worker traceback with context and re-raise
-                                _log_remote_future_exception(
-                                    log_auto,
-                                    fut,
-                                    msg_prefix=(
-                                        f"AUTO-CROSS FAILED for {name} | prepared_path={prepared_path}"
-                                    ),
-                                    extra={"phase": "automatch"},
+                            while inflight2:
+                                done, _ = wait(
+                                    inflight2, return_when=FIRST_COMPLETED
                                 )
-                                raise
+                                for fut in done:
+                                    info_ctx = inflight2.pop(fut)
+                                    name = info_ctx.get("internal_name", "<unknown>")
+                                    prepared_path = info_ctx.get(
+                                        "prepared_path", "<unknown>"
+                                    )
+                                    try:
+                                        out_path = fut.result()
+                                    except Exception:
+                                        log_auto.exception(
+                                            "AUTO-CROSS FAILED for %s | prepared_path=%s",
+                                            name,
+                                            prepared_path,
+                                        )
+                                        raise
 
-                            info_ok = fut2info.pop(fut, info_ctx)
-                            info_ok["collection_path"] = out_path
+                                    info_ctx["collection_path"] = out_path
+                                    log_auto.info(
+                                        "AUTO-CROSS OK: %s | prepared_path=%s | output=%s",
+                                        name,
+                                        prepared_path,
+                                        out_path,
+                                    )
+                                    log_step(resume_log, f"autocross_{name}")
+                                    auto_done_now += 1
 
-                            log_auto.info(
-                                "AUTO-CROSS OK: %s | prepared_path=%s | output=%s",
-                                info_ok.get("internal_name"),
-                                info_ok.get("prepared_path"),
-                                out_path,
-                            )
-
-                            log_step(resume_log, f"autocross_{info_ok['internal_name']}")
-                            auto_done_now += 1
-
-                            # Keep pipeline saturated
-                            if queue_auto:
-                                nxt = queue_auto.pop(0)
-                                fut2 = _submit_auto(nxt)
-                                ac2.add(fut2)
-                                inflight2.append(fut2)
-                                fut2info[fut2] = nxt
+                                    if queue_auto:
+                                        nxt = queue_auto.pop(0)
+                                        inflight2[
+                                            _submit_auto(auto_executor, nxt)
+                                        ] = nxt
 
                         log_auto.info(
                             "Auto crossmatch completed for %d catalogs (re/computed)",
@@ -1129,7 +1138,9 @@ def main(
                                 f"Missing *_hats_auto for: {info['internal_name']}"
                             )
 
-                    max_inflight_pairs = int(param_config.get("cross_max_inflight", 5))
+                    max_inflight_pairs = int(param_config.get("cross_max_inflight", 2))
+                    if max_inflight_pairs < 1:
+                        raise ValueError("cross_max_inflight must be at least 1")
                     log_cross.info(
                         "Max inflight crossmatch pairs: %d", max_inflight_pairs
                     )
@@ -1162,20 +1173,15 @@ def main(
                         )
                         start_consolidate = False
                     else:
-                        # Futures pipeline
+                        # Driver-side futures pipeline. Each thread submits the
+                        # LSDB graph directly to the distributed scheduler.
                         ready = deque(nodes)
                         carry: tuple[str, str] | None = None
 
-                        # Use future.key (string) to avoid identity KeyError
-                        inflight_meta: dict[str, tuple] = (
-                            {}
-                        )  # fut.key -> (l_lab, l_path, r_lab, r_path, step_id)
+                        inflight_meta: dict[Any, tuple] = {}
                         step_id = 1  # diagnostic numbering only
 
-                        # as_completed instance where we add futures as we submit them
-                        ac3 = as_completed()
-
-                        def _submit_pair() -> bool:
+                        def _submit_pair(executor: ThreadPoolExecutor) -> bool:
                             nonlocal step_id
                             if len(ready) < 2:
                                 return False
@@ -1183,24 +1189,23 @@ def main(
                                 return False
                             l_lab, l_path = ready.popleft()
                             r_lab, r_path = ready.popleft()
-                            fut = client.submit(
-                                _xmatch_worker,
+                            fut = executor.submit(
+                                _run_crossmatch_pair,
                                 l_path,
                                 r_path,
                                 logs_dir,
                                 temp_dir,
                                 step_id,
+                                client,
                                 translation_config,
-                                pure=False,
                             )
-                            inflight_meta[fut.key] = (
+                            inflight_meta[fut] = (
                                 l_lab,
                                 l_path,
                                 r_lab,
                                 r_path,
                                 step_id,
                             )
-                            ac3.add(fut)  # add immediately to as_completed
                             log_cross.info(
                                 "Submitted crossmatch pair: step=%d | %s VS %s",
                                 step_id,
@@ -1210,82 +1215,78 @@ def main(
                             step_id += 1
                             return True
 
-                        # Prime the pump
-                        while _submit_pair():
-                            pass
-
                         final_collection_path: str | None = None
+                        with ThreadPoolExecutor(
+                            max_workers=max_inflight_pairs,
+                            thread_name_prefix="crc-cross",
+                        ) as cross_executor:
+                            while _submit_pair(cross_executor):
+                                pass
 
-                        while inflight_meta or (len(ready) + (1 if carry else 0) > 1):
-                            # Process the next completed pair if any
-                            if inflight_meta:
-                                fut = next(ac3)
-                                meta = inflight_meta.pop(fut.key, None)
-                                if meta is None:
-                                    # Received a completion for an unknown/detached future; log and continue.
-                                    _log_remote_future_exception(
-                                        log_cross,
-                                        fut,
-                                        "Received completion for an unknown Future",
-                                    )
-                                    continue
-
-                                l_lab, l_path, r_lab, r_path, sid = meta
-                                try:
-                                    raw_out = fut.result()
-                                except Exception:
-                                    _log_remote_future_exception(
-                                        log_cross,
-                                        fut,
-                                        f"Crossmatch failed (step {sid}: {l_lab} vs {r_lab})",
-                                    )
-                                    raise
-
-                                out_root = (
-                                    _normalize_collection_root(raw_out) or raw_out
-                                )
-                                if not _is_hats_collection(out_root):
-                                    log_cross.warning(
-                                        "crossmatch returned a non-HATS path (step %d): %s",
-                                        sid,
-                                        raw_out,
-                                    )
-
-                                # Delicate cleanup - delete only the two inputs consumed by this merge
-                                if delete_temp_files:
-                                    try:
-                                        _cleanup_inputs_of_merge(
-                                            l_path, r_path, log_cross
-                                        )
-                                    except Exception as e:
-                                        log_cross.warning(
-                                            "Cleanup of inputs for step %d failed (non-fatal): %s",
-                                            sid,
-                                            e,
-                                        )
-
-                                # Winner goes back into the queue
-                                ready.append((f"merged_step{sid}", out_root))
-                                final_collection_path = out_root  # keep last seen
-
-                                # Keep the pipeline saturated
-                                while _submit_pair():
-                                    pass
-
-                            # If we have a carry and something ready, try to form a new pair
-                            if carry and ready:
-                                ready.appendleft(carry)
-                                carry = None
-                                while _submit_pair():
-                                    pass
-
-                            # If odd and nothing inflight, stash one as carry
-                            if (
-                                not inflight_meta
-                                and len(ready) > 1
-                                and (len(ready) % 2 == 1)
+                            while inflight_meta or (
+                                len(ready) + (1 if carry else 0) > 1
                             ):
-                                carry = ready.pop()
+                                if inflight_meta:
+                                    done, _ = wait(
+                                        inflight_meta, return_when=FIRST_COMPLETED
+                                    )
+                                    for fut in done:
+                                        meta = inflight_meta.pop(fut)
+                                        l_lab, l_path, r_lab, r_path, sid = meta
+                                        try:
+                                            raw_out = fut.result()
+                                        except Exception:
+                                            log_cross.exception(
+                                                "Crossmatch failed (step %d: %s vs %s)",
+                                                sid,
+                                                l_lab,
+                                                r_lab,
+                                            )
+                                            raise
+
+                                        out_root = (
+                                            _normalize_collection_root(raw_out)
+                                            or raw_out
+                                        )
+                                        if not _is_hats_collection(out_root):
+                                            log_cross.warning(
+                                                "crossmatch returned a non-HATS path (step %d): %s",
+                                                sid,
+                                                raw_out,
+                                            )
+
+                                        if delete_temp_files:
+                                            try:
+                                                _cleanup_inputs_of_merge(
+                                                    l_path, r_path, log_cross
+                                                )
+                                            except Exception as e:
+                                                log_cross.warning(
+                                                    "Cleanup of inputs for step %d failed (non-fatal): %s",
+                                                    sid,
+                                                    e,
+                                                )
+
+                                        ready.append(
+                                            (f"merged_step{sid}", out_root)
+                                        )
+                                        final_collection_path = out_root
+
+                                    while _submit_pair(cross_executor):
+                                        pass
+
+                                if carry and ready:
+                                    ready.appendleft(carry)
+                                    carry = None
+                                    while _submit_pair(cross_executor):
+                                        pass
+
+                                if (
+                                    not inflight_meta
+                                    and len(ready) > 1
+                                    and (len(ready) % 2 == 1)
+                                ):
+                                    carry = ready.pop()
 
                         # Finalization
                         if final_collection_path is None:
@@ -1947,6 +1948,8 @@ def main(
         try:
             to_drop = []
             for col in df_final.columns:
+                if col in configured_extra_columns:
+                    continue
                 dt = df_final[col].dtype
                 try:
                     if str(dt) == "string[pyarrow]" or str(dt) == "object":
@@ -2061,6 +2064,9 @@ def main(
 
         log_cons.error("FAILED to update process_info: %s\n%s", e, _tb.format_exc())
         raise
+
+    # Record resource peaks before process_info is copied to the published output.
+    _resource_usage_monitor.report(_phase_logger(base_logger, "resources"))
 
     # -----------------------
     # Publish step
@@ -2228,10 +2234,12 @@ if __name__ == "__main__":
     finally:
         dur = time.time() - start_ts
         lg = logging.getLogger("crc")
+        if _resource_usage_monitor is not None:
+            _resource_usage_monitor.report(
+                logging.LoggerAdapter(lg, {"phase": "resources"})
+            )
         msg = f"Pipeline {'completed successfully' if ok else 'terminated with errors'} in {dur:.2f} seconds. (run dir: {base_dir})"
         if lg.handlers:
             logging.LoggerAdapter(lg, {"phase": "consolidation"}).info(msg)
         else:
             print(("OK " if ok else "FAIL ") + msg)
-        if not ok:
-            sys.exit(1)

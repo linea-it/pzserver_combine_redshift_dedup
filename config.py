@@ -2,7 +2,7 @@ import os
 from pathlib import Path
 from typing import Any
 
-from pydantic import BaseModel, model_validator
+from pydantic import BaseModel, Field, model_validator
 
 MAINDIR = Path(__file__).parent
 DATASETS_DIR = os.getenv("DATASETS_DIR", "/datasets")
@@ -20,8 +20,8 @@ class Slurm(BaseModel):
         job_extra_directives: list[str] = ["--propagate", "--time=04:00:00"]
 
     class Scale(BaseModel):
-        minimum_jobs: int = 16
-        maximum_jobs: int = 20
+        minimum_jobs: int = 8
+        maximum_jobs: int = 16
 
     instance: Instance = Instance()
     scale: Scale = Scale()
@@ -80,6 +80,7 @@ class Inputs(BaseModel):
 
 class Param(BaseModel):
     combine_type: str = "concatenate"
+    extra_columns: dict[str, Any] = Field(default_factory=dict)
     # Valid cuts are 1, 2, 3, 4, 5, 6. Invalid values skip the cut with a warning.
     z_flag_homogenized_value_to_cut: float = 3.0
     flags_translation_file: str = str(Path(MAINDIR, "flags_translation.yaml"))

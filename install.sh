@@ -6,8 +6,19 @@ PIPELINE_DIR=$(dirname "$SCRIPT_PATH")
 
 ENV_NAME="pipe_crd"
 ENV_FILE="$PIPELINE_DIR/environment.yaml"
-MICROMAMBA_BIN="${MICROMAMBA_BIN:-micromamba}"
+MICROMAMBA_BIN="${MICROMAMBA_BIN:-${MAMBA_EXE:-micromamba}}"
 MAMBA_ROOT_PREFIX="${MAMBA_ROOT_PREFIX:-$HOME/.micromamba}"
+
+resolve_micromamba() {
+  local resolved
+
+  if resolved="$(command -v "$MICROMAMBA_BIN" 2>/dev/null)" && [ -n "$resolved" ]; then
+    printf '%s\n' "$resolved"
+    return 0
+  fi
+
+  return 1
+}
 
 log() {
   local ts
@@ -15,8 +26,9 @@ log() {
   echo "[$ts] $*"
 }
 
-if ! command -v "$MICROMAMBA_BIN" >/dev/null 2>&1; then
-  echo "❌ micromamba not found in PATH"
+if ! MICROMAMBA_BIN="$(resolve_micromamba)"; then
+  echo "❌ micromamba not found"
+  echo "   Add micromamba to PATH or set MICROMAMBA_BIN=/path/to/micromamba."
   exit 1
 fi
 

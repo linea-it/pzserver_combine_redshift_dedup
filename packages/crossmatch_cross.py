@@ -12,7 +12,7 @@ Backends:
       Returns the collection path.
     - If USE_LSDB_CONCAT = False: run the crossmatch, update `compared_to`,
       concatenate the underlying Dask DataFrames, normalize dtypes on the
-      merged Dask DataFrame (expected, prev, expr), write a Parquet dataset,
+      merged Dask DataFrame (expected and expr), write a Parquet dataset,
       and import it as an LSDB collection (margin-first retry).
       Returns the collection path.
 
@@ -324,23 +324,7 @@ def _cast_partition_expected(
             # Be lenient: if cast fails, leave column as-is.
             pass
 
-    # 2) Prev-like columns
-    prev_like_str = [c for c in df.columns if str(c).startswith("CRD_ID_prev")]
-    prev_like_str += [c for c in df.columns if str(c).startswith("compared_to_prev")]
-    for c in prev_like_str:
-        try:
-            df[c] = _normalize_string_series_to_na(df[c])
-        except Exception:
-            pass
-
-    prev_like_int = [c for c in df.columns if str(c).startswith("group_id_prev")]
-    for c in prev_like_int:
-        try:
-            df[c] = pd.to_numeric(df[c], errors="coerce").astype(DTYPE_INT)
-        except Exception:
-            pass
-
-    # 3) Optional expr columns guided by hints (if provided)
+    # 2) Optional expr columns guided by hints (if provided)
     hints = dict(schema_hints or {})
     for col, kind in hints.items():
         k = str(kind).lower()
@@ -410,7 +394,7 @@ def _coerce_optional_columns_for_import(
     df: dd.DataFrame,
     schema_hints: dict | None = None,
 ) -> dd.DataFrame:
-    """Coerce prev/expr columns to consistent Arrow dtypes across partitions.
+    """Coerce expression columns to consistent Arrow dtypes across partitions.
 
     Args:
         df: Dask DataFrame to normalize.
@@ -419,24 +403,7 @@ def _coerce_optional_columns_for_import(
     Returns:
         dd.DataFrame: Updated Dask DataFrame.
     """
-    # 1) Prev columns -> normalize
-    prev_like_str = [c for c in df.columns if str(c).startswith("CRD_ID_prev")]
-    prev_like_str += [c for c in df.columns if str(c).startswith("compared_to_prev")]
-    for c in prev_like_str:
-        df[c] = df[c].map_partitions(
-            _normalize_string_series_to_na,
-            meta=pd.Series(pd.array([], dtype=DTYPE_STR)),
-        )
-
-    prev_like_int = [c for c in df.columns if str(c).startswith("group_id_prev")]
-    for c in prev_like_int:
-        coerced = dd.to_numeric(df[c], errors="coerce")
-        df[c] = coerced.map_partitions(
-            lambda s: s.astype(DTYPE_INT),
-            meta=pd.Series(pd.array([], dtype=DTYPE_INT)),
-        )
-
-    # 2) Expr columns guided by hints
+    # Expression columns guided by hints
     hints = dict(schema_hints or {})
     if not hints:
         return df
