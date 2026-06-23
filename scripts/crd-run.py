@@ -90,6 +90,81 @@ def _log_remote_future_exception(
         )
 
 
+def _release_dask_futures(
+    futures: list[Any],
+    lg: logging.LoggerAdapter,
+    *,
+    client: Client | None = None,
+    cancel: bool = False,
+    context: str,
+) -> None:
+    """Drop scheduler references to submitted futures.
+
+    Dask may recompute a completed Future if the worker holding its result dies
+    and the client still references it. Preparation writes files as a side
+    effect, so those futures must not remain live after their result is copied.
+    """
+    unique_futures = list(dict.fromkeys(futures))
+    if not unique_futures:
+        return
+
+    if cancel and client is not None:
+        try:
+            client.cancel(unique_futures, force=True)
+        except Exception as e:
+            lg.debug("Could not cancel %s futures: %s", context, e)
+
+    released = 0
+    for fut in unique_futures:
+        try:
+            fut.release()
+            released += 1
+        except Exception as e:
+            lg.debug("Could not release %s future %r: %s", context, fut, e)
+
+    lg.info("Released %d Dask future(s) for %s.", released, context)
+
+
+def _cancel_local_futures(
+    futures: list[Any], lg: logging.LoggerAdapter, *, context: str
+) -> None:
+    """Best-effort cancellation of local ThreadPoolExecutor futures."""
+    pending = [fut for fut in futures if not fut.done()]
+    if not pending:
+        return
+
+    cancelled = 0
+    for fut in pending:
+        try:
+            if fut.cancel():
+                cancelled += 1
+        except Exception as e:
+            lg.debug("Could not cancel %s future %r: %s", context, fut, e)
+
+    lg.warning(
+        "%s failed; requested cancellation for %d local future(s), "
+        "%d accepted cancellation. Running futures will finish before shutdown.",
+        context,
+        len(pending),
+        cancelled,
+    )
+
+
+def _remove_artifact_if_exists(path: str, lg: logging.LoggerAdapter, *, label: str) -> None:
+    """Remove a possibly partial file or directory left by a failed phase."""
+    if not path:
+        return
+    try:
+        if os.path.isdir(path):
+            shutil.rmtree(path, ignore_errors=True)
+            lg.warning("Removed partial %s directory: %s", label, path)
+        elif os.path.isfile(path):
+            os.remove(path)
+            lg.warning("Removed partial %s file: %s", label, path)
+    except Exception as e:
+        lg.warning("Could not remove partial %s at %s: %s", label, path, e)
+
+
 def _phase_logger(base_logger: logging.Logger, phase: str) -> logging.LoggerAdapter:
     """Return a LoggerAdapter that injects the phase into records."""
     return logging.LoggerAdapter(base_logger, {"phase": phase})
@@ -744,8 +819,10 @@ def main(
             )
             return (hats, "ra", "dec", entry["internal_name"], "")
 
+        prepare_futures: list[Any] = []
+
         def _submit_prepare(entry: dict):
-            return client.submit(
+            fut = client.submit(
                 prepare_catalog,
                 entry,
                 translation_config,
@@ -755,6 +832,8 @@ def main(
                 combine_mode,
                 pure=False,
             )
+            prepare_futures.append(fut)
+            return fut
 
         queue: list[dict] = []
         results: list[tuple[str, str, str, str, str]] = []
@@ -775,29 +854,53 @@ def main(
 
         ac = as_completed()
         inflight = []
-        for _ in range(min(max_inflight, len(queue))):
-            fut = _submit_prepare(queue.pop(0))
-            ac.add(fut)
-            inflight.append(fut)
-
         prepared_count = 0
-        while inflight:
-            fut = next(ac)
-            inflight.remove(fut)
-            try:
-                out = fut.result()
-            except Exception:
-                # Logs remote worker traceback and repropagates
-                _log_remote_future_exception(
-                    log_prep, fut, msg_prefix="PREPARE FAILED (remote worker traceback)"
+        try:
+            for _ in range(min(max_inflight, len(queue))):
+                fut = _submit_prepare(queue.pop(0))
+                ac.add(fut)
+                inflight.append(fut)
+
+            while inflight:
+                fut = next(ac)
+                inflight.remove(fut)
+                try:
+                    out = fut.result()
+                except Exception:
+                    # Logs remote worker traceback and repropagates
+                    _log_remote_future_exception(
+                        log_prep,
+                        fut,
+                        msg_prefix="PREPARE FAILED (remote worker traceback)",
+                    )
+                    raise
+                results.append(out)
+                _release_dask_futures(
+                    [fut],
+                    log_prep,
+                    context=f"completed preparation {out[3]}",
                 )
-                raise
-            results.append(out)
-            prepared_count += 1
-            if queue:
-                fut2 = _submit_prepare(queue.pop(0))
-                ac.add(fut2)
-                inflight.append(fut2)
+                prepared_count += 1
+                if queue:
+                    fut2 = _submit_prepare(queue.pop(0))
+                    ac.add(fut2)
+                    inflight.append(fut2)
+        except Exception:
+            _release_dask_futures(
+                inflight,
+                log_prep,
+                client=client,
+                cancel=True,
+                context="in-flight preparation after failure",
+            )
+            _release_dask_futures(
+                prepare_futures,
+                log_prep,
+                context="submitted preparation after failure",
+            )
+            raise
+        finally:
+            prepare_futures.clear()
 
         log_prep.info(
             "Prepared %d new catalogs; total results now %d / %d",
@@ -978,10 +1081,26 @@ def main(
                                     try:
                                         out_path = fut.result()
                                     except Exception:
+                                        active = [
+                                            ctx.get("internal_name", "<unknown>")
+                                            for ctx in inflight2.values()
+                                        ]
                                         log_auto.exception(
-                                            "AUTO-CROSS FAILED for %s | prepared_path=%s",
+                                            "AUTO-CROSS FAILED for %s | prepared_path=%s | "
+                                            "other_inflight=%s",
                                             name,
                                             prepared_path,
+                                            active,
+                                        )
+                                        _cancel_local_futures(
+                                            list(inflight2.keys()),
+                                            log_auto,
+                                            context="auto-cross",
+                                        )
+                                        _remove_artifact_if_exists(
+                                            f"{prepared_path}_hats_auto",
+                                            log_auto,
+                                            label=f"auto-cross output for {name}",
                                         )
                                         raise
 
@@ -1236,11 +1355,41 @@ def main(
                                         try:
                                             raw_out = fut.result()
                                         except Exception:
+                                            active = [
+                                                {
+                                                    "step": m[4],
+                                                    "left": m[0],
+                                                    "right": m[2],
+                                                }
+                                                for m in inflight_meta.values()
+                                            ]
                                             log_cross.exception(
-                                                "Crossmatch failed (step %d: %s vs %s)",
+                                                "Crossmatch failed (step %d: %s vs %s) | "
+                                                "other_inflight=%s",
                                                 sid,
                                                 l_lab,
                                                 r_lab,
+                                                active,
+                                            )
+                                            _cancel_local_futures(
+                                                list(inflight_meta.keys()),
+                                                log_cross,
+                                                context="crossmatch tournament",
+                                            )
+                                            for suffix in ("", "_hats", ".hats"):
+                                                _remove_artifact_if_exists(
+                                                    os.path.join(
+                                                        temp_dir,
+                                                        f"merged_step{sid}{suffix}",
+                                                    ),
+                                                    log_cross,
+                                                    label=f"crossmatch step {sid} output",
+                                                )
+                                            _resume_set(
+                                                resume_log,
+                                                "phase.crossmatch",
+                                                "failed",
+                                                log_cross,
                                             )
                                             raise
 
