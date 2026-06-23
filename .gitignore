@@ -146,3 +146,11 @@ process*
 
 #env_hash
 .env_hash
+
+# other
+config-new.yaml
+config.all.yaml
+config.test.elais.yaml
+flags_translation_reports/
+test_data/make_collection
+.codex
