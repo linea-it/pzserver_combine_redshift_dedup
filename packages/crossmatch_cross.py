@@ -52,6 +52,7 @@ from crossmatch_diagnostics import (
     log_component_size_diagnostics,
     log_neighbor_count_diagnostics,
     log_pair_separation_diagnostics,
+    project_catalog_for_pair_crossmatch,
 )
 from specz import (
     _build_collection_with_retry,
@@ -833,8 +834,16 @@ def crossmatch_tiebreak(
 
     # 1) Spatial crossmatch
     t0 = time.time()
-    xmatched = left_cat.crossmatch(
+    pair_left = project_catalog_for_pair_crossmatch(
+        left_cat,
+        include_source=saturation_enabled,
+    )
+    pair_right = project_catalog_for_pair_crossmatch(
         right_cat,
+        include_source=False,
+    )
+    xmatched = pair_left.crossmatch(
+        pair_right,
         radius_arcsec=radius,
         n_neighbors=k,
         suffixes=("left", "right"),
