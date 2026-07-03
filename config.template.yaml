@@ -23,8 +23,9 @@ executor:
 #        - "--propagate"
 #        - "--time=2:00:00"
 #    scale:
-#      minimum_jobs: 7
+#      minimum_jobs: 15
 #      maximum_jobs: 15
+#      adaptive: false
 
 inputs:
   specz:

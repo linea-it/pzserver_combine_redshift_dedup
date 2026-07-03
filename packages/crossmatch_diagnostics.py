@@ -9,6 +9,36 @@ import numpy as np
 import pandas as pd
 
 
+def _project_pairs_partition(part, columns: list[str]) -> pd.DataFrame:
+    """Return only pair columns as a plain pandas frame.
+
+    LSDB partitions are ``NestedFrame`` instances.  Returning one of those from
+    a distributed ``compute`` can make Distributed pickle every crossmatch
+    column, even after a lazy column selection.  Materializing the projection
+    inside the worker keeps the transfer narrow and avoids NestedFrame
+    serialization.
+    """
+    projected = part.loc[:, columns]
+    return pd.DataFrame(
+        {column: projected[column] for column in columns},
+        index=projected.index,
+    )
+
+
+def compute_projected_pairs(ddf, columns: list[str]) -> pd.DataFrame:
+    """Compute a worker-side pair projection and return a plain pandas frame."""
+    meta = _project_pairs_partition(ddf._meta, columns).iloc[:0]
+    projected = ddf.map_partitions(
+        _project_pairs_partition,
+        columns,
+        meta=meta,
+    )
+    result = projected.compute()
+    if type(result) is not pd.DataFrame:
+        result = pd.DataFrame(result)
+    return result
+
+
 def log_pair_separation_diagnostics(
     pairs: pd.DataFrame,
     *,

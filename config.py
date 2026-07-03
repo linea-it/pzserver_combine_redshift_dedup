@@ -10,7 +10,6 @@ DASK_EXECUTOR = os.getenv("DASK_EXECUTOR", "local")
 
 
 class Slurm(BaseModel):
-
     class Instance(BaseModel):
         cores: int = 2
         processes: int = 1
@@ -20,8 +19,9 @@ class Slurm(BaseModel):
         job_extra_directives: list[str] = ["--propagate", "--time=04:00:00"]
 
     class Scale(BaseModel):
-        minimum_jobs: int = 7
+        minimum_jobs: int = 15
         maximum_jobs: int = 15
+        adaptive: bool = False
 
     instance: Instance = Instance()
     scale: Scale = Scale()
@@ -34,7 +34,6 @@ class Local(BaseModel):
 
 
 class Executor(BaseModel):
-
     name: str = DASK_EXECUTOR
     args: Any = {}
 
@@ -58,9 +57,7 @@ class Executor(BaseModel):
 
 
 class Inputs(BaseModel):
-
     class Specz(BaseModel):
-
         class Columns(BaseModel):
             id: str | None = None
             ra: str = "ra"

@@ -2,10 +2,12 @@ import sys
 from pathlib import Path
 
 import pandas as pd
+import dask.dataframe as dd
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "packages"))
 
 from crossmatch_diagnostics import (  # noqa: E402
+    compute_projected_pairs,
     log_component_size_diagnostics,
     log_neighbor_count_diagnostics,
     log_pair_separation_diagnostics,
@@ -18,6 +20,29 @@ class RecordingLogger:
 
     def info(self, *args):
         self.info_calls.append(args)
+
+
+def test_compute_projected_pairs_transfers_only_requested_plain_columns():
+    source = dd.from_pandas(
+        pd.DataFrame(
+            {
+                "CRD_IDleft": ["A", "B"],
+                "CRD_IDright": ["C", "D"],
+                "sourceleft": ["one", "two"],
+                "large_unused_column": ["x" * 100, "y" * 100],
+            }
+        ),
+        npartitions=2,
+    )
+
+    result = compute_projected_pairs(
+        source,
+        ["CRD_IDleft", "CRD_IDright", "sourceleft"],
+    )
+
+    assert type(result) is pd.DataFrame
+    assert result.columns.tolist() == ["CRD_IDleft", "CRD_IDright", "sourceleft"]
+    assert result["CRD_IDleft"].tolist() == ["A", "B"]
 
 
 def test_pair_diagnostics_exclude_self_matches_and_log_radius_fractions():

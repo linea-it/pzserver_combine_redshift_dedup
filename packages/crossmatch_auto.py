@@ -32,6 +32,7 @@ import pandas as pd
 # -----------------------
 from specz import DTYPE_STR  # Arrow-backed string dtype
 from crossmatch_diagnostics import (
+    compute_projected_pairs,
     log_component_size_diagnostics,
     log_neighbor_count_diagnostics,
     log_pair_separation_diagnostics,
@@ -288,7 +289,7 @@ def _self_xmatch_pairs(
         pair_cols.append("_dist_arcsec")
     if total_by_source is not None and "sourceleft" in xmatched.columns:
         pair_cols.append("sourceleft")
-    pairs_df = xmatched[pair_cols].compute()
+    pairs_df = compute_projected_pairs(xmatched._ddf, pair_cols)
     if len(pairs_df) == 0:
         logger.info("Self-crossmatch: no pairs found; `compared_to` remains unchanged.")
         return {}
