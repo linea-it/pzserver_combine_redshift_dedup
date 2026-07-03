@@ -92,6 +92,74 @@ def _adjacency_from_pairs(
     return adj
 
 
+def _log_neighbor_saturation(
+    pairs: pd.DataFrame,
+    *,
+    limit: int,
+    logger: logging.LoggerAdapter,
+    total_by_source: dict | None,
+    warn_fraction: float,
+    fail_fraction: float | None,
+) -> None:
+    """Apply logging/failure policy to self-crossmatch saturation."""
+    if pairs.empty or limit <= 0:
+        return
+    group_cols = ["CRD_IDleft"]
+    if "sourceleft" in pairs:
+        group_cols.insert(0, "sourceleft")
+    counts = (
+        pairs[group_cols + ["CRD_IDright"]]
+        .drop_duplicates()
+        .groupby(group_cols, dropna=False)
+        .size()
+    )
+    if "sourceleft" in pairs:
+        for source, source_counts in counts.groupby(level=0, dropna=False):
+            total = int(total_by_source.get(str(source), source_counts.size))
+            saturated = int(source_counts.ge(limit).sum())
+            fraction = saturated / total if total else 0.0
+            log_method = logger.warning if fraction >= warn_fraction else logger.info
+            log_method(
+                "Self-crossmatch neighbor saturation: source=%s at_limit=%d total_objects=%d fraction=%.6f limit=%d",
+                source,
+                saturated,
+                total,
+                fraction,
+                limit,
+            )
+            if fail_fraction is not None and fraction >= fail_fraction:
+                raise RuntimeError(
+                    f"Self-crossmatch neighbor saturation for source={source} is "
+                    f"{fraction:.6f}, reaching failure threshold {fail_fraction:.6f}; "
+                    "increase crossmatch_n_neighbors"
+                )
+    else:
+        total = int(total_by_source.get("<all>", counts.size))
+        saturated = int(counts.ge(limit).sum())
+        fraction = saturated / total if total else 0.0
+        log_method = logger.warning if fraction >= warn_fraction else logger.info
+        log_method(
+            "Self-crossmatch neighbor saturation: at_limit=%d total_objects=%d fraction=%.6f limit=%d",
+            saturated,
+            total,
+            fraction,
+            limit,
+        )
+        if fail_fraction is not None and fraction >= fail_fraction:
+            raise RuntimeError(
+                f"Self-crossmatch neighbor saturation is {fraction:.6f}, reaching "
+                f"failure threshold {fail_fraction:.6f}; increase crossmatch_n_neighbors"
+            )
+
+
+def _catalog_source_totals(catalog) -> dict:
+    """Count all catalog objects by source for saturation denominators."""
+    if "source" in catalog._ddf.columns:
+        counts = catalog._ddf.groupby("source").size().compute()
+        return {str(source): int(count) for source, count in counts.items()}
+    return {"<all>": int(catalog._ddf.map_partitions(len).sum().compute())}
+
+
 def _merge_compared_to_partition(
     part: pd.DataFrame,
     pairs_adj: Dict[str, Iterable[str]],
@@ -165,6 +233,9 @@ def _self_xmatch_pairs(
     radius_arcsec: float,
     n_neighbors: int,
     logger: logging.LoggerAdapter,
+    total_by_source: dict,
+    warn_fraction: float,
+    fail_fraction: float | None,
 ) -> Dict[str, Set[str]]:
     """Run a self-crossmatch and return an adjacency (CRD_ID -> neighbor ids).
 
@@ -190,10 +261,21 @@ def _self_xmatch_pairs(
         suffix_method='all_columns',
     )
     pair_cols = ["CRD_IDleft", "CRD_IDright"]
+    if total_by_source is not None and "sourceleft" in xmatched.columns:
+        pair_cols.append("sourceleft")
     pairs_df = xmatched[pair_cols].compute()
     if len(pairs_df) == 0:
         logger.info("Self-crossmatch: no pairs found; `compared_to` remains unchanged.")
         return {}
+    if total_by_source is not None:
+        _log_neighbor_saturation(
+            pairs_df,
+            limit=n_neighbors,
+            logger=logger,
+            total_by_source=total_by_source,
+            warn_fraction=warn_fraction,
+            fail_fraction=fail_fraction,
+        )
     pairs_df = pairs_df.astype({"CRD_IDleft": "string", "CRD_IDright": "string"})
     pairs_df = pairs_df[
         pairs_df["CRD_IDleft"] != pairs_df["CRD_IDright"]
@@ -268,7 +350,28 @@ def crossmatch_auto(
     # Parameters with defaults
     radius = float((translation_config or {}).get("crossmatch_radius_arcsec", 0.75))
     k = int((translation_config or {}).get("crossmatch_n_neighbors", 10))
-
+    saturation_enabled = bool(
+        (translation_config or {}).get("crossmatch_saturation_enabled", False)
+    )
+    warn_fraction = 0.01
+    fail_raw = None
+    if saturation_enabled:
+        warn_fraction = float(
+            (translation_config or {}).get(
+                "crossmatch_saturation_warn_fraction", 0.01
+            )
+        )
+        fail_raw = (translation_config or {}).get(
+            "crossmatch_saturation_fail_fraction", 0.10
+        )
+    fail_fraction = None if fail_raw is None else float(fail_raw)
+    if saturation_enabled and not 0.0 <= warn_fraction <= 1.0:
+        raise ValueError("crossmatch_saturation_warn_fraction must be in [0, 1]")
+    if saturation_enabled and fail_fraction is not None and not warn_fraction <= fail_fraction <= 1.0:
+        raise ValueError(
+            "crossmatch_saturation_fail_fraction must be null or in "
+            "[crossmatch_saturation_warn_fraction, 1]"
+        )
     # Derive parent dir and artifact names
     parent_dir, artifact = os.path.split(os.path.normpath(collection_path))
     if not parent_dir:
@@ -283,6 +386,8 @@ def crossmatch_auto(
         )
         return collection_path_auto
 
+    total_by_source = _catalog_source_totals(catalog) if saturation_enabled else {}
+
     # START (per-catalog)
     t0 = time.time()
     logger.info(
@@ -295,7 +400,15 @@ def crossmatch_auto(
     )
 
     # 1) Self-crossmatch -> adjacency (CRD_ID -> neighbor ids)
-    pairs_adj = _self_xmatch_pairs(catalog, radius, k, logger)
+    pairs_adj = _self_xmatch_pairs(
+        catalog,
+        radius,
+        k,
+        logger,
+        total_by_source if saturation_enabled else None,
+        warn_fraction,
+        fail_fraction,
+    )
 
     # 2) Update `compared_to`
     updated = _update_compared_to(catalog, pairs_adj)

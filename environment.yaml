@@ -13,6 +13,7 @@ dependencies:
   - nested-pandas=0.6.9
   - numpy=2.4.3
   - pyyaml=6.0.3
+  - packaging
   - lsdb=0.9.0
   - hats=0.9.0
   - hats-import=0.9.0

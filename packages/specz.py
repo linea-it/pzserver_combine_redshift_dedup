@@ -896,7 +896,10 @@ def _as_bool_config(value: Any, default: bool) -> bool:
 # CRD_ID generation
 # -----------------------
 def _generate_crd_ids(
-    df: dd.DataFrame, product_name: str, temp_dir: str
+    df: dd.DataFrame,
+    product_name: str,
+    temp_dir: str,
+    client: "Client | None" = None,
 ) -> dd.DataFrame:
     """Assign stable, catalog-scoped CRD_IDs.
 
@@ -904,6 +907,7 @@ def _generate_crd_ids(
         df: Input frame after schema normalization.
         product_name: Internal name (expects numeric prefix before underscore).
         temp_dir: Unused, kept for signature stability.
+        client: Optional distributed client used to stabilize the input graph.
 
     Returns:
         dd.DataFrame: Frame with CRD_ID column (Arrow string dtype).
@@ -918,7 +922,14 @@ def _generate_crd_ids(
         )
     catalog_prefix = m.group(1)
 
-    sizes = df.map_partitions(len).compute().tolist()
+    # Stabilize partition contents before measuring offsets. Otherwise a second
+    # execution of a non-deterministic upstream graph can reuse an ID range for
+    # different rows.
+    df = df.persist()
+    if client is not None:
+        wait(df)
+
+    sizes = [int(size) for size in df.map_partitions(len).compute().tolist()]
     offsets = [0]
     for s in sizes[:-1]:
         offsets.append(offsets[-1] + s)
@@ -939,6 +950,31 @@ def _generate_crd_ids(
     ]
     df = dd.concat(parts)
     return df
+
+
+def _validate_unique_crd_ids(
+    df: dd.DataFrame, product_name: str, logger: logging.LoggerAdapter
+) -> None:
+    """Fail preparation when generated CRD_ID values are not unique."""
+    total_rows, unique_ids = dask.compute(
+        df.map_partitions(len).sum(),
+        df["CRD_ID"].nunique(dropna=False),
+    )
+    total_rows = int(total_rows)
+    unique_ids = int(unique_ids)
+    duplicate_rows = total_rows - unique_ids
+    if duplicate_rows:
+        raise RuntimeError(
+            f"{product_name}: generated non-unique CRD_ID values "
+            f"(rows={total_rows}, unique_ids={unique_ids}, "
+            f"duplicate_rows={duplicate_rows})"
+        )
+    logger.info(
+        "%s CRD_ID uniqueness validated: rows=%d unique_ids=%d",
+        product_name,
+        total_rows,
+        unique_ids,
+    )
 
 
 # -----------------------
@@ -1400,7 +1436,9 @@ def prepare_catalog(
     df, type_cast_ok = _normalize_types(df, product_name, lg)
 
     # 5) Assign CRD_IDs
-    df = _generate_crd_ids(df, product_name, temp_dir)
+    df = _generate_crd_ids(df, product_name, temp_dir, client=client)
+    if bool(translation_config.get("validate_crd_id_uniqueness", False)):
+        _validate_unique_crd_ids(df, product_name, lg)
 
     # 6) Homogenized fields
     (
@@ -1434,17 +1472,11 @@ def prepare_catalog(
                     z_flag_homogenized_value_to_cut,
                 )
             else:
-                initial_count, min_flag, max_flag = dask.compute(
-                    df.shape[0],
-                    df["z_flag_homogenized"].min(),
-                    df["z_flag_homogenized"].max(),
-                )
                 df = df[df["z_flag_homogenized"] >= cut_val]
-                final_count = df.shape[0].compute()
+                final_count = int(df.map_partitions(len).sum().compute())
                 lg.info(
-                    "Applied z_flag_homogenized cut >= %s: %s -> %s rows",
+                    "Applied z_flag_homogenized cut >= %s: %s rows retained",
                     cut_val,
-                    initial_count,
                     final_count,
                 )
                 if final_count == 0:
@@ -1457,10 +1489,7 @@ def prepare_catalog(
                                 "empty_after_z_flag_homogenized_cut\n"
                                 f"product={product_name}\n"
                                 f"z_flag_homogenized_value_to_cut={cut_val}\n"
-                                f"rows_before={initial_count}\n"
                                 "rows_after=0\n"
-                                f"min_flag_before={min_flag}\n"
-                                f"max_flag_before={max_flag}\n"
                             )
                     except Exception as e:
                         lg.warning(
@@ -1471,32 +1500,39 @@ def prepare_catalog(
                     lg.warning(
                         "[%s] Catalog is empty after z_flag_homogenized cut >= %s; "
                         "excluding it from subsequent HATS, crossmatch, and "
-                        "deduplication steps. Rows before filter: %s; observed "
-                        "z_flag_homogenized range before filter: %s to %s.",
+                        "deduplication steps.",
                         product_name,
                         cut_val,
-                        initial_count,
-                        min_flag,
-                        max_flag,
                     )
                     lg.info(
                         f"END prepare_catalog product={product_name} empty_after_cut"
                     )
                     return "", "ra", "dec", product_name, "empty_after_cut"
 
-    # 8) Persist + repartition
-    part_size = "256MB"
-    try:
-        if client is not None:
-            df = df.persist()
-            wait(df)
-        with dask.config.set({"dataframe.shuffle.method": "tasks"}):
-            df = df.repartition(partition_size=part_size)
-        lg.info(
-            f"Persisted and repartitioned: partition_size={part_size} npartitions={df.npartitions}"
+    # 8) Optional persist + repartition. Sizing by bytes requires another full
+    # pass, so production keeps the existing partitions unless explicitly asked.
+    if _as_bool_config(
+        translation_config.get("repartition_prepared_catalogs", False),
+        default=False,
+    ):
+        part_size = str(
+            translation_config.get("prepared_partition_size", "256MB") or "256MB"
         )
-    except Exception as e:
-        lg.warning(f"Persist/repartition skipped or failed: {e}")
+        try:
+            if client is not None:
+                df = df.persist()
+                wait(df)
+            with dask.config.set({"dataframe.shuffle.method": "tasks"}):
+                df = df.repartition(partition_size=part_size)
+            lg.info(
+                "Persisted and repartitioned: partition_size=%s npartitions=%s",
+                part_size,
+                df.npartitions,
+            )
+        except Exception as e:
+            lg.warning("Persist/repartition skipped or failed: %s", e)
+    else:
+        lg.info("Prepared-catalog repartition disabled; preserving current partitions.")
 
     # 9) Init compared_to/tie_result
     df = _add_missing_with_dtype(df, "compared_to", DTYPE_STR)
@@ -1572,6 +1608,7 @@ def prepare_catalog(
         try_margin=True,
         schema_hints=schema_hints_raw,
         size_threshold_mb=200,
+        margin_threshold=float(translation_config.get("margin_threshold_arcsec", 5.0)),
     )
 
     # ===== END PHASE (per catalog) =====

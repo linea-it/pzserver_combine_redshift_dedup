@@ -15,6 +15,7 @@ import glob
 import io
 import json
 import os
+from importlib.metadata import PackageNotFoundError, version
 import shutil
 from pathlib import Path
 
@@ -28,6 +29,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import tables_io
 from astropy.table import Table
+from packaging.version import InvalidVersion, Version
 
 __all__ = ["ProductHandle", "build_collection_with_retry", "save_dataframe"]
 
@@ -41,6 +43,46 @@ _HATS_DTYPE_STR = pd.ArrowDtype(pa.string())
 _HATS_DTYPE_FLOAT = pd.ArrowDtype(pa.float64())
 _HATS_DTYPE_INT = pd.ArrowDtype(pa.int64())
 _HATS_DTYPE_INT8 = pd.ArrowDtype(pa.int8())
+_EMPTY_MARGIN_SUPPORTED_SINCE = Version("0.7.3")
+_LEGACY_EMPTY_MARGIN_MESSAGE = (
+    "Margin cache contains no rows. Increase margin size and re-run."
+)
+
+
+def _installed_hats_import_version() -> Version | None:
+    """Return the installed hats-import version, if it can be determined."""
+    try:
+        return Version(version("hats-import"))
+    except (PackageNotFoundError, InvalidVersion):
+        return None
+
+
+def _is_legacy_empty_margin_error(error: BaseException) -> bool:
+    """Recognize only the pre-0.7.3 empty-margin failure, including wrappers."""
+    current: BaseException | None = error
+    seen: set[int] = set()
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(current, ValueError) and (
+            _LEGACY_EMPTY_MARGIN_MESSAGE in str(current)
+        ):
+            return True
+        current = current.__cause__ or current.__context__
+    return False
+
+
+def _should_retry_without_margin(
+    error: BaseException, hats_import_version: Version | None = None
+) -> bool:
+    """Allow fallback only for the exact legacy failure on legacy versions."""
+    detected_version = (
+        _installed_hats_import_version()
+        if hats_import_version is None
+        else hats_import_version
+    )
+    if detected_version is not None and detected_version >= _EMPTY_MARGIN_SUPPORTED_SINCE:
+        return False
+    return _is_legacy_empty_margin_error(error)
 
 
 # -----------------------
@@ -188,7 +230,17 @@ class ProductHandle:
 
     def _read_hats_to_ddf(self, hats_root: Path):
         """Read the object catalog parquet payload from a HATS directory."""
-        object_root = self._resolve_object_catalog_root(hats_root) or hats_root
+        object_root = self._resolve_object_catalog_root(hats_root)
+        is_collection = any(
+            child.is_file() and child.name.lower() == "collection.properties"
+            for child in hats_root.iterdir()
+        )
+        if object_root is None and is_collection:
+            raise ValueError(
+                "HATS collection does not contain a catalog with "
+                f"dataproduct_type=object: {hats_root}"
+            )
+        object_root = object_root or hats_root
         read_path = self._resolve_hats_parquet_payload_path(object_root)
 
         ddf = dd.read_parquet(read_path)
@@ -1184,7 +1236,22 @@ def _stage_hats_output_parquet(data, output_path: Path, temp_dir, logger):
         table = pa.Table.from_pandas(data.reset_index(drop=True), preserve_index=False)
         pq.write_table(table, parquet_path / "part-0.parquet")
 
+    _ensure_staged_parquet_non_empty(parquet_path)
     return parquet_path
+
+
+def _ensure_staged_parquet_non_empty(parquet_path: Path) -> None:
+    """Validate staged output from Parquet footers, after lazy execution."""
+    parquet_files = sorted(Path(parquet_path).rglob("*.parquet"))
+    if parquet_files and any(
+        pq.ParquetFile(path).metadata.num_rows > 0 for path in parquet_files
+    ):
+        return
+
+    raise RuntimeError(
+        "Final catalog is empty after HATS parquet staging. "
+        "Nothing can be consolidated."
+    )
 
 
 def build_collection_with_retry(
@@ -1320,7 +1387,15 @@ def build_collection_with_retry(
             run_collection_import(_make_args(with_margin=True), client)
             return str(collection_path)
         except Exception as error:
-            _log_warning(logger, "WITH margin failed: %s. Retrying WITHOUT margin...", error)
+            if not _should_retry_without_margin(error):
+                _clean_partial()
+                raise
+            _log_warning(
+                logger,
+                "Legacy hats-import reported a legitimately empty margin; "
+                "retrying WITHOUT margin. Original error: %s",
+                error,
+            )
             _clean_partial()
 
     try:

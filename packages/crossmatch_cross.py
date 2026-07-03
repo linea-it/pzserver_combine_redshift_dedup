@@ -42,6 +42,7 @@ from typing import Dict, Iterable, List, Set
 import numpy as np
 import pandas as pd
 import dask.dataframe as dd
+
 # -----------------------
 # Project
 # -----------------------
@@ -117,6 +118,76 @@ def _adjacency_from_pairs(
         else:
             s.add(a)
     return adj
+
+
+def _log_neighbor_saturation(
+    pairs: pd.DataFrame,
+    *,
+    id_col: str,
+    source_col: str | None,
+    limit: int,
+    logger: logging.LoggerAdapter,
+    context: str,
+    total_by_source: dict,
+    warn_fraction: float,
+    fail_fraction: float | None,
+) -> None:
+    """Apply logging/failure policy to objects reaching the neighbor cap."""
+    if pairs.empty or limit <= 0:
+        return
+    columns = [id_col, "CRD_IDright"] + (
+        [source_col] if source_col and source_col in pairs else []
+    )
+    unique_pairs = pairs[columns].drop_duplicates()
+    if source_col and source_col in unique_pairs:
+        counts = unique_pairs.groupby([source_col, id_col], dropna=False).size()
+        for source, source_counts in counts.groupby(level=0, dropna=False):
+            total = int(total_by_source.get(str(source), source_counts.size))
+            saturated = int(source_counts.ge(limit).sum())
+            fraction = saturated / total if total else 0.0
+            log_method = logger.warning if fraction >= warn_fraction else logger.info
+            log_method(
+                "%s neighbor saturation: source=%s at_limit=%d total_objects=%d fraction=%.6f limit=%d",
+                context,
+                source,
+                saturated,
+                total,
+                fraction,
+                limit,
+            )
+            if fail_fraction is not None and fraction >= fail_fraction:
+                raise RuntimeError(
+                    f"{context}: neighbor saturation for source={source} is "
+                    f"{fraction:.6f}, reaching failure threshold {fail_fraction:.6f}; "
+                    "increase crossmatch_n_neighbors"
+                )
+    else:
+        counts = unique_pairs.groupby(id_col).size()
+        total = int(total_by_source.get("<all>", counts.size))
+        saturated = int(counts.ge(limit).sum())
+        fraction = saturated / total if total else 0.0
+        log_method = logger.warning if fraction >= warn_fraction else logger.info
+        log_method(
+            "%s neighbor saturation: at_limit=%d total_objects=%d fraction=%.6f limit=%d",
+            context,
+            saturated,
+            total,
+            fraction,
+            limit,
+        )
+        if fail_fraction is not None and fraction >= fail_fraction:
+            raise RuntimeError(
+                f"{context}: neighbor saturation is {fraction:.6f}, reaching "
+                f"failure threshold {fail_fraction:.6f}; increase crossmatch_n_neighbors"
+            )
+
+
+def _catalog_source_totals(catalog) -> dict:
+    """Count all catalog objects by source for saturation denominators."""
+    if "source" in catalog._ddf.columns:
+        counts = catalog._ddf.groupby("source").size().compute()
+        return {str(source): int(count) for source, count in counts.items()}
+    return {"<all>": int(catalog._ddf.map_partitions(len).sum().compute())}
 
 
 def _merge_compared_to_partition(
@@ -655,6 +726,9 @@ def _concat_parquet_import(
         client=client,
         try_margin=True,
         schema_hints=schema_hints,
+        margin_threshold=float(
+            (translation_config or {}).get("margin_threshold_arcsec", 5.0)
+        ),
     )
     if log_steps and logger is not None:
         logger.info(
@@ -700,6 +774,29 @@ def crossmatch_tiebreak(
     # Parameters with defaults
     radius = float((translation_config or {}).get("crossmatch_radius_arcsec", 0.75))
     k = int((translation_config or {}).get("crossmatch_n_neighbors", 10))
+    saturation_enabled = bool(
+        (translation_config or {}).get("crossmatch_saturation_enabled", False)
+    )
+    warn_fraction = 0.01
+    fail_raw = None
+    if saturation_enabled:
+        warn_fraction = float(
+            (translation_config or {}).get(
+                "crossmatch_saturation_warn_fraction", 0.01
+            )
+        )
+        fail_raw = (translation_config or {}).get(
+            "crossmatch_saturation_fail_fraction", 0.10
+        )
+    fail_fraction = None if fail_raw is None else float(fail_raw)
+    if saturation_enabled and not 0.0 <= warn_fraction <= 1.0:
+        raise ValueError("crossmatch_saturation_warn_fraction must be in [0, 1]")
+    if saturation_enabled and fail_fraction is not None and not warn_fraction <= fail_fraction <= 1.0:
+        raise ValueError(
+            "crossmatch_saturation_fail_fraction must be null or in "
+            "[crossmatch_saturation_warn_fraction, 1]"
+        )
+    total_by_source = _catalog_source_totals(left_cat) if saturation_enabled else {}
 
     logger.info(
         'START crossmatch_update_compared_to: step=%s radius=%.3f" n_neighbors=%d backend=%s',
@@ -723,11 +820,25 @@ def crossmatch_tiebreak(
     # 2) Build adjacency from CRD_ID pairs
     t0 = time.time()
     pair_cols = ["CRD_IDleft", "CRD_IDright"]
+    if saturation_enabled and "sourceleft" in xmatched._ddf.columns:
+        pair_cols.append("sourceleft")
     pairs_df = xmatched._ddf[pair_cols].compute()
     if len(pairs_df) == 0:
         pairs_adj: Dict[str, Set[str]] = {}
         logger.info("No pairs found; `compared_to` remains unchanged.")
     else:
+        if saturation_enabled:
+            _log_neighbor_saturation(
+                pairs_df,
+                id_col="CRD_IDleft",
+                source_col="sourceleft" if "sourceleft" in pairs_df else None,
+                limit=k,
+                logger=logger,
+                context=f"crossmatch step={step}",
+                total_by_source=total_by_source,
+                warn_fraction=warn_fraction,
+                fail_fraction=fail_fraction,
+            )
         pairs_df = pairs_df.astype({"CRD_IDleft": "string", "CRD_IDright": "string"})
         pairs_df = pairs_df[
             pairs_df["CRD_IDleft"] != pairs_df["CRD_IDright"]
