@@ -40,6 +40,7 @@ import lsdb
 from crossmatch_auto import crossmatch_auto
 from crossmatch_cross import crossmatch_tiebreak_safe
 from deduplication import (
+    REPRESENTATIVE_RADIUS_DIAGNOSTIC_COLUMN,
     count_global_edge_group_mismatches,
     count_global_tie_invariant_violations,
     filter_pandas_by_tie_treatment,
@@ -1723,7 +1724,23 @@ def main(
                             "validate_global_tie_invariants", False
                         )
                     )
-                    validation_tasks = []
+                    representative_radius = labels_dd[
+                        REPRESENTATIVE_RADIUS_DIAGNOSTIC_COLUMN
+                    ]
+                    representative_radius_valid = representative_radius.dropna()
+                    validation_tasks = [
+                        representative_radius_valid.count(),
+                        representative_radius_valid.gt(
+                            crossmatch_radius_arcsec
+                        ).sum(),
+                        representative_radius_valid.gt(
+                            2.0 * crossmatch_radius_arcsec
+                        ).sum(),
+                        representative_radius_valid.gt(
+                            margin_threshold_arcsec
+                        ).sum(),
+                        representative_radius_valid.max(),
+                    ]
                     if validate_edges:
                         mismatch_lazy, dangling_lazy = (
                             count_global_edge_group_mismatches(merged)
@@ -1737,6 +1754,31 @@ def main(
                         validation_tasks.append(invalid_groups_lazy)
 
                     validation_results = iter(dask.compute(*validation_tasks))
+                    representative_components = int(next(validation_results))
+                    representative_exceed_radius = int(next(validation_results))
+                    representative_exceed_twice_radius = int(
+                        next(validation_results)
+                    )
+                    representative_exceed_margin = int(next(validation_results))
+                    representative_max_radius = float(next(validation_results))
+                    representative_fraction = (
+                        representative_exceed_radius / representative_components
+                        if representative_components
+                        else 0.0
+                    )
+                    log_dedup.info(
+                        "Representative-radius diagnostics: components=%d "
+                        "radius=%.3farcsec exceeding_radius=%d "
+                        "fraction_exceeding=%.6f exceeding_twice_radius=%d "
+                        "exceeding_margin=%d max_radius=%.4farcsec",
+                        representative_components,
+                        crossmatch_radius_arcsec,
+                        representative_exceed_radius,
+                        representative_fraction,
+                        representative_exceed_twice_radius,
+                        representative_exceed_margin,
+                        representative_max_radius,
+                    )
                     if validate_edges:
                         mismatch_count = int(next(validation_results))
                         dangling_count = int(next(validation_results))

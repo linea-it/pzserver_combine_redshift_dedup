@@ -28,6 +28,10 @@ import numpy as np
 import pandas as pd
 import dask.dataframe as dd
 
+REPRESENTATIVE_RADIUS_DIAGNOSTIC_COLUMN = (
+    "_diag_representative_max_radius_arcsec"
+)
+
 # -----------------------
 # Project
 # -----------------------
@@ -171,10 +175,11 @@ def _log_representative_radius_diagnostics(
     crd_col: str,
     radius_arcsec: float,
     partition_tag: str,
-) -> None:
-    """Warn when a local component extends beyond a deterministic representative."""
+) -> pd.Series:
+    """Return one max-radius value per canonical local component and warn locally."""
+    diagnostic = pd.Series(np.nan, index=frame.index, dtype="float64")
     if not group_col or group_col not in frame or frame.empty:
-        return
+        return diagnostic
 
     work = frame[[group_col, tie_col, crd_col, "ra", "dec"]].copy()
     work["ra"] = pd.to_numeric(work["ra"], errors="coerce")
@@ -183,7 +188,7 @@ def _log_representative_radius_diagnostics(
     sizes = work.groupby(group_col)[crd_col].transform("size")
     work = work[sizes >= 2]
     if work.empty:
-        return
+        return diagnostic
 
     tie = pd.to_numeric(work[tie_col], errors="coerce")
     work["_representative_rank"] = np.select(
@@ -210,9 +215,18 @@ def _log_representative_radius_diagnostics(
     angular = 2.0 * np.arcsin(np.sqrt(np.clip(hav, 0.0, 1.0)))
     work["_radius_arcsec"] = np.degrees(angular) * 3600.0
     max_radius = work.groupby(group_col)["_radius_arcsec"].max()
+    canonical_id = work.groupby(group_col)[crd_col].transform("min")
+    canonical_rows = work[crd_col].astype("string").eq(
+        canonical_id.astype("string")
+    )
+    if "_src" in frame.columns:
+        canonical_rows &= frame.loc[work.index, "_src"].eq("main")
+    selected = work.loc[canonical_rows].drop_duplicates(group_col)
+    diagnostic.loc[selected.index] = selected[group_col].map(max_radius).to_numpy()
+
     exceeding = max_radius[max_radius > float(radius_arcsec)]
     if exceeding.empty:
-        return
+        return diagnostic
 
     p90, p99 = np.quantile(max_radius.to_numpy(), [0.90, 0.99])
     _phase_logger().warning(
@@ -230,6 +244,7 @@ def _log_representative_radius_diagnostics(
         float(max_radius.max()),
         [(int(group), float(value)) for group, value in exceeding.head(5).items()],
     )
+    return diagnostic
 
 
 def _parse_compared_to_cell(val) -> List[str]:
@@ -1473,6 +1488,7 @@ def _dedup_local_with_margin(
         cols = {
             crd_col: pd.Series(dtype="string[pyarrow]"),
             tie_col: pd.Series(dtype="Int8"),
+            REPRESENTATIVE_RADIUS_DIAGNOSTIC_COLUMN: pd.Series(dtype="float64"),
         }
         if group_col:
             cols[group_col] = pd.Series(dtype="Int64")
@@ -1503,6 +1519,7 @@ def _dedup_local_with_margin(
         cols = {
             crd_col: pd.Series(dtype="string[pyarrow]"),
             tie_col: pd.Series(dtype="Int8"),
+            REPRESENTATIVE_RADIUS_DIAGNOSTIC_COLUMN: pd.Series(dtype="float64"),
         }
         if group_col:
             cols[group_col] = pd.Series(dtype="Int64")
@@ -1523,13 +1540,15 @@ def _dedup_local_with_margin(
         logger=_phase_logger(),
         group_col=group_col,
     )
-    _log_representative_radius_diagnostics(
-        solved,
-        group_col=group_col,
-        tie_col=tie_col,
-        crd_col=crd_col,
-        radius_arcsec=crossmatch_radius_arcsec,
-        partition_tag=partition_tag,
+    solved[REPRESENTATIVE_RADIUS_DIAGNOSTIC_COLUMN] = (
+        _log_representative_radius_diagnostics(
+            solved,
+            group_col=group_col,
+            tie_col=tie_col,
+            crd_col=crd_col,
+            radius_arcsec=crossmatch_radius_arcsec,
+            partition_tag=partition_tag,
+        )
     )
 
     if group_col and group_col in solved.columns:
@@ -1593,7 +1612,7 @@ def _dedup_local_with_margin(
                 )
 
     # Keep only main rows and required columns.
-    cols = [crd_col, tie_col]
+    cols = [crd_col, tie_col, REPRESENTATIVE_RADIUS_DIAGNOSTIC_COLUMN]
     if group_col and (group_col in solved.columns):
         cols.append(group_col)
 
@@ -1602,6 +1621,9 @@ def _dedup_local_with_margin(
     # Stable dtypes.
     out[crd_col] = _ensure_string_pyarrow(out[crd_col])
     out[tie_col] = _nullable_int8(out[tie_col])
+    out[REPRESENTATIVE_RADIUS_DIAGNOSTIC_COLUMN] = pd.to_numeric(
+        out[REPRESENTATIVE_RADIUS_DIAGNOSTIC_COLUMN], errors="coerce"
+    ).astype("float64")
     if group_col and (group_col in out.columns):
         out[group_col] = out[group_col].astype("Int64")
 
@@ -1708,6 +1730,7 @@ def _dedup_local_no_margin(
         cols = {
             crd_col: pd.Series(dtype="string[pyarrow]"),
             tie_col: pd.Series(dtype="Int8"),
+            REPRESENTATIVE_RADIUS_DIAGNOSTIC_COLUMN: pd.Series(dtype="float64"),
         }
         if group_col:
             cols[group_col] = pd.Series(dtype="Int64")
@@ -1735,17 +1758,19 @@ def _dedup_local_no_margin(
         logger=_phase_logger(),
         group_col=group_col,
     )
-    _log_representative_radius_diagnostics(
-        solved,
-        group_col=group_col,
-        tie_col=tie_col,
-        crd_col=crd_col,
-        radius_arcsec=crossmatch_radius_arcsec,
-        partition_tag=partition_tag,
+    solved[REPRESENTATIVE_RADIUS_DIAGNOSTIC_COLUMN] = (
+        _log_representative_radius_diagnostics(
+            solved,
+            group_col=group_col,
+            tie_col=tie_col,
+            crd_col=crd_col,
+            radius_arcsec=crossmatch_radius_arcsec,
+            partition_tag=partition_tag,
+        )
     )
 
     # Select output columns.
-    cols = [crd_col, tie_col]
+    cols = [crd_col, tie_col, REPRESENTATIVE_RADIUS_DIAGNOSTIC_COLUMN]
     if group_col and (group_col in solved.columns):
         cols.append(group_col)
 
@@ -1754,6 +1779,9 @@ def _dedup_local_no_margin(
     # Stable dtypes.
     out[crd_col] = _ensure_string_pyarrow(out[crd_col])
     out[tie_col] = _nullable_int8(out[tie_col])
+    out[REPRESENTATIVE_RADIUS_DIAGNOSTIC_COLUMN] = pd.to_numeric(
+        out[REPRESENTATIVE_RADIUS_DIAGNOSTIC_COLUMN], errors="coerce"
+    ).astype("float64")
     if group_col and (group_col in out.columns):
         out[group_col] = out[group_col].astype("Int64")
 
@@ -1859,6 +1887,7 @@ def run_dedup_with_lsdb_map_partitions(
         meta_dict = {
             crd_col: pd.Series(dtype="string[pyarrow]"),
             tie_col: pd.Series(dtype="Int8"),
+            REPRESENTATIVE_RADIUS_DIAGNOSTIC_COLUMN: pd.Series(dtype="float64"),
         }
         if group_col:
             meta_dict[group_col] = pd.Series(dtype="Int64")
@@ -1953,6 +1982,9 @@ def run_dedup_with_lsdb_map_partitions(
         assign_map = {
             crd_col: labels_dd[crd_col].astype("string[pyarrow]"),
             tie_col: labels_dd[tie_col].astype("Int8"),
+            REPRESENTATIVE_RADIUS_DIAGNOSTIC_COLUMN: labels_dd[
+                REPRESENTATIVE_RADIUS_DIAGNOSTIC_COLUMN
+            ].astype("float64"),
         }
         if group_col:
             assign_map[group_col] = labels_dd[group_col].astype("Int64")

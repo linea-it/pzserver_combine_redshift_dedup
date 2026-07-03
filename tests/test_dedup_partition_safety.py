@@ -5,6 +5,7 @@ from unittest.mock import Mock, patch
 import dask
 import dask.dataframe as dd
 import pandas as pd
+import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "packages"))
 
@@ -163,7 +164,7 @@ def test_representative_radius_diagnostic_warns_for_transitive_chain():
     logger = Mock()
 
     with patch("deduplication._phase_logger", return_value=logger):
-        _log_representative_radius_diagnostics(
+        diagnostic = _log_representative_radius_diagnostics(
             frame,
             group_col="group_id",
             tie_col="tie_result",
@@ -174,3 +175,5 @@ def test_representative_radius_diagnostic_warns_for_transitive_chain():
 
     logger.warning.assert_called_once()
     assert "Representative-radius diagnostics" in logger.warning.call_args.args[0]
+    assert diagnostic.notna().sum() == 1
+    assert diagnostic.max() == pytest.approx(0.8, abs=1e-6)

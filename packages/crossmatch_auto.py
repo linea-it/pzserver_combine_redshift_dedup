@@ -386,7 +386,7 @@ def crossmatch_auto(
 
     # Parameters with defaults
     radius = float((translation_config or {}).get("crossmatch_radius_arcsec", 0.5))
-    k = int((translation_config or {}).get("crossmatch_n_neighbors", 80))
+    k = int((translation_config or {}).get("crossmatch_n_neighbors", 160))
     saturation_enabled = bool(
         (translation_config or {}).get("crossmatch_saturation_enabled", False)
     )
