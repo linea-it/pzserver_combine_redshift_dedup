@@ -23,7 +23,7 @@ validate_crd_id_uniqueness: true  # Global nunique validation for every prepared
 repartition_prepared_catalogs: false  # Extra full-data pass to resize prepared partitions.
 prepared_partition_size: "256MB"  # Used only when repartition_prepared_catalogs is enabled.
 
-crossmatch_n_neighbors: 10      # Number of nearest neighbors to consider during crossmatching.
+crossmatch_n_neighbors: 20      # Number of nearest neighbors to consider during crossmatching.
 crossmatch_saturation_enabled: true  # Compute per-source saturation metrics and thresholds.
 crossmatch_saturation_warn_fraction: 0.01  # Warn when >=1% of all source objects reach n_neighbors.
 crossmatch_saturation_fail_fraction: 0.10  # Fail at >=10%; set null to disable failure.
