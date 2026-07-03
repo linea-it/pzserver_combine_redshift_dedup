@@ -31,6 +31,11 @@ import pandas as pd
 # Project
 # -----------------------
 from specz import DTYPE_STR  # Arrow-backed string dtype
+from crossmatch_diagnostics import (
+    log_component_size_diagnostics,
+    log_neighbor_count_diagnostics,
+    log_pair_separation_diagnostics,
+)
 from utils import get_phase_logger
 
 __all__ = ["crossmatch_auto"]
@@ -120,6 +125,12 @@ def _log_neighbor_saturation(
     )
     if "sourceleft" in pairs:
         for source, source_counts in counts.groupby(level=0, dropna=False):
+            log_neighbor_count_diagnostics(
+                source_counts,
+                limit=limit,
+                logger=logger,
+                context=f"Self-crossmatch source={source}",
+            )
             total = int(total_by_source.get(str(source), source_counts.size))
             saturated = int(source_counts.ge(limit).sum())
             fraction = saturated / total if total else 0.0
@@ -139,6 +150,12 @@ def _log_neighbor_saturation(
                     "increase crossmatch_n_neighbors"
                 )
     else:
+        log_neighbor_count_diagnostics(
+            counts,
+            limit=limit,
+            logger=logger,
+            context="Self-crossmatch",
+        )
         total = int(total_by_source.get("<all>", counts.size))
         saturated = int(counts.ge(limit).sum())
         fraction = saturated / total if total else 0.0
@@ -266,12 +283,22 @@ def _self_xmatch_pairs(
         suffix_method='all_columns',
     )
     pair_cols = ["CRD_IDleft", "CRD_IDright"]
+    if "_dist_arcsec" in xmatched.columns:
+        pair_cols.append("_dist_arcsec")
     if total_by_source is not None and "sourceleft" in xmatched.columns:
         pair_cols.append("sourceleft")
     pairs_df = xmatched[pair_cols].compute()
     if len(pairs_df) == 0:
         logger.info("Self-crossmatch: no pairs found; `compared_to` remains unchanged.")
         return {}
+    log_pair_separation_diagnostics(
+        pairs_df,
+        left_col="CRD_IDleft",
+        right_col="CRD_IDright",
+        radius_arcsec=radius_arcsec,
+        logger=logger,
+        context="Self-crossmatch",
+    )
     if total_by_source is not None:
         _log_neighbor_saturation(
             pairs_df,
@@ -287,6 +314,11 @@ def _self_xmatch_pairs(
     ].drop_duplicates()
 
     adj = _adjacency_from_pairs(pairs_df["CRD_IDleft"], pairs_df["CRD_IDright"])
+    log_component_size_diagnostics(
+        adj,
+        logger=logger,
+        context="Self-crossmatch",
+    )
     total_links = sum(len(v) for v in adj.values())
     logger.info(
         "Self-crossmatch: %d unique pairs across %d nodes", total_links, len(adj)
@@ -353,8 +385,8 @@ def crossmatch_auto(
         raise ValueError("`collection_path` must be provided (collection-only mode).")
 
     # Parameters with defaults
-    radius = float((translation_config or {}).get("crossmatch_radius_arcsec", 0.75))
-    k = int((translation_config or {}).get("crossmatch_n_neighbors", 20))
+    radius = float((translation_config or {}).get("crossmatch_radius_arcsec", 0.5))
+    k = int((translation_config or {}).get("crossmatch_n_neighbors", 40))
     saturation_enabled = bool(
         (translation_config or {}).get("crossmatch_saturation_enabled", False)
     )

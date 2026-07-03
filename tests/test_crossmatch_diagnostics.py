@@ -1,0 +1,71 @@
+import sys
+from pathlib import Path
+
+import pandas as pd
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "packages"))
+
+from crossmatch_diagnostics import (  # noqa: E402
+    log_component_size_diagnostics,
+    log_neighbor_count_diagnostics,
+    log_pair_separation_diagnostics,
+)
+
+
+class RecordingLogger:
+    def __init__(self):
+        self.info_calls = []
+
+    def info(self, *args):
+        self.info_calls.append(args)
+
+
+def test_pair_diagnostics_exclude_self_matches_and_log_radius_fractions():
+    logger = RecordingLogger()
+    pairs = pd.DataFrame(
+        {
+            "left": ["A", "A", "B", "C"],
+            "right": ["A", "B", "C", "D"],
+            "_dist_arcsec": [0.0, 0.1, 0.3, 0.49],
+        }
+    )
+
+    log_pair_separation_diagnostics(
+        pairs,
+        left_col="left",
+        right_col="right",
+        radius_arcsec=0.5,
+        logger=logger,
+        context="test",
+    )
+
+    message, *args = logger.info_calls[0]
+    assert "separation diagnostics" in message
+    assert args[1] == 3
+
+
+def test_neighbor_and_component_diagnostics_log_distributions():
+    logger = RecordingLogger()
+
+    log_neighbor_count_diagnostics(
+        pd.Series([1, 2, 5, 10]),
+        limit=10,
+        logger=logger,
+        context="test",
+    )
+    log_component_size_diagnostics(
+        {
+            "A": {"B"},
+            "B": {"A", "C"},
+            "C": {"B"},
+            "D": {"E"},
+            "E": {"D"},
+        },
+        logger=logger,
+        context="test",
+    )
+
+    assert "returned-match diagnostics" in logger.info_calls[0][0]
+    assert "component-size diagnostics" in logger.info_calls[1][0]
+    assert "low_density" in logger.info_calls[1][0]
+    assert logger.info_calls[1][1:4] == ("test", 2, 5)
