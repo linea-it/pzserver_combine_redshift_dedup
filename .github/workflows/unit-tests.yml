@@ -1,0 +1,43 @@
+name: Unit tests
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: unit-tests-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    name: Ruff and lightweight tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    defaults:
+      run:
+        shell: bash -el {0}
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Create development environment
+        uses: conda-incubator/setup-miniconda@v4
+        with:
+          activate-environment: pipe_crd_dev
+          environment-file: environment.dev.yaml
+          miniforge-version: latest
+          conda-solver: libmamba
+          auto-activate-base: false
+
+      - name: Show environment
+        run: |
+          python --version
+          conda info --envs
+
+      - name: Run pre-commit validation
+        run: pre-commit run --all-files

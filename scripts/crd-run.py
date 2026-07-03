@@ -15,7 +15,6 @@ import glob
 import json
 import os
 import shutil
-import sys
 import time
 import warnings
 from typing import Any
@@ -43,7 +42,9 @@ from crossmatch_cross import crossmatch_tiebreak_safe
 from deduplication import (
     count_global_edge_group_mismatches,
     count_global_tie_invariant_violations,
+    filter_pandas_by_tie_treatment,
     run_dedup_with_lsdb_map_partitions,
+    validate_spatial_safety,
 )
 from executor import get_executor
 from product_handle import save_dataframe
@@ -719,18 +720,11 @@ def main(
     margin_warning_fraction = float(
         translation_config.get("margin_warning_fraction", 0.8)
     )
-    if crossmatch_radius_arcsec <= 0.0:
-        raise ValueError("crossmatch_radius_arcsec must be positive")
-    if margin_threshold_arcsec <= 0.0:
-        raise ValueError("margin_threshold_arcsec must be positive")
-    if not 0.0 < margin_warning_fraction <= 1.0:
-        raise ValueError("margin_warning_fraction must be in the interval (0, 1]")
-    if crossmatch_radius_arcsec >= margin_threshold_arcsec:
-        raise ValueError(
-            "crossmatch_radius_arcsec must be smaller than "
-            "margin_threshold_arcsec for partition-local deduplication "
-            f"(radius={crossmatch_radius_arcsec}, margin={margin_threshold_arcsec})"
-        )
+    validate_spatial_safety(
+        crossmatch_radius_arcsec,
+        margin_threshold_arcsec,
+        margin_warning_fraction,
+    )
     log_init.info(
         'Spatial safety: crossmatch_radius=%.3f" margin_threshold=%.3f" ratio=%.3f',
         crossmatch_radius_arcsec,
@@ -1258,7 +1252,6 @@ def main(
                 log_cross.debug("Could not query scheduler_info workers: %s", e)
 
             log_cross.info("END crossmatch: concatenate mode (no crossmatch performed)")
-            start_consolidate = True
 
         elif combine_mode in (
             "concatenate_and_mark_duplicates",
@@ -1271,7 +1264,6 @@ def main(
                     "Skip crossmatch: already finalized at step %d (merged_step present).",
                     final_step,
                 )
-                start_consolidate = False  # dedup still runs before consolidation
 
             else:
                 # === Parallel tournament without per-step resume ===
@@ -1321,7 +1313,6 @@ def main(
                             "Only one prepared collection; skipping crossmatch. final=%s",
                             final_collection_path,
                         )
-                        start_consolidate = False
                     else:
                         # Driver-side futures pipeline. Each thread submits the
                         # LSDB graph directly to the distributed scheduler.
@@ -1491,7 +1482,6 @@ def main(
                             "END crossmatch: parallel tournament done; final root: %s",
                             final_collection_path,
                         )
-                        start_consolidate = False
 
                 except Exception:
                     # Catch ANY driver-side error in the tournament
@@ -1522,9 +1512,6 @@ def main(
             log_dedup.info(
                 "Skip deduplication: combine_mode='concatenate' (no LSDB collection root)."
             )
-            # Next phase runs below:
-            start_consolidate = True
-
         else:
             log_dedup.info(
                 "START deduplication: LSDB graph labeling and tie consolidation"
@@ -1843,9 +1830,6 @@ def main(
                     "Cannot run dedup: missing or invalid LSDB collection root; Parquet fallback removed."
                 )
 
-            # Next phase runs below:
-            start_consolidate = True
-
     # -----------------------
     # 5) CONSOLIDATION / EXPORT
     # -----------------------
@@ -1939,71 +1923,22 @@ def main(
                 tie_treatment_option,
             )
             try:
-                tie_num = (
-                    pd.to_numeric(df_final["tie_result"], errors="coerce")
-                    .fillna(0)
-                    .astype("int8")
-                )
-                if tie_treatment_option == "draw_one":
-                    if "group_id" not in df_final.columns:
-                        log_cons.warning(
-                            "tie_treatment_option=draw_one requires group_id; falling back to remove_all."
-                        )
-                        tie_treatment_option = "remove_all"
-                    else:
-                        gid = df_final["group_id"]
-                        has_1 = (
-                            tie_num.eq(1)
-                            .groupby(gid, dropna=True)
-                            .transform("any")
-                            .fillna(False)
-                        )
-                        has_2 = (
-                            tie_num.eq(2)
-                            .groupby(gid, dropna=True)
-                            .transform("any")
-                            .fillna(False)
-                        )
-                        draw_group = (~has_1) & has_2
-                        cand_mask = draw_group & tie_num.eq(2) & gid.notna()
-                        n_groups = int(gid[cand_mask].nunique())
-                        if n_groups > 0:
-                            rng = np.random.default_rng()
-                            seed = int(rng.integers(0, 2**32 - 1))
-                            cand_pos = np.flatnonzero(
-                                cand_mask.to_numpy(dtype=bool, na_value=False)
-                            )
-                            cand_gid = gid.iloc[cand_pos]
-                            cand_df = pd.DataFrame(
-                                {"pos": cand_pos, "group_id": cand_gid.to_numpy()}
-                            )
-                            winners = (
-                                cand_df.groupby("group_id", dropna=True)
-                                .sample(n=1, random_state=seed)["pos"]
-                                .to_numpy()
-                            )
-                            tie_num = tie_num.copy()
-                            tie_num.iloc[cand_pos] = 0
-                            tie_num.iloc[winners] = 1
-                            df_final = df_final.assign(tie_result=tie_num)
-                            log_cons.info(
-                                "Draw-one resolved %d absolute-tie groups.", n_groups
-                            )
-                        else:
-                            log_cons.info("Draw-one found no absolute-tie groups.")
-
-                if tie_treatment_option == "keep_all":
-                    keep_mask = tie_num.isin([1, 2])
-                    log_cons.info(
-                        "Filtering rows by tie_result in {1,2} (keep_all)."
-                    )
-                else:
-                    keep_mask = tie_num.eq(1)
-                    log_cons.info(
-                        "Filtering winners by tie_result == 1 (%s).",
+                requested_option = tie_treatment_option
+                df_final, tie_treatment_option, n_groups = (
+                    filter_pandas_by_tie_treatment(
+                        df_final,
                         tie_treatment_option,
                     )
-                df_final = df_final.loc[keep_mask].copy()
+                )
+                if requested_option == "draw_one" and tie_treatment_option != "draw_one":
+                    log_cons.warning(
+                        "tie_treatment_option=draw_one requires group_id; "
+                        "falling back to remove_all."
+                    )
+                elif tie_treatment_option == "draw_one":
+                    log_cons.info(
+                        "Draw-one resolved %d absolute-tie groups.", n_groups
+                    )
             except Exception as e:
                 log_cons.error("FAILED while filtering by tie_treatment_option: %s", e)
                 raise

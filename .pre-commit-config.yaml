@@ -1,0 +1,16 @@
+repos:
+  - repo: local
+    hooks:
+      - id: ruff-essential
+        name: Ruff essential checks
+        entry: ruff check --force-exclude --select=E9,F,B006,B008,B012,B018,B023,B904
+        language: system
+        types_or: [python, pyi]
+        exclude: ^notebooks/
+
+      - id: pytest-unit
+        name: Lightweight unit tests
+        entry: python -m pytest -q
+        language: system
+        pass_filenames: false
+        always_run: true

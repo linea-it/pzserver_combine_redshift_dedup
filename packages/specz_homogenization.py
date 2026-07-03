@@ -22,7 +22,6 @@ import ast as _ast
 import builtins
 import logging
 import math
-from typing import Any
 
 # -----------------------
 # Third-party
@@ -367,7 +366,10 @@ def _homogenize(
                         expr_vec = _ast.unparse(tree2)
                         mlocal = eval(expr_vec, safe_globals, ctx)
                     except Exception as e:
-                        raise ValueError(f"Error evaluating condition '{expr}' for survey '{sname}': {e}")
+                        raise ValueError(
+                            f"Error evaluating condition '{expr}' for survey "
+                            f"'{sname}': {e}"
+                        ) from e
 
                     if isinstance(mlocal, pd.Series):
                         mlocal = mlocal.reindex(s.index)

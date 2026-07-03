@@ -19,7 +19,6 @@ from typing import (
 )
 import math
 import logging
-import time
 import hashlib
 
 # -----------------------
@@ -102,6 +101,26 @@ def _canonical_group_id(value: object) -> np.int64:
     return np.int64(int.from_bytes(digest, "big") & ((1 << 63) - 1))
 
 
+def validate_spatial_safety(
+    crossmatch_radius_arcsec: float,
+    margin_threshold_arcsec: float,
+    margin_warning_fraction: float,
+) -> None:
+    """Validate parameters required by partition-local spatial deduplication."""
+    if crossmatch_radius_arcsec <= 0.0:
+        raise ValueError("crossmatch_radius_arcsec must be positive")
+    if margin_threshold_arcsec <= 0.0:
+        raise ValueError("margin_threshold_arcsec must be positive")
+    if not 0.0 < margin_warning_fraction <= 1.0:
+        raise ValueError("margin_warning_fraction must be in the interval (0, 1]")
+    if crossmatch_radius_arcsec >= margin_threshold_arcsec:
+        raise ValueError(
+            "crossmatch_radius_arcsec must be smaller than "
+            "margin_threshold_arcsec for partition-local deduplication "
+            f"(radius={crossmatch_radius_arcsec}, margin={margin_threshold_arcsec})"
+        )
+
+
 def _assign_canonical_group_ids(
     df: pd.DataFrame, local_group_col: str, crd_col: str
 ) -> pd.Series:
@@ -165,6 +184,59 @@ def _score_instrument_type(
         return norm_map.get(v, 0) if v is not None else 0
 
     return series.map(_score_one).astype("int64")
+
+
+def filter_pandas_by_tie_treatment(
+    df: pd.DataFrame,
+    option: str,
+    *,
+    tie_col: str = "tie_result",
+    group_col: str = "group_id",
+    random_state: int | None = None,
+) -> tuple[pd.DataFrame, str, int]:
+    """Apply final winner/hard-tie policy to an in-memory result frame.
+
+    Returns the filtered frame, the effective option, and the number of
+    hard-tie groups resolved by ``draw_one``.
+    """
+    if tie_col not in df.columns:
+        raise RuntimeError(f"Expected '{tie_col}' column for remove-duplicates mode")
+
+    effective = str(option or "remove_all").strip().lower()
+    if effective not in {"remove_all", "keep_all", "draw_one"}:
+        effective = "remove_all"
+
+    tie_num = pd.to_numeric(df[tie_col], errors="coerce").fillna(0).astype("int8")
+    resolved_groups = 0
+    out = df
+
+    if effective == "draw_one":
+        if group_col not in df.columns:
+            effective = "remove_all"
+        else:
+            gid = df[group_col]
+            has_1 = tie_num.eq(1).groupby(gid, dropna=True).transform("any").fillna(False)
+            has_2 = tie_num.eq(2).groupby(gid, dropna=True).transform("any").fillna(False)
+            candidates = (~has_1) & has_2 & tie_num.eq(2) & gid.notna()
+            candidate_positions = np.flatnonzero(
+                candidates.to_numpy(dtype=bool, na_value=False)
+            )
+            if candidate_positions.size:
+                rng = np.random.default_rng(random_state)
+                winners = []
+                candidate_groups = gid.iloc[candidate_positions]
+                for _, positions in pd.Series(
+                    candidate_positions, index=candidate_groups.to_numpy()
+                ).groupby(level=0, sort=False):
+                    winners.append(int(rng.choice(positions.to_numpy())))
+                resolved_groups = len(winners)
+                tie_num = tie_num.copy()
+                tie_num.iloc[candidate_positions] = 0
+                tie_num.iloc[winners] = 1
+                out = df.assign(**{tie_col: tie_num})
+
+    keep_mask = tie_num.isin([1, 2]) if effective == "keep_all" else tie_num.eq(1)
+    return out.loc[keep_mask].copy(), effective, resolved_groups
 
 
 # -----------------------
@@ -235,14 +307,17 @@ def count_global_edge_group_mismatches(
     groups = groups.assign(node=groups["node"].astype("string[pyarrow]"))
     groups = groups.drop_duplicates(subset=["node"])
 
-    checked = edges.merge(groups, left_on="u", right_on="node", how="left")
-    checked = checked.rename(
-        columns={"node_group": "group_u", "is_star": "is_star_u"}
-    ).drop(columns=["node"])
-    checked = checked.merge(groups, left_on="v", right_on="node", how="left")
-    checked = checked.rename(
-        columns={"node_group": "group_v", "is_star": "is_star_v"}
-    ).drop(columns=["node"])
+    # Rename each lookup before merging and use same-name keys. Dask 2025.3
+    # can lose a left_on/right_on key while lowering consecutive merge/rename
+    # expressions, producing a spurious merge key of None.
+    groups_u = groups.rename(
+        columns={"node": "u", "node_group": "group_u", "is_star": "is_star_u"}
+    )
+    groups_v = groups.rename(
+        columns={"node": "v", "node_group": "group_v", "is_star": "is_star_v"}
+    )
+    checked = edges.merge(groups_u, on="u", how="left")
+    checked = checked.merge(groups_v, on="v", how="left")
 
     dangling = checked["group_u"].isna() | checked["group_v"].isna()
     both_nonstar = checked["is_star_u"].eq(False) & checked["is_star_v"].eq(False)
@@ -1647,7 +1722,6 @@ def run_dedup_with_lsdb_map_partitions(
     Returns:
         dd.DataFrame: Dask DataFrame with tie labels (and optional group ids).
     """
-    logger = _phase_logger()
     with log_phase(
         "deduplication", "run_dedup_with_lsdb_map_partitions", _base_logger()
     ) as log:

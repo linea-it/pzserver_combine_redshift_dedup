@@ -36,3 +36,16 @@ def test_validate_unique_crd_ids_rejects_collisions():
 
     with pytest.raises(RuntimeError, match="non-unique CRD_ID"):
         _validate_unique_crd_ids(frame, "314_example", logging.getLogger(__name__))
+
+
+def test_generate_crd_ids_is_deterministic_for_same_partitioned_input():
+    frame = dd.from_pandas(
+        pd.DataFrame({"value": range(12)}), npartitions=3, sort=False
+    )
+
+    first = _generate_crd_ids(frame, "314_example", "/tmp").compute()
+    second = _generate_crd_ids(frame, "314_example", "/tmp").compute()
+
+    assert first[["value", "CRD_ID"]].to_dict("records") == second[
+        ["value", "CRD_ID"]
+    ].to_dict("records")

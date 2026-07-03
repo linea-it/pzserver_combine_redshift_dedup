@@ -107,6 +107,8 @@ def _adjacency_from_pairs(
     R = right_ids.astype(str).to_numpy(dtype=object, copy=False)
     get = adj.get
     for a, b in zip(L, R):
+        if a == b:
+            continue
         s = get(a)
         if s is None:
             adj[a] = {b}
@@ -233,12 +235,12 @@ def _merge_compared_to_partition(
         return out
 
     def _parse_existing(val) -> Set[str]:
-        if pd.isna(val):
-            return set()
         if isinstance(val, str):
             return _to_str_set(t.strip() for t in val.split(","))
         if isinstance(val, (list, set, tuple)):
             return _to_str_set(val)
+        if pd.isna(val):
+            return set()
         return _to_str_set([val])
 
     # Build NEW neighbor sets, parse OLD cells, then union per row.
