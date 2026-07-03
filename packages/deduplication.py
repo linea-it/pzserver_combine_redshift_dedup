@@ -19,7 +19,7 @@ from typing import (
 )
 import math
 import logging
-import time
+import hashlib
 
 # -----------------------
 # Third-party
@@ -72,6 +72,8 @@ def _phase_logger() -> logging.LoggerAdapter:
 __all__ = [
     "deduplicate_pandas",
     "run_dedup_with_lsdb_map_partitions",
+    "count_global_edge_group_mismatches",
+    "count_global_tie_invariant_violations",
 ]
 
 
@@ -91,6 +93,74 @@ def _norm_str(x) -> str | None:
         return None
     s = str(x).strip()
     return s if s else None
+
+
+def _canonical_group_id(value: object) -> np.int64:
+    """Return a stable signed-63-bit ID for a canonical component key."""
+    digest = hashlib.blake2b(str(value).encode("utf-8"), digest_size=8).digest()
+    return np.int64(int.from_bytes(digest, "big") & ((1 << 63) - 1))
+
+
+def validate_spatial_safety(
+    crossmatch_radius_arcsec: float,
+    margin_threshold_arcsec: float,
+    margin_warning_fraction: float,
+) -> None:
+    """Validate parameters required by partition-local spatial deduplication."""
+    if crossmatch_radius_arcsec <= 0.0:
+        raise ValueError("crossmatch_radius_arcsec must be positive")
+    if margin_threshold_arcsec <= 0.0:
+        raise ValueError("margin_threshold_arcsec must be positive")
+    if not 0.0 < margin_warning_fraction <= 1.0:
+        raise ValueError("margin_warning_fraction must be in the interval (0, 1]")
+    if crossmatch_radius_arcsec >= margin_threshold_arcsec:
+        raise ValueError(
+            "crossmatch_radius_arcsec must be smaller than "
+            "margin_threshold_arcsec for partition-local deduplication "
+            f"(radius={crossmatch_radius_arcsec}, margin={margin_threshold_arcsec})"
+        )
+
+
+def _assign_canonical_group_ids(
+    df: pd.DataFrame, local_group_col: str, crd_col: str
+) -> pd.Series:
+    """Identify a component by a stable hash of its smallest CRD_ID."""
+    canonical_key = (
+        _canon_id_series(df[crd_col]).groupby(df[local_group_col]).transform("min")
+    )
+    return canonical_key.map(_canonical_group_id).astype("Int64")
+
+
+def _validate_local_tie_invariants(
+    df: pd.DataFrame,
+    *,
+    group_col: str,
+    tie_col: str,
+    z_flag_col: str = "z_flag_homogenized",
+) -> None:
+    """Validate winner/hard-tie semantics for every local component."""
+    zf = pd.to_numeric(df[z_flag_col], errors="coerce")
+    tie = pd.to_numeric(df[tie_col], errors="coerce")
+    stars = zf.eq(6.0)
+    if not tie[stars].eq(3).all():
+        raise RuntimeError(
+            "Local tie invariant failed: every star must have tie_result=3"
+        )
+
+    nonstars = df.loc[~stars, [group_col]].copy()
+    nonstars["__tie"] = tie.loc[~stars].to_numpy()
+    for gid_value, component in nonstars.groupby(group_col, dropna=False):
+        values = component["__tie"]
+        n_one = int(values.eq(1).sum())
+        n_two = int(values.eq(2).sum())
+        n_other_survivors = int((~values.isin([0, 1, 2])).sum())
+        valid_single = n_one == 1 and n_two == 0
+        valid_hard = n_one == 0 and n_two >= 2
+        if n_other_survivors or not (valid_single or valid_hard):
+            raise RuntimeError(
+                "Local tie invariant failed for group "
+                f"{gid_value}: tie_result counts={values.value_counts().to_dict()}"
+            )
 
 
 def _parse_compared_to_cell(val) -> List[str]:
@@ -116,6 +186,59 @@ def _score_instrument_type(
     return series.map(_score_one).astype("int64")
 
 
+def filter_pandas_by_tie_treatment(
+    df: pd.DataFrame,
+    option: str,
+    *,
+    tie_col: str = "tie_result",
+    group_col: str = "group_id",
+    random_state: int | None = None,
+) -> tuple[pd.DataFrame, str, int]:
+    """Apply final winner/hard-tie policy to an in-memory result frame.
+
+    Returns the filtered frame, the effective option, and the number of
+    hard-tie groups resolved by ``draw_one``.
+    """
+    if tie_col not in df.columns:
+        raise RuntimeError(f"Expected '{tie_col}' column for remove-duplicates mode")
+
+    effective = str(option or "remove_all").strip().lower()
+    if effective not in {"remove_all", "keep_all", "draw_one"}:
+        effective = "remove_all"
+
+    tie_num = pd.to_numeric(df[tie_col], errors="coerce").fillna(0).astype("int8")
+    resolved_groups = 0
+    out = df
+
+    if effective == "draw_one":
+        if group_col not in df.columns:
+            effective = "remove_all"
+        else:
+            gid = df[group_col]
+            has_1 = tie_num.eq(1).groupby(gid, dropna=True).transform("any").fillna(False)
+            has_2 = tie_num.eq(2).groupby(gid, dropna=True).transform("any").fillna(False)
+            candidates = (~has_1) & has_2 & tie_num.eq(2) & gid.notna()
+            candidate_positions = np.flatnonzero(
+                candidates.to_numpy(dtype=bool, na_value=False)
+            )
+            if candidate_positions.size:
+                rng = np.random.default_rng(random_state)
+                winners = []
+                candidate_groups = gid.iloc[candidate_positions]
+                for _, positions in pd.Series(
+                    candidate_positions, index=candidate_groups.to_numpy()
+                ).groupby(level=0, sort=False):
+                    winners.append(int(rng.choice(positions.to_numpy())))
+                resolved_groups = len(winners)
+                tie_num = tie_num.copy()
+                tie_num.iloc[candidate_positions] = 0
+                tie_num.iloc[winners] = 1
+                out = df.assign(**{tie_col: tie_num})
+
+    keep_mask = tie_num.isin([1, 2]) if effective == "keep_all" else tie_num.eq(1)
+    return out.loc[keep_mask].copy(), effective, resolved_groups
+
+
 # -----------------------
 # Graph building
 # -----------------------
@@ -123,6 +246,120 @@ def _split_cmp_vectorized(s: pd.Series) -> pd.Series:
     """Split `compared_to` values vectorially into lists."""
     s = s.astype("string")
     return s.str.split(",")
+
+
+def _edge_rows_partition(
+    part: pd.DataFrame,
+    crd_col: str,
+    compared_col: str,
+    z_flag_col: str,
+) -> pd.DataFrame:
+    """Extract directed non-star graph edges from one dataframe partition."""
+    zf = pd.to_numeric(part[z_flag_col], errors="coerce")
+    work = part.loc[~zf.eq(6.0), [crd_col, compared_col]].copy()
+    if work.empty:
+        return pd.DataFrame(
+            {
+                "u": pd.Series(dtype="string[pyarrow]"),
+                "v": pd.Series(dtype="string[pyarrow]"),
+            }
+        )
+    work["u"] = _canon_id_series(work[crd_col])
+    work["v"] = work[compared_col].astype("string").str.split(",")
+    edges = work[["u", "v"]].explode("v", ignore_index=True)
+    edges["v"] = _canon_id_series(edges["v"])
+    edges = edges.dropna().loc[lambda frame: frame["u"].ne(frame["v"])]
+    u = edges["u"].astype(str).to_numpy()
+    v = edges["v"].astype(str).to_numpy()
+    edges = pd.DataFrame({"u": np.minimum(u, v), "v": np.maximum(u, v)})
+    return edges.drop_duplicates().astype(
+        {"u": "string[pyarrow]", "v": "string[pyarrow]"}
+    )
+
+
+def count_global_edge_group_mismatches(
+    df: dd.DataFrame,
+    *,
+    crd_col: str = "CRD_ID",
+    compared_col: str = "compared_to",
+    z_flag_col: str = "z_flag_homogenized",
+    group_col: str = "group_id",
+):
+    """Return lazy counts of cross-group edges and dangling non-star edges."""
+    meta = pd.DataFrame(
+        {
+            "u": pd.Series(dtype="string[pyarrow]"),
+            "v": pd.Series(dtype="string[pyarrow]"),
+        }
+    )
+    edges = df.map_partitions(
+        _edge_rows_partition,
+        crd_col,
+        compared_col,
+        z_flag_col,
+        meta=meta,
+    ).drop_duplicates()
+
+    zf = dd.to_numeric(df[z_flag_col], errors="coerce")
+    groups = df[[crd_col, group_col]].assign(is_star=zf.eq(6.0)).rename(
+        columns={crd_col: "node", group_col: "node_group"}
+    )
+    groups = groups.assign(node=groups["node"].astype("string[pyarrow]"))
+    groups = groups.drop_duplicates(subset=["node"])
+
+    # Rename each lookup before merging and use same-name keys. Dask 2025.3
+    # can lose a left_on/right_on key while lowering consecutive merge/rename
+    # expressions, producing a spurious merge key of None.
+    groups_u = groups.rename(
+        columns={"node": "u", "node_group": "group_u", "is_star": "is_star_u"}
+    )
+    groups_v = groups.rename(
+        columns={"node": "v", "node_group": "group_v", "is_star": "is_star_v"}
+    )
+    checked = edges.merge(groups_u, on="u", how="left")
+    checked = checked.merge(groups_v, on="v", how="left")
+
+    dangling = checked["group_u"].isna() | checked["group_v"].isna()
+    both_nonstar = checked["is_star_u"].eq(False) & checked["is_star_v"].eq(False)
+    mismatch = (
+        (~dangling) & both_nonstar & checked["group_u"].ne(checked["group_v"])
+    )
+    return mismatch.sum(), dangling.sum()
+
+
+def count_global_tie_invariant_violations(
+    df: dd.DataFrame,
+    *,
+    group_col: str = "group_id",
+    tie_col: str = "tie_result",
+    z_flag_col: str = "z_flag_homogenized",
+):
+    """Return a lazy count of groups violating final tie-result semantics."""
+    zf = dd.to_numeric(df[z_flag_col], errors="coerce")
+    tie = dd.to_numeric(df[tie_col], errors="coerce")
+    nonstars = df.loc[~zf.eq(6.0), [group_col]].assign(
+        n=1,
+        n0=tie.eq(0).astype("int8"),
+        n1=tie.eq(1).astype("int8"),
+        n2=tie.eq(2).astype("int8"),
+        n_invalid=(~tie.isin([0, 1, 2])).astype("int8"),
+    )
+    stats = nonstars.groupby(group_col).agg(
+        {"n": "sum", "n0": "sum", "n1": "sum", "n2": "sum", "n_invalid": "sum"}
+    )
+    valid_single = (
+        stats["n1"].eq(1)
+        & stats["n2"].eq(0)
+        & stats["n0"].eq(stats["n"] - 1)
+    )
+    valid_hard = (
+        stats["n1"].eq(0)
+        & stats["n2"].ge(2)
+        & stats["n0"].eq(stats["n"] - stats["n2"])
+    )
+    invalid = stats["n_invalid"].gt(0) | ~(valid_single | valid_hard)
+    missing_group_rows = nonstars[group_col].isna().sum()
+    return invalid.sum() + missing_group_rows
 
 
 def _build_edges_fast(
@@ -339,7 +576,13 @@ def _collapse_within_dz(
     crd_s: pd.Series,
     threshold: float,
 ) -> pd.Series:
-    """Collapse contiguous survivors in z within threshold; keep one per cluster."""
+    """Keep a maximal low-to-high set separated by at least ``threshold``.
+
+    Values strictly closer than the threshold to the last representative are
+    redundant. Equality remains a hard-tie separation by design. Undefined
+    redshifts lose whenever the same group has at least one defined redshift;
+    all-undefined groups remain unresolved.
+    """
     thr = float(threshold or 0.0)
     if thr <= 0.0:
         return mask
@@ -358,41 +601,35 @@ def _collapse_within_dz(
     z_arr = pd.to_numeric(zvals, errors="coerce").to_numpy()
     crd_arr = crd_s.astype(str).to_numpy()
 
+    # Missing redshift cannot remain a representative when the same component
+    # contains at least one defined candidate. Preserve all-NaN components as
+    # unresolved hard ties instead of choosing arbitrarily.
+    candidate_frame = pd.DataFrame(
+        {"pos": pos, "gid": gid_arr[pos], "z_defined": ~np.isnan(z_arr[pos])}
+    )
+    has_defined = candidate_frame.groupby("gid")["z_defined"].transform("any")
+    drop_missing = has_defined.to_numpy() & ~candidate_frame["z_defined"].to_numpy()
+    if drop_missing.any():
+        m[candidate_frame.loc[drop_missing, "pos"].to_numpy(dtype=np.int64)] = False
+        pos = pos[~drop_missing]
+
     pos_def = pos[~np.isnan(z_arr[pos])]
     if pos_def.size == 0:
         return mask
 
     order = np.lexsort((crd_arr[pos_def], z_arr[pos_def], gid_arr[pos_def]))
     pos_sorted = pos_def[order]
-    g_sorted = gid_arr[pos_sorted]
-    z_sorted = z_arr[pos_sorted]
-    crd_sorted = crd_arr[pos_sorted]
-
-    k = len(pos_sorted)
-    new_gid = np.empty(k, dtype=bool)
-    new_gid[0] = True
-    if k > 1:
-        new_gid[1:] = g_sorted[1:] != g_sorted[:-1]
-
-    z_jump = np.empty(k, dtype=float)
-    z_jump[0] = np.inf
-    if k > 1:
-        z_jump[1:] = np.abs(z_sorted[1:] - z_sorted[:-1])
-
-    is_break = new_gid | (z_jump > thr)
-    clus = np.cumsum(is_break)
-
-    sub = pd.DataFrame(
-        {"pos": pos_sorted, "gid": g_sorted, "clus": clus, "crd": crd_sorted}
-    )
-    min_crd = sub.groupby(["gid", "clus"], sort=False)["crd"].transform("min")
-    keep_mask = sub["crd"] == min_crd
-    winners_pos = (
-        sub.loc[keep_mask]
-        .groupby(["gid", "clus"], sort=False)
-        .head(1)["pos"]
-        .to_numpy()
-    )
+    winners = []
+    last_gid = None
+    last_z = None
+    for current_pos in pos_sorted:
+        current_gid = gid_arr[current_pos]
+        current_z = float(z_arr[current_pos])
+        if current_gid != last_gid or last_z is None or current_z - last_z >= thr:
+            winners.append(int(current_pos))
+            last_gid = current_gid
+            last_z = current_z
+    winners_pos = np.asarray(winners, dtype=np.int64)
 
     out_np = m.copy()
     out_np[pos_def] = False
@@ -1033,29 +1270,21 @@ def deduplicate_pandas(
         drop_cols.append(tie_col_orig)
 
     if group_col:
-        out[group_col] = pd.Series(out["__group__"], index=out.index).astype("Int64")
+        out[group_col] = _assign_canonical_group_ids(out, "__group__", crd_col)
     else:
         drop_cols.append("__group__")
 
     out.drop(columns=drop_cols, inplace=True, errors="ignore")
 
-    # Namespace group ids per partition.
-    if group_col and partition_tag:
-        try:
-            import zlib
-
-            base = np.int64(zlib.crc32(str(partition_tag).encode("utf-8"))) << np.int64(
-                32
-            )
-            m = out[group_col].notna()
-            out.loc[m, group_col] = (
-                base + out.loc[m, group_col].astype("int64")
-            ).astype("Int64")
-        except Exception:
-            pass
-
     if zf_series is not None:
         out.loc[zf_series.eq(6).fillna(False), tie_col] = np.int8(3)
+
+    if group_col:
+        _validate_local_tie_invariants(
+            out,
+            group_col=group_col,
+            tie_col=tie_col,
+        )
 
     return out
 
@@ -1134,6 +1363,8 @@ def _dedup_local_with_margin(
     tie_col: str = "tie_result",
     edge_log: bool = False,
     group_col: str | None = None,
+    margin_threshold_arcsec: float = 5.0,
+    margin_warning_fraction: float = 0.8,
 ) -> pd.DataFrame:
     """Run dedup on (main + margin) and return labels for main rows only.
 
@@ -1159,7 +1390,9 @@ def _dedup_local_with_margin(
     mg = _to_pandas(part_margin)
 
     # Project to required columns.
-    needed = {crd_col, compared_col, z_col, tie_col} | set(tiebreaking_priority or [])
+    needed = {crd_col, compared_col, z_col, tie_col, "ra", "dec"} | set(
+        tiebreaking_priority or []
+    )
     if instrument_type_priority is not None:
         needed.add("instrument_type_homogenized")
     pm = _shrink_to_needed(pm, needed, crd_col, compared_col, z_col)
@@ -1221,6 +1454,66 @@ def _dedup_local_with_margin(
         group_col=group_col,
     )
 
+    if group_col and group_col in solved.columns:
+        # Every non-star edge whose endpoints are present in this local view must
+        # resolve to one canonical component.  This catches graph/label drift at
+        # the partition boundary before labels are merged globally.
+        zf = pd.to_numeric(solved.get("z_flag_homogenized"), errors="coerce")
+        edge_nodes, edge_uv, _ = _build_edges_fast(
+            solved,
+            crd_col=crd_col,
+            compared_col=compared_col,
+            zf_series=zf,
+            edge_log=False,
+        )
+        if edge_uv.size:
+            group_by_id = solved.drop_duplicates(crd_col).set_index(crd_col)[group_col]
+            left = group_by_id.reindex(edge_nodes.take(edge_uv[:, 0])).to_numpy()
+            right = group_by_id.reindex(edge_nodes.take(edge_uv[:, 1])).to_numpy()
+            if np.any(left != right):
+                raise RuntimeError(
+                    f"{partition_tag}: non-star edge endpoints received different group_id values"
+                )
+
+        src_counts = solved.groupby(group_col)["_src"].nunique()
+        boundary_groups = src_counts[src_counts > 1].index
+        if len(boundary_groups):
+            lg = _phase_logger()
+            lg.info(
+                "%s Boundary components touching main+margin: count=%d sample_group_ids=%s",
+                partition_tag,
+                len(boundary_groups),
+                list(boundary_groups[:5]),
+            )
+
+            # A component approaching the full margin width may be truncated in
+            # another pixel.  Use the diagonal of its local RA/Dec bounding box
+            # as a cheap conservative diagnostic (RA adjusted by cos(dec)).
+            warn_at = float(margin_threshold_arcsec) * float(margin_warning_fraction)
+            near_limit = []
+            boundary_rows = solved[solved[group_col].isin(boundary_groups)]
+            for gid_value, component in boundary_rows.groupby(group_col):
+                ra = pd.to_numeric(component["ra"], errors="coerce")
+                dec = pd.to_numeric(component["dec"], errors="coerce")
+                valid = ra.notna() & dec.notna()
+                if valid.sum() < 2:
+                    continue
+                dec_mid = math.radians(float(dec[valid].mean()))
+                dra = float(ra[valid].max() - ra[valid].min())
+                dra = min(dra, 360.0 - dra) * math.cos(dec_mid)
+                ddec = float(dec[valid].max() - dec[valid].min())
+                extent_arcsec = math.hypot(dra, ddec) * 3600.0
+                if extent_arcsec >= warn_at:
+                    near_limit.append((int(gid_value), extent_arcsec))
+            if near_limit:
+                lg.warning(
+                    "%s Components approach/exceed margin support %.3f arcsec: count=%d sample=%s",
+                    partition_tag,
+                    float(margin_threshold_arcsec),
+                    len(near_limit),
+                    near_limit[:5],
+                )
+
     # Keep only main rows and required columns.
     cols = [crd_col, tie_col]
     if group_col and (group_col in solved.columns):
@@ -1235,6 +1528,7 @@ def _dedup_local_with_margin(
         out[group_col] = out[group_col].astype("Int64")
 
     return out
+
 
 def _dedup_alignfunc_with_margin(
     part_main,
@@ -1253,6 +1547,8 @@ def _dedup_alignfunc_with_margin(
     tie_col: str = "tie_result",
     edge_log: bool = False,
     group_col: str | None = None,
+    margin_threshold_arcsec: float = 5.0,
+    margin_warning_fraction: float = 0.8,
 ) -> pd.DataFrame:
     """Adapter for LSDB/HATS `align_and_apply`.
 
@@ -1280,7 +1576,10 @@ def _dedup_alignfunc_with_margin(
         tie_col=tie_col,
         edge_log=edge_log,
         group_col=group_col,
+        margin_threshold_arcsec=margin_threshold_arcsec,
+        margin_warning_fraction=margin_warning_fraction,
     )
+
 
 def _dedup_local_no_margin(
     part_main,
@@ -1403,6 +1702,8 @@ def run_dedup_with_lsdb_map_partitions(
     tie_col: str = "tie_result",
     edge_log: bool = False,
     group_col: str | None = None,  # new
+    margin_threshold_arcsec: float = 5.0,
+    margin_warning_fraction: float = 0.8,
 ) -> dd.DataFrame:
     """Compute dedup labels per partition via LSDB; align divisions if margin exists.
 
@@ -1421,7 +1722,6 @@ def run_dedup_with_lsdb_map_partitions(
     Returns:
         dd.DataFrame: Dask DataFrame with tie labels (and optional group ids).
     """
-    logger = _phase_logger()
     with log_phase(
         "deduplication", "run_dedup_with_lsdb_map_partitions", _base_logger()
     ) as log:
@@ -1548,6 +1848,8 @@ def run_dedup_with_lsdb_map_partitions(
                     tie_col=tie_col,
                     edge_log=edge_log,
                     group_col=group_col,
+                    margin_threshold_arcsec=float(margin_threshold_arcsec),
+                    margin_warning_fraction=float(margin_warning_fraction),
                 )
 
             # Build a Dask DataFrame from the delayed per-pixel label frames.

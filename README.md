@@ -9,6 +9,59 @@ Software developed and delivered as part of the in-kind contribution program BRA
 
 ## Tests
 
+### Development environment
+
+Create the development environment with Conda or Mamba:
+
+```bash
+conda env create -f environment.dev.yaml
+conda activate pipe_crd_dev
+```
+
+To update an existing environment after dependency changes:
+
+```bash
+conda env update -f environment.dev.yaml --prune
+```
+
+The development environment contains the pipeline runtime dependencies plus
+`pytest`, `ruff`, and `pre-commit`. The default suite contains only lightweight
+unit tests:
+
+```bash
+pytest
+```
+
+Integration tests execute the complete pipeline, may manage a separate runtime
+environment, and are excluded from the default suite. Run them explicitly with:
+
+```bash
+pytest -m slow
+```
+
+### Pre-commit checks
+
+With `pipe_crd_dev` activated, install the repository hook once:
+
+```bash
+pre-commit install
+```
+
+Every commit will then run essential Ruff checks and the lightweight unit-test
+suite. The Ruff hook checks Python errors, undefined or unused symbols, unsafe
+function defaults, problematic closures, and exception chaining. Notebooks,
+formatting, and opinionated style rules are not enforced.
+
+Run the same checks manually across the repository with:
+
+```bash
+pre-commit run --all-files
+```
+
+Pull requests run the same Ruff and lightweight unit-test checks automatically
+through GitHub Actions. New commits cancel any older validation run still in
+progress for that pull request.
+
 ### Test data
 
 This repository currently contains a basic dataset, for testing purposes only. The ideal is to connect the pipelines to systems with access to a larger datasets.
@@ -59,5 +112,3 @@ conda install -c conda-forge jupyterlab ipykernel
 python -m ipykernel install --user --name=pipe_crd
 jupyter lab
 ```
-
-

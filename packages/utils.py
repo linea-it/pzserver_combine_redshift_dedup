@@ -46,7 +46,6 @@ import traceback
 import warnings
 from contextlib import contextmanager
 from logging.handlers import DatagramHandler, RotatingFileHandler
-from pathlib import Path
 from typing import Any, Tuple
 
 # -----------------------

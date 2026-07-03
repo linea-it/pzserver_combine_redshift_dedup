@@ -22,7 +22,6 @@ import ast as _ast
 import builtins
 import logging
 import math
-from typing import Any
 
 # -----------------------
 # Third-party
@@ -211,6 +210,7 @@ def _homogenize(
     tiebreaking_priority = translation_config.get("tiebreaking_priority", [])
     instrument_type_priority = translation_config.get("instrument_type_priority", {})
     translation_rules_uc = {k.upper(): v for k, v in translation_config.get("translation_rules", {}).items()}
+    validated_non_null_counts: dict[str, int] = {}
 
     # -----------------------
     # Vectorized translator
@@ -366,7 +366,10 @@ def _homogenize(
                         expr_vec = _ast.unparse(tree2)
                         mlocal = eval(expr_vec, safe_globals, ctx)
                     except Exception as e:
-                        raise ValueError(f"Error evaluating condition '{expr}' for survey '{sname}': {e}")
+                        raise ValueError(
+                            f"Error evaluating condition '{expr}' for survey "
+                            f"'{sname}': {e}"
+                        ) from e
 
                     if isinstance(mlocal, pd.Series):
                         mlocal = mlocal.reindex(s.index)
@@ -462,7 +465,10 @@ def _homogenize(
             vals = dd.to_numeric(df["z_flag_homogenized"], errors="coerce")
             # NaN is allowed; only non-NaN values outside the allowed set are invalid
             invalid_mask = (~dd.isna(vals)) & ~vals.isin(list(allowed))
-            invalid_count = dask.compute(invalid_mask.sum())[0]
+            invalid_count, non_null_count = dask.compute(
+                invalid_mask.sum(), vals.count()
+            )
+            validated_non_null_counts["z_flag_homogenized"] = int(non_null_count)
         
             if invalid_count > 0:
                 examples = df["z_flag_homogenized"].loc[invalid_mask].head(5, compute=True).tolist()
@@ -532,7 +538,12 @@ def _homogenize(
             ).str.lower()
         
             invalid_mask = (~dd.isna(normed)) & ~normed.isin(list(allowed))
-            invalid_count = dask.compute(invalid_mask.sum())[0]
+            invalid_count, non_null_count = dask.compute(
+                invalid_mask.sum(), normed.count()
+            )
+            validated_non_null_counts["instrument_type_homogenized"] = int(
+                non_null_count
+            )
         
             if invalid_count > 0:
                 examples = df["instrument_type_homogenized"].loc[invalid_mask].head(5, compute=True).tolist()
@@ -550,7 +561,9 @@ def _homogenize(
             raise ValueError(
                 f"[{product_name}] 'z_flag_homogenized' is required by tiebreaking_priority but is missing after homogenization."
             )
-        non_null = dask.compute(df["z_flag_homogenized"].count())[0]
+        non_null = validated_non_null_counts.get("z_flag_homogenized")
+        if non_null is None:
+            non_null = dask.compute(df["z_flag_homogenized"].count())[0]
         if int(non_null) == 0:
             raise ValueError(
                 f"[{product_name}] All values in 'z_flag_homogenized' are NaN. "
@@ -563,7 +576,9 @@ def _homogenize(
             raise ValueError(
                 f"[{product_name}] 'instrument_type_homogenized' is required by tiebreaking_priority but is missing after homogenization."
             )
-        non_null = dask.compute(df["instrument_type_homogenized"].count())[0]
+        non_null = validated_non_null_counts.get("instrument_type_homogenized")
+        if non_null is None:
+            non_null = dask.compute(df["instrument_type_homogenized"].count())[0]
         if int(non_null) == 0:
             raise ValueError(
                 f"[{product_name}] All values in 'instrument_type_homogenized' are NaN. "

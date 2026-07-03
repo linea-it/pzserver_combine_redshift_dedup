@@ -15,7 +15,6 @@ import glob
 import json
 import os
 import shutil
-import sys
 import time
 import warnings
 from typing import Any
@@ -40,11 +39,17 @@ import lsdb
 # -----------------------
 from crossmatch_auto import crossmatch_auto
 from crossmatch_cross import crossmatch_tiebreak_safe
-from deduplication import run_dedup_with_lsdb_map_partitions
+from deduplication import (
+    count_global_edge_group_mismatches,
+    count_global_tie_invariant_violations,
+    filter_pandas_by_tie_treatment,
+    run_dedup_with_lsdb_map_partitions,
+    validate_spatial_safety,
+)
 from executor import get_executor
 from product_handle import save_dataframe
 from resource_usage import ResourceUsageMonitor
-from specz import DTYPE_STR, USE_ARROW_TYPES, prepare_catalog
+from specz import prepare_catalog
 from utils import (
     configure_exception_hook,
     configure_warning_handler,
@@ -185,19 +190,19 @@ def _filesize_mb(path: str) -> float:
 
 
 def _ensure_non_empty_final_dataframe(
-    df: pd.DataFrame,
+    df,
     logger: logging.LoggerAdapter,
     *,
     context: str,
 ) -> None:
-    """Fail clearly if the final dataframe has no rows."""
-    try:
-        n_rows = int(len(df))
-    except Exception as e:
-        logger.warning("Could not compute final dataframe row count: %s", e)
-        return
+    """Fail clearly if a Pandas or Dask final dataframe has no rows."""
+    if _is_dask_dataframe(df):
+        sample = df.head(1, npartitions=-1, compute=True)
+        is_empty = len(sample) == 0
+    else:
+        is_empty = len(df) == 0
 
-    if n_rows == 0:
+    if is_empty:
         msg = (
             "Final catalog is empty before export "
             f"({context}). Nothing can be consolidated."
@@ -564,11 +569,6 @@ def main(
     # --- Load config ---
     config = load_yml(config_path)
     param_config = config.get("param", {})
-    configured_extra_columns = set(
-        (param_config.get("extra_columns") or {}).keys()
-        if isinstance(param_config.get("extra_columns"), dict)
-        else []
-    )
     if base_dir_override is None:
         raise ValueError("You must specify --base_dir via the command line.")
     base_dir = base_dir_override
@@ -711,6 +711,26 @@ def main(
     except Exception as e:
         log_init.error("Failed to parse flags_translation_file: %s", e, exc_info=True)
         raise
+    crossmatch_radius_arcsec = float(
+        translation_config.get("crossmatch_radius_arcsec", 0.75)
+    )
+    margin_threshold_arcsec = float(
+        translation_config.get("margin_threshold_arcsec", 5.0)
+    )
+    margin_warning_fraction = float(
+        translation_config.get("margin_warning_fraction", 0.8)
+    )
+    validate_spatial_safety(
+        crossmatch_radius_arcsec,
+        margin_threshold_arcsec,
+        margin_warning_fraction,
+    )
+    log_init.info(
+        'Spatial safety: crossmatch_radius=%.3f" margin_threshold=%.3f" ratio=%.3f',
+        crossmatch_radius_arcsec,
+        margin_threshold_arcsec,
+        crossmatch_radius_arcsec / margin_threshold_arcsec,
+    )
     # Minimal summary of loaded translation (no heavy dumping)
     try:
         tb = translation_config.get("tiebreaking_priority")
@@ -1203,7 +1223,6 @@ def main(
                 df_final = dd.concat(
                     [dd.read_parquet(i["prepared_path"]) for i in prepared_info]
                 )
-                _ = df_final.head(1, compute=True)  # small schema sanity
                 if output_format == "hats":
                     log_cross.info(
                         "Concatenate graph built lazily for HATS output "
@@ -1233,7 +1252,6 @@ def main(
                 log_cross.debug("Could not query scheduler_info workers: %s", e)
 
             log_cross.info("END crossmatch: concatenate mode (no crossmatch performed)")
-            start_consolidate = True
 
         elif combine_mode in (
             "concatenate_and_mark_duplicates",
@@ -1246,7 +1264,6 @@ def main(
                     "Skip crossmatch: already finalized at step %d (merged_step present).",
                     final_step,
                 )
-                start_consolidate = False  # dedup still runs before consolidation
 
             else:
                 # === Parallel tournament without per-step resume ===
@@ -1296,7 +1313,6 @@ def main(
                             "Only one prepared collection; skipping crossmatch. final=%s",
                             final_collection_path,
                         )
-                        start_consolidate = False
                     else:
                         # Driver-side futures pipeline. Each thread submits the
                         # LSDB graph directly to the distributed scheduler.
@@ -1466,7 +1482,6 @@ def main(
                             "END crossmatch: parallel tournament done; final root: %s",
                             final_collection_path,
                         )
-                        start_consolidate = False
 
                 except Exception:
                     # Catch ANY driver-side error in the tournament
@@ -1497,9 +1512,6 @@ def main(
             log_dedup.info(
                 "Skip deduplication: combine_mode='concatenate' (no LSDB collection root)."
             )
-            # Next phase runs below:
-            start_consolidate = True
-
         else:
             log_dedup.info(
                 "START deduplication: LSDB graph labeling and tie consolidation"
@@ -1604,6 +1616,8 @@ def main(
                         tie_col="tie_result",
                         edge_log=edge_log,
                         group_col=group_col,
+                        margin_threshold_arcsec=margin_threshold_arcsec,
+                        margin_warning_fraction=margin_warning_fraction,
                     )
                     log_dedup.info(
                         "Labels graph built (lazy). Preparing RHS for Dask merge..."
@@ -1692,6 +1706,72 @@ def main(
                         merged = merged.assign(tie_result=merged["tie_result_new"])
                     if "tie_result_new" in merged.columns:
                         merged = merged.drop(columns=["tie_result_new"])
+                    if "z_flag_homogenized" in merged.columns:
+                        star_mask = dd.to_numeric(
+                            merged["z_flag_homogenized"], errors="coerce"
+                        ).eq(6.0)
+                        merged["tie_result"] = merged["tie_result"].mask(
+                            star_mask, np.int8(3)
+                        ).astype("Int8")
+
+                    validate_edges = bool(
+                        translation_config.get("validate_global_graph_edges", False)
+                    )
+                    validate_ties = bool(
+                        translation_config.get(
+                            "validate_global_tie_invariants", False
+                        )
+                    )
+                    validation_tasks = []
+                    if validate_edges:
+                        mismatch_lazy, dangling_lazy = (
+                            count_global_edge_group_mismatches(merged)
+                        )
+                        validation_tasks.extend([mismatch_lazy, dangling_lazy])
+                    if validate_ties:
+                        invalid_groups_lazy = count_global_tie_invariant_violations(
+                            merged
+                        )
+
+                        validation_tasks.append(invalid_groups_lazy)
+
+                    validation_results = iter(dask.compute(*validation_tasks))
+                    if validate_edges:
+                        mismatch_count = int(next(validation_results))
+                        dangling_count = int(next(validation_results))
+                        log_dedup.info(
+                            "Global graph validation: cross_group_edges=%d "
+                            "dangling_nonstar_edges=%d",
+                            mismatch_count,
+                            dangling_count,
+                        )
+                        if mismatch_count:
+                            raise RuntimeError(
+                                "Partition-local deduplication produced "
+                                f"{mismatch_count} non-star edges whose endpoints "
+                                "have different canonical group_id values. Increase "
+                                "margin_threshold_arcsec or inspect long components."
+                            )
+                        if dangling_count:
+                            raise RuntimeError(
+                                "The deduplication graph contains "
+                                f"{dangling_count} edge(s) referencing CRD_ID values "
+                                "that are absent from the consolidated catalog. "
+                                "Inspect compared_to propagation, filtering, and "
+                                "catalog concatenation."
+                            )
+
+                    if validate_ties:
+                        invalid_groups = int(next(validation_results))
+                        log_dedup.info(
+                            "Global tie invariant validation: invalid_groups=%d",
+                            invalid_groups,
+                        )
+                        if invalid_groups:
+                            raise RuntimeError(
+                                f"Global tie-result invariants failed for "
+                                f"{invalid_groups} group(s)"
+                            )
                     log_dedup.info("Coalesced tie_result (lazy).")
                 except Exception as e:
                     import traceback as _tb
@@ -1706,8 +1786,6 @@ def main(
                 # Final materialization: avoid pulling the full dataframe to the
                 # driver when HATS output can consume a Dask dataframe directly.
                 try:
-                    # Small sanity check without pulling everything
-                    _ = merged.head(1)
                     if output_format == "hats":
                         df_final = merged
                         log_dedup.info(
@@ -1752,9 +1830,6 @@ def main(
                     "Cannot run dedup: missing or invalid LSDB collection root; Parquet fallback removed."
                 )
 
-            # Next phase runs below:
-            start_consolidate = True
-
     # -----------------------
     # 5) CONSOLIDATION / EXPORT
     # -----------------------
@@ -1765,47 +1840,12 @@ def main(
     )
     lazy_hats_output = output_format == "hats" and _is_dask_dataframe(df_final)
 
-    # Snapshot about df_final to aid debugging
-    try:
-        if lazy_hats_output:
-            log_cons.info(
-                "df_final is a lazy Dask dataframe for HATS output "
-                "(npartitions=%s).",
-                getattr(df_final, "npartitions", "unknown"),
-            )
-        else:
-            log_cons.info("df_final shape: %s", tuple(df_final.shape))
-            try:
-                mem_bytes = int(df_final.memory_usage(deep=True).sum())
-                log_cons.info(
-                    "df_final memory footprint: %.2f MB", mem_bytes / (1024 * 1024)
-                )
-            except Exception as e_mem:
-                log_cons.debug("Could not compute memory footprint: %s", e_mem)
-        try:
-            dtypes_preview = {
-                str(k): str(v) for k, v in list(df_final.dtypes.items())[:20]
-            }
-            log_cons.info("df_final dtypes (first 20): %s", dtypes_preview)
-        except Exception as e_dt:
-            log_cons.debug("Could not collect dtype preview: %s", e_dt)
-    except Exception as e_snap:
-        log_cons.warning("Could not snapshot df_final: %s", e_snap)
-
-    if lazy_hats_output:
-        log_cons.info("Skipping full row-count materialization before HATS export.")
-    else:
-        try:
-            n_rows_final = int(len(df_final))
-            log_cons.info("Rows in final dataframe (in-memory): %d", n_rows_final)
-        except Exception as e:
-            log_cons.warning("Could not compute len(df_final): %s", e)
-
-        _ensure_non_empty_final_dataframe(
-            df_final,
-            log_cons,
-            context="after crossmatch/deduplication and before consolidation filters",
-        )
+    log_cons.info(
+        "Final dataframe backend=%s npartitions=%s columns=%d",
+        "dask" if _is_dask_dataframe(df_final) else "pandas",
+        getattr(df_final, "npartitions", 1),
+        len(df_final.columns),
+    )
 
     if combine_mode == "concatenate" and "tie_result" in df_final.columns:
         log_cons.info("Dropping 'tie_result' (concatenate mode)")
@@ -1838,8 +1878,8 @@ def main(
 
         if lazy_hats_output:
             if "tie_result" not in df_final.columns:
-                log_cons.warning(
-                    "Expected 'tie_result' column for removal mode, but it is missing; skipping row filter."
+                raise RuntimeError(
+                    "Expected 'tie_result' column for remove-duplicates mode"
                 )
             else:
                 log_cons.info(
@@ -1871,17 +1911,11 @@ def main(
                     )
                     raise
 
-        if not lazy_hats_output and not df_final.index.is_unique:
-            log_cons.info(
-                "Resetting df_final index (duplicates found) before tie filtering."
-            )
-            df_final = df_final.reset_index(drop=True)
-
         if lazy_hats_output:
             pass
         elif "tie_result" not in df_final.columns:
-            log_cons.warning(
-                "Expected 'tie_result' column for removal mode, but it is missing; skipping row filter."
+            raise RuntimeError(
+                "Expected 'tie_result' column for remove-duplicates mode"
             )
         else:
             log_cons.info(
@@ -1889,250 +1923,36 @@ def main(
                 tie_treatment_option,
             )
             try:
-                tie_num = (
-                    pd.to_numeric(df_final["tie_result"], errors="coerce")
-                    .fillna(0)
-                    .astype("int8")
-                )
-                try:
-                    tie_counts = (
-                        tie_num.value_counts(dropna=False).sort_index().to_dict()
-                    )
-                    log_cons.info("tie_result counts pre-filter: %s", tie_counts)
-                except Exception as e_counts:
-                    log_cons.debug("Could not compute tie_result counts: %s", e_counts)
-                try:
-                    idx_unique = bool(df_final.index.is_unique)
-                    n_dupes = int(df_final.index.duplicated().sum())
-                    log_cons.info(
-                        "df_final index unique=%s duplicated=%d",
-                        idx_unique,
-                        n_dupes,
-                    )
-                except Exception as e_idx:
-                    log_cons.debug("Could not inspect df_final index: %s", e_idx)
-
-                gid = None
-                has_1 = has_2 = has_3 = None
-                if "group_id" in df_final.columns:
-                    try:
-                        gid = df_final["group_id"]
-                        has_1 = (
-                            tie_num.eq(1)
-                            .groupby(gid, dropna=True)
-                            .transform("any")
-                            .fillna(False)
-                        )
-                        has_2 = (
-                            tie_num.eq(2)
-                            .groupby(gid, dropna=True)
-                            .transform("any")
-                            .fillna(False)
-                        )
-                        has_3 = (
-                            tie_num.eq(3)
-                            .groupby(gid, dropna=True)
-                            .transform("any")
-                            .fillna(False)
-                        )
-                        n_groups = int(gid.dropna().nunique())
-                        n_has_1 = int(
-                            tie_num.eq(1).groupby(gid, dropna=True).any().sum()
-                        )
-                        n_has_2 = int(
-                            tie_num.eq(2).groupby(gid, dropna=True).any().sum()
-                        )
-                        n_has_3 = int(
-                            tie_num.eq(3).groupby(gid, dropna=True).any().sum()
-                        )
-                        n_hard = int(((~has_1) & has_2).sum())
-                        log_cons.info(
-                            "tie_result group stats: total=%d has1=%d has2=%d has3=%d hard_tie=%d",
-                            n_groups,
-                            n_has_1,
-                            n_has_2,
-                            n_has_3,
-                            n_hard,
-                        )
-                    except Exception as e_grp:
-                        log_cons.debug("Could not compute group tie stats: %s", e_grp)
-                if tie_treatment_option == "draw_one":
-                    if "group_id" not in df_final.columns:
-                        log_cons.warning(
-                            "tie_treatment_option=draw_one requires group_id; falling back to remove_all."
-                        )
-                        tie_treatment_option = "remove_all"
-                    else:
-                        if gid is None:
-                            gid = df_final["group_id"]
-                        if has_1 is None or has_2 is None:
-                            has_1 = (
-                                tie_num.eq(1)
-                                .groupby(gid, dropna=True)
-                                .transform("any")
-                                .fillna(False)
-                            )
-                            has_2 = (
-                                tie_num.eq(2)
-                                .groupby(gid, dropna=True)
-                                .transform("any")
-                                .fillna(False)
-                            )
-                        if has_3 is None:
-                            has_3 = (
-                                tie_num.eq(3)
-                                .groupby(gid, dropna=True)
-                                .transform("any")
-                                .fillna(False)
-                            )
-                        draw_group = (~has_1) & has_2
-                        cand_mask = draw_group & tie_num.eq(2) & gid.notna()
-                        n_groups = int(gid[cand_mask].nunique())
-                        if n_groups > 0:
-                            rng = np.random.default_rng()
-                            seed = int(rng.integers(0, 2**32 - 1))
-                            cand_pos = np.flatnonzero(
-                                cand_mask.to_numpy(dtype=bool, na_value=False)
-                            )
-                            cand_gid = gid.iloc[cand_pos]
-                            cand_df = pd.DataFrame(
-                                {"pos": cand_pos, "group_id": cand_gid.to_numpy()}
-                            )
-                            winners = (
-                                cand_df.groupby("group_id", dropna=True)
-                                .sample(n=1, random_state=seed)["pos"]
-                                .to_numpy()
-                            )
-                            tie_num = tie_num.copy()
-                            tie_num.iloc[cand_pos] = 0
-                            tie_num.iloc[winners] = 1
-                            df_final = df_final.assign(tie_result=tie_num)
-                            log_cons.info(
-                                "Draw-one resolved %d absolute-tie groups.", n_groups
-                            )
-                        else:
-                            log_cons.info("Draw-one found no absolute-tie groups.")
-
-                if tie_treatment_option == "keep_all":
-                    keep_mask = tie_num.isin([1, 2])
-                    log_cons.info(
-                        "Filtering rows by tie_result in {1,2} (keep_all)."
-                    )
-                else:
-                    keep_mask = tie_num.eq(1)
-                    log_cons.info(
-                        "Filtering winners by tie_result == 1 (%s).",
+                requested_option = tie_treatment_option
+                df_final, tie_treatment_option, n_groups = (
+                    filter_pandas_by_tie_treatment(
+                        df_final,
                         tie_treatment_option,
                     )
-                kept = int(keep_mask.sum())
-                dropped = int(len(df_final) - kept)
-                df_final = df_final.loc[keep_mask].copy()
-                log_cons.info(
-                    "Removed duplicates by tie_treatment_option=%s: kept=%d rows, dropped=%d rows.",
-                    tie_treatment_option,
-                    kept,
-                    dropped,
                 )
-                _ensure_non_empty_final_dataframe(
-                    df_final,
-                    log_cons,
-                    context=(
-                        "after concatenate_and_remove_duplicates "
-                        f"tie_treatment_option={tie_treatment_option}"
-                    ),
-                )
+                if requested_option == "draw_one" and tie_treatment_option != "draw_one":
+                    log_cons.warning(
+                        "tie_treatment_option=draw_one requires group_id; "
+                        "falling back to remove_all."
+                    )
+                elif tie_treatment_option == "draw_one":
+                    log_cons.info(
+                        "Draw-one resolved %d absolute-tie groups.", n_groups
+                    )
             except Exception as e:
                 log_cons.error("FAILED while filtering by tie_treatment_option: %s", e)
                 raise
 
-    if lazy_hats_output:
-        try:
-            sample = df_final.head(1, npartitions=-1, compute=True)
-            if len(sample) == 0:
-                msg = (
-                    "Final catalog is empty before HATS export. "
-                    "Nothing can be consolidated."
-                )
-                log_cons.error(msg)
-                raise RuntimeError(msg)
-        except RuntimeError:
-            raise
-        except Exception as e:
-            log_cons.warning(
-                "Could not sample lazy final dataframe before HATS export: %s", e
-            )
-    else:
+    if not lazy_hats_output:
         _ensure_non_empty_final_dataframe(
             df_final,
             log_cons,
             context="immediately before final export",
         )
-
-    if USE_ARROW_TYPES and lazy_hats_output:
-        log_cons.info(
-            "Skipping pandas convert_dtypes before HATS export; "
-            "save_dataframe will stage the Dask dataframe directly."
-        )
-    elif USE_ARROW_TYPES:
-        log_cons.info(
-            "Converting dtypes with dtype_backend='pyarrow' (USE_ARROW_TYPES=True)"
-        )
-        try:
-            df_final = df_final.convert_dtypes(dtype_backend="pyarrow")
-            for c in df_final.columns:
-                try:
-                    if pd.api.types.is_string_dtype(df_final[c].dtype):
-                        df_final[c] = df_final[c].astype(DTYPE_STR)
-                except Exception as e_cast:
-                    log_cons.debug(
-                        "Could not cast column '%s' to Arrow string: %s", c, e_cast
-                    )
-        except Exception as e:
-            log_cons.error(
-                "FAILED during convert_dtypes(dtype_backend='pyarrow'): %s", e
-            )
-            raise
-
-    if lazy_hats_output:
-        log_cons.info(
-            "Skipping all-missing column scan before HATS export to avoid "
-            "materializing the Dask dataframe."
-        )
     else:
-        # Drop all-empty columns
-        try:
-            to_drop = []
-            for col in df_final.columns:
-                if col in configured_extra_columns:
-                    continue
-                dt = df_final[col].dtype
-                try:
-                    if str(dt) == "string[pyarrow]" or str(dt) == "object":
-                        all_missing = df_final[col].apply(
-                            lambda x: (pd.isna(x) or str(x).strip() == "")
-                        )
-                    else:
-                        all_missing = df_final[col].isna()
-                    if bool(all_missing.all()):
-                        to_drop.append(col)
-                except Exception as e_col:
-                    log_cons.debug(
-                        "Skip emptiness check for column '%s' (dtype=%s): %s",
-                        col,
-                        dt,
-                        e_col,
-                    )
-            if to_drop:
-                log_cons.info(
-                    "Dropping all-missing columns: %s",
-                    ", ".join(sorted(map(str, to_drop))),
-                )
-                df_final = df_final.drop(columns=to_drop)
-            else:
-                log_cons.info("No all-missing columns to drop.")
-        except Exception as e:
-            log_cons.error("FAILED while dropping all-missing columns: %s", e)
-            raise
+        log_cons.info(
+            "Deferring empty-output validation until after HATS parquet staging."
+        )
 
     # Stage final output with your save_dataframe
     staged_output_base = os.path.join(base_dir, output_name)
@@ -2142,11 +1962,6 @@ def main(
         output_format,
     )
     try:
-        try:
-            log_cons.debug("df_final head(3):\n%s", df_final.head(3))
-        except Exception as e_head:
-            log_cons.debug("Could not preview df_final.head(3): %s", e_head)
-
         save_dataframe(
             df_final,
             staged_output_base,

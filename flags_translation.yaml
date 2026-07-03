@@ -15,8 +15,18 @@ delta_z_threshold: 0.001    # Maximum allowed redshift difference (|z1 - z2|) to
                              # Applied only when initial tiebreaking via columns results in a tie (tie_result == 2)
 
 crossmatch_radius_arcsec: 0.5  # Angular radius (in arcseconds) used to perform spatial crossmatching.
+margin_threshold_arcsec: 5.0   # HATS margin used by independent partition-local deduplication.
+margin_warning_fraction: 0.8   # Warn when a boundary component spans this fraction of the margin.
+validate_global_graph_edges: false  # Distributed edge/group consistency check (costs two joins).
+validate_global_tie_invariants: true  # Fail on invalid winner/hard-tie patterns after label merge.
+validate_crd_id_uniqueness: true  # Global nunique validation for every prepared input catalog.
+repartition_prepared_catalogs: false  # Extra full-data pass to resize prepared partitions.
+prepared_partition_size: "256MB"  # Used only when repartition_prepared_catalogs is enabled.
 
 crossmatch_n_neighbors: 10      # Number of nearest neighbors to consider during crossmatching.
+crossmatch_saturation_enabled: true  # Compute per-source saturation metrics and thresholds.
+crossmatch_saturation_warn_fraction: 0.01  # Warn when >=1% of all source objects reach n_neighbors.
+crossmatch_saturation_fail_fraction: 0.10  # Fail at >=10%; set null to disable failure.
 
 instrument_type_priority:
   s: 3     # Spectroscopic (most reliable type)
