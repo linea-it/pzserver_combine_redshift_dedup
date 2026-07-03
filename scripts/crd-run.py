@@ -31,7 +31,7 @@ import dask
 import dask.dataframe as dd
 import pandas as pd
 import numpy as np
-from dask.distributed import Client, as_completed, performance_report
+from dask.distributed import Client, as_completed, performance_report, wait as dask_wait
 import lsdb
 
 # -----------------------
@@ -156,7 +156,9 @@ def _cancel_local_futures(
     )
 
 
-def _remove_artifact_if_exists(path: str, lg: logging.LoggerAdapter, *, label: str) -> None:
+def _remove_artifact_if_exists(
+    path: str, lg: logging.LoggerAdapter, *, label: str
+) -> None:
     """Remove a possibly partial file or directory left by a failed phase."""
     if not path:
         return
@@ -810,7 +812,6 @@ def main(
     # Dask perf report (global)
     global_report_path = os.path.join(logs_dir, "main_dask_report.html")
     with performance_report(filename=global_report_path):
-
         # -----------------------
         # 1) PREPARATION
         # -----------------------
@@ -1034,7 +1035,6 @@ def main(
             "concatenate_and_mark_duplicates",
             "concatenate_and_remove_duplicates",
         ):
-
             try:
                 if crossmatch_already_done:
                     # No auto needed: merges already completed and merged_step{final} present
@@ -1057,7 +1057,9 @@ def main(
                         else:
                             queue_auto.append(info)
 
-                    max_inflight_auto = int(param_config.get("auto_cross_max_inflight", 2))
+                    max_inflight_auto = int(
+                        param_config.get("auto_cross_max_inflight", 2)
+                    )
                     if max_inflight_auto < 1:
                         raise ValueError("auto_cross_max_inflight must be at least 1")
                     log_auto.info(
@@ -1096,9 +1098,7 @@ def main(
                                 inflight2[_submit_auto(auto_executor, info)] = info
 
                             while inflight2:
-                                done, _ = wait(
-                                    inflight2, return_when=FIRST_COMPLETED
-                                )
+                                done, _ = wait(inflight2, return_when=FIRST_COMPLETED)
                                 for fut in done:
                                     info_ctx = inflight2.pop(fut)
                                     name = info_ctx.get("internal_name", "<unknown>")
@@ -1143,9 +1143,9 @@ def main(
 
                                     if queue_auto:
                                         nxt = queue_auto.pop(0)
-                                        inflight2[
-                                            _submit_auto(auto_executor, nxt)
-                                        ] = nxt
+                                        inflight2[_submit_auto(auto_executor, nxt)] = (
+                                            nxt
+                                        )
 
                         log_auto.info(
                             "Auto crossmatch completed for %d catalogs (re/computed)",
@@ -1258,7 +1258,6 @@ def main(
             "concatenate_and_mark_duplicates",
             "concatenate_and_remove_duplicates",
         ):
-
             if crossmatch_already_done:
                 # Crossmatch chain already finished previously (by merged_step{final} presence)
                 log_cross.info(
@@ -1439,9 +1438,7 @@ def main(
                                                     e,
                                                 )
 
-                                        ready.append(
-                                            (f"merged_step{sid}", out_root)
-                                        )
+                                        ready.append((f"merged_step{sid}", out_root))
                                         final_collection_path = out_root
 
                                     while _submit_pair(cross_executor):
@@ -1573,7 +1570,14 @@ def main(
             # Diagnostics / outputs
             # - edge_log: enable edge diagnostics (warn on star-neighbor exclusions)
             # - group_col: set to None to disable exporting group labels
-            edge_log = True
+            edge_log = bool(
+                translation_config.get("dedup_edge_diagnostics_enabled", False)
+            )
+            representative_radius_diagnostics_enabled = bool(
+                translation_config.get(
+                    "representative_radius_diagnostics_enabled", False
+                )
+            )
             group_col = "group_id"  # None to deactivate
             #######################################################################
 
@@ -1620,9 +1624,18 @@ def main(
                         crossmatch_radius_arcsec=crossmatch_radius_arcsec,
                         margin_threshold_arcsec=margin_threshold_arcsec,
                         margin_warning_fraction=margin_warning_fraction,
+                        representative_radius_diagnostics_enabled=representative_radius_diagnostics_enabled,
                     )
                     log_dedup.info(
-                        "Labels graph built (lazy). Preparing RHS for Dask merge..."
+                        "Labels graph built (lazy). Persisting compact labels for "
+                        "validation and final merge reuse..."
+                    )
+                    labels_dd = labels_dd.persist()
+                    dask_wait(labels_dd)
+                    log_dedup.info(
+                        "Compact labels persisted: npartitions=%s columns=%d",
+                        labels_dd.npartitions,
+                        len(labels_dd.columns),
                     )
                 except Exception as e:
                     import traceback as _tb
@@ -1712,35 +1725,39 @@ def main(
                         star_mask = dd.to_numeric(
                             merged["z_flag_homogenized"], errors="coerce"
                         ).eq(6.0)
-                        merged["tie_result"] = merged["tie_result"].mask(
-                            star_mask, np.int8(3)
-                        ).astype("Int8")
+                        merged["tie_result"] = (
+                            merged["tie_result"]
+                            .mask(star_mask, np.int8(3))
+                            .astype("Int8")
+                        )
 
                     validate_edges = bool(
                         translation_config.get("validate_global_graph_edges", False)
                     )
                     validate_ties = bool(
-                        translation_config.get(
-                            "validate_global_tie_invariants", False
-                        )
+                        translation_config.get("validate_global_tie_invariants", False)
                     )
-                    representative_radius = labels_dd[
-                        REPRESENTATIVE_RADIUS_DIAGNOSTIC_COLUMN
-                    ]
-                    representative_radius_valid = representative_radius.dropna()
-                    validation_tasks = [
-                        representative_radius_valid.count(),
-                        representative_radius_valid.gt(
-                            crossmatch_radius_arcsec
-                        ).sum(),
-                        representative_radius_valid.gt(
-                            2.0 * crossmatch_radius_arcsec
-                        ).sum(),
-                        representative_radius_valid.gt(
-                            margin_threshold_arcsec
-                        ).sum(),
-                        representative_radius_valid.max(),
-                    ]
+                    validation_tasks = []
+                    if representative_radius_diagnostics_enabled:
+                        representative_radius = labels_dd[
+                            REPRESENTATIVE_RADIUS_DIAGNOSTIC_COLUMN
+                        ]
+                        representative_radius_valid = representative_radius.dropna()
+                        validation_tasks.extend(
+                            [
+                                representative_radius_valid.count(),
+                                representative_radius_valid.gt(
+                                    crossmatch_radius_arcsec
+                                ).sum(),
+                                representative_radius_valid.gt(
+                                    2.0 * crossmatch_radius_arcsec
+                                ).sum(),
+                                representative_radius_valid.gt(
+                                    margin_threshold_arcsec
+                                ).sum(),
+                                representative_radius_valid.max(),
+                            ]
+                        )
                     if validate_edges:
                         mismatch_lazy, dangling_lazy = (
                             count_global_edge_group_mismatches(merged)
@@ -1748,37 +1765,39 @@ def main(
                         validation_tasks.extend([mismatch_lazy, dangling_lazy])
                     if validate_ties:
                         invalid_groups_lazy = count_global_tie_invariant_violations(
-                            merged
+                            labels_dd,
+                            z_flag_col=None,
                         )
 
                         validation_tasks.append(invalid_groups_lazy)
 
                     validation_results = iter(dask.compute(*validation_tasks))
-                    representative_components = int(next(validation_results))
-                    representative_exceed_radius = int(next(validation_results))
-                    representative_exceed_twice_radius = int(
-                        next(validation_results)
-                    )
-                    representative_exceed_margin = int(next(validation_results))
-                    representative_max_radius = float(next(validation_results))
-                    representative_fraction = (
-                        representative_exceed_radius / representative_components
-                        if representative_components
-                        else 0.0
-                    )
-                    log_dedup.info(
-                        "Representative-radius diagnostics: components=%d "
-                        "radius=%.3farcsec exceeding_radius=%d "
-                        "fraction_exceeding=%.6f exceeding_twice_radius=%d "
-                        "exceeding_margin=%d max_radius=%.4farcsec",
-                        representative_components,
-                        crossmatch_radius_arcsec,
-                        representative_exceed_radius,
-                        representative_fraction,
-                        representative_exceed_twice_radius,
-                        representative_exceed_margin,
-                        representative_max_radius,
-                    )
+                    if representative_radius_diagnostics_enabled:
+                        representative_components = int(next(validation_results))
+                        representative_exceed_radius = int(next(validation_results))
+                        representative_exceed_twice_radius = int(
+                            next(validation_results)
+                        )
+                        representative_exceed_margin = int(next(validation_results))
+                        representative_max_radius = float(next(validation_results))
+                        representative_fraction = (
+                            representative_exceed_radius / representative_components
+                            if representative_components
+                            else 0.0
+                        )
+                        log_dedup.info(
+                            "Representative-radius diagnostics: components=%d "
+                            "radius=%.3farcsec exceeding_radius=%d "
+                            "fraction_exceeding=%.6f exceeding_twice_radius=%d "
+                            "exceeding_margin=%d max_radius=%.4farcsec",
+                            representative_components,
+                            crossmatch_radius_arcsec,
+                            representative_exceed_radius,
+                            representative_fraction,
+                            representative_exceed_twice_radius,
+                            representative_exceed_margin,
+                            representative_max_radius,
+                        )
                     if validate_edges:
                         mismatch_count = int(next(validation_results))
                         dangling_count = int(next(validation_results))
@@ -1973,15 +1992,16 @@ def main(
                         tie_treatment_option,
                     )
                 )
-                if requested_option == "draw_one" and tie_treatment_option != "draw_one":
+                if (
+                    requested_option == "draw_one"
+                    and tie_treatment_option != "draw_one"
+                ):
                     log_cons.warning(
                         "tie_treatment_option=draw_one requires group_id; "
                         "falling back to remove_all."
                     )
                 elif tie_treatment_option == "draw_one":
-                    log_cons.info(
-                        "Draw-one resolved %d absolute-tie groups.", n_groups
-                    )
+                    log_cons.info("Draw-one resolved %d absolute-tie groups.", n_groups)
             except Exception as e:
                 log_cons.error("FAILED while filtering by tie_treatment_option: %s", e)
                 raise

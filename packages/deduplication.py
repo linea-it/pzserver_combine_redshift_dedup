@@ -28,9 +28,7 @@ import numpy as np
 import pandas as pd
 import dask.dataframe as dd
 
-REPRESENTATIVE_RADIUS_DIAGNOSTIC_COLUMN = (
-    "_diag_representative_max_radius_arcsec"
-)
+REPRESENTATIVE_RADIUS_DIAGNOSTIC_COLUMN = "_diag_representative_max_radius_arcsec"
 
 # -----------------------
 # Project
@@ -191,13 +189,9 @@ def _log_representative_radius_diagnostics(
         return diagnostic
 
     tie = pd.to_numeric(work[tie_col], errors="coerce")
-    work["_representative_rank"] = np.select(
-        [tie.eq(1), tie.eq(2)], [0, 1], default=2
-    )
+    work["_representative_rank"] = np.select([tie.eq(1), tie.eq(2)], [0, 1], default=2)
     representatives = (
-        work.sort_values(
-            [group_col, "_representative_rank", crd_col], kind="stable"
-        )
+        work.sort_values([group_col, "_representative_rank", crd_col], kind="stable")
         .drop_duplicates(group_col)
         .set_index(group_col)[["ra", "dec"]]
         .rename(columns={"ra": "_rep_ra", "dec": "_rep_dec"})
@@ -216,9 +210,7 @@ def _log_representative_radius_diagnostics(
     work["_radius_arcsec"] = np.degrees(angular) * 3600.0
     max_radius = work.groupby(group_col)["_radius_arcsec"].max()
     canonical_id = work.groupby(group_col)[crd_col].transform("min")
-    canonical_rows = work[crd_col].astype("string").eq(
-        canonical_id.astype("string")
-    )
+    canonical_rows = work[crd_col].astype("string").eq(canonical_id.astype("string"))
     if "_src" in frame.columns:
         canonical_rows &= frame.loc[work.index, "_src"].eq("main")
     selected = work.loc[canonical_rows].drop_duplicates(group_col)
@@ -299,8 +291,12 @@ def filter_pandas_by_tie_treatment(
             effective = "remove_all"
         else:
             gid = df[group_col]
-            has_1 = tie_num.eq(1).groupby(gid, dropna=True).transform("any").fillna(False)
-            has_2 = tie_num.eq(2).groupby(gid, dropna=True).transform("any").fillna(False)
+            has_1 = (
+                tie_num.eq(1).groupby(gid, dropna=True).transform("any").fillna(False)
+            )
+            has_2 = (
+                tie_num.eq(2).groupby(gid, dropna=True).transform("any").fillna(False)
+            )
             candidates = (~has_1) & has_2 & tie_num.eq(2) & gid.notna()
             candidate_positions = np.flatnonzero(
                 candidates.to_numpy(dtype=bool, na_value=False)
@@ -385,8 +381,10 @@ def count_global_edge_group_mismatches(
     ).drop_duplicates()
 
     zf = dd.to_numeric(df[z_flag_col], errors="coerce")
-    groups = df[[crd_col, group_col]].assign(is_star=zf.eq(6.0)).rename(
-        columns={crd_col: "node", group_col: "node_group"}
+    groups = (
+        df[[crd_col, group_col]]
+        .assign(is_star=zf.eq(6.0))
+        .rename(columns={crd_col: "node", group_col: "node_group"})
     )
     groups = groups.assign(node=groups["node"].astype("string[pyarrow]"))
     groups = groups.drop_duplicates(subset=["node"])
@@ -405,9 +403,7 @@ def count_global_edge_group_mismatches(
 
     dangling = checked["group_u"].isna() | checked["group_v"].isna()
     both_nonstar = checked["is_star_u"].eq(False) & checked["is_star_v"].eq(False)
-    mismatch = (
-        (~dangling) & both_nonstar & checked["group_u"].ne(checked["group_v"])
-    )
+    mismatch = (~dangling) & both_nonstar & checked["group_u"].ne(checked["group_v"])
     return mismatch.sum(), dangling.sum()
 
 
@@ -416,12 +412,16 @@ def count_global_tie_invariant_violations(
     *,
     group_col: str = "group_id",
     tie_col: str = "tie_result",
-    z_flag_col: str = "z_flag_homogenized",
+    z_flag_col: str | None = "z_flag_homogenized",
 ):
     """Return a lazy count of groups violating final tie-result semantics."""
-    zf = dd.to_numeric(df[z_flag_col], errors="coerce")
     tie = dd.to_numeric(df[tie_col], errors="coerce")
-    nonstars = df.loc[~zf.eq(6.0), [group_col]].assign(
+    if z_flag_col is None:
+        nonstar_mask = ~tie.eq(3)
+    else:
+        zf = dd.to_numeric(df[z_flag_col], errors="coerce")
+        nonstar_mask = ~zf.eq(6.0)
+    nonstars = df.loc[nonstar_mask, [group_col]].assign(
         n=1,
         n0=tie.eq(0).astype("int8"),
         n1=tie.eq(1).astype("int8"),
@@ -432,14 +432,10 @@ def count_global_tie_invariant_violations(
         {"n": "sum", "n0": "sum", "n1": "sum", "n2": "sum", "n_invalid": "sum"}
     )
     valid_single = (
-        stats["n1"].eq(1)
-        & stats["n2"].eq(0)
-        & stats["n0"].eq(stats["n"] - 1)
+        stats["n1"].eq(1) & stats["n2"].eq(0) & stats["n0"].eq(stats["n"] - 1)
     )
     valid_hard = (
-        stats["n1"].eq(0)
-        & stats["n2"].ge(2)
-        & stats["n0"].eq(stats["n"] - stats["n2"])
+        stats["n1"].eq(0) & stats["n2"].ge(2) & stats["n0"].eq(stats["n"] - stats["n2"])
     )
     invalid = stats["n_invalid"].gt(0) | ~(valid_single | valid_hard)
     missing_group_rows = nonstars[group_col].isna().sum()
@@ -1450,6 +1446,7 @@ def _dedup_local_with_margin(
     crossmatch_radius_arcsec: float = 0.5,
     margin_threshold_arcsec: float = 5.0,
     margin_warning_fraction: float = 0.8,
+    representative_radius_diagnostics_enabled: bool = False,
 ) -> pd.DataFrame:
     """Run dedup on (main + margin) and return labels for main rows only.
 
@@ -1488,8 +1485,9 @@ def _dedup_local_with_margin(
         cols = {
             crd_col: pd.Series(dtype="string[pyarrow]"),
             tie_col: pd.Series(dtype="Int8"),
-            REPRESENTATIVE_RADIUS_DIAGNOSTIC_COLUMN: pd.Series(dtype="float64"),
         }
+        if representative_radius_diagnostics_enabled:
+            cols[REPRESENTATIVE_RADIUS_DIAGNOSTIC_COLUMN] = pd.Series(dtype="float64")
         if group_col:
             cols[group_col] = pd.Series(dtype="Int64")
         return pd.DataFrame(cols)
@@ -1519,8 +1517,9 @@ def _dedup_local_with_margin(
         cols = {
             crd_col: pd.Series(dtype="string[pyarrow]"),
             tie_col: pd.Series(dtype="Int8"),
-            REPRESENTATIVE_RADIUS_DIAGNOSTIC_COLUMN: pd.Series(dtype="float64"),
         }
+        if representative_radius_diagnostics_enabled:
+            cols[REPRESENTATIVE_RADIUS_DIAGNOSTIC_COLUMN] = pd.Series(dtype="float64")
         if group_col:
             cols[group_col] = pd.Series(dtype="Int64")
         return pd.DataFrame(cols)
@@ -1540,16 +1539,17 @@ def _dedup_local_with_margin(
         logger=_phase_logger(),
         group_col=group_col,
     )
-    solved[REPRESENTATIVE_RADIUS_DIAGNOSTIC_COLUMN] = (
-        _log_representative_radius_diagnostics(
-            solved,
-            group_col=group_col,
-            tie_col=tie_col,
-            crd_col=crd_col,
-            radius_arcsec=crossmatch_radius_arcsec,
-            partition_tag=partition_tag,
+    if representative_radius_diagnostics_enabled:
+        solved[REPRESENTATIVE_RADIUS_DIAGNOSTIC_COLUMN] = (
+            _log_representative_radius_diagnostics(
+                solved,
+                group_col=group_col,
+                tie_col=tie_col,
+                crd_col=crd_col,
+                radius_arcsec=crossmatch_radius_arcsec,
+                partition_tag=partition_tag,
+            )
         )
-    )
 
     if group_col and group_col in solved.columns:
         # Every non-star edge whose endpoints are present in this local view must
@@ -1572,8 +1572,11 @@ def _dedup_local_with_margin(
                     f"{partition_tag}: non-star edge endpoints received different group_id values"
                 )
 
-        src_counts = solved.groupby(group_col)["_src"].nunique()
-        boundary_groups = src_counts[src_counts > 1].index
+        if representative_radius_diagnostics_enabled:
+            src_counts = solved.groupby(group_col)["_src"].nunique()
+            boundary_groups = src_counts[src_counts > 1].index
+        else:
+            boundary_groups = pd.Index([])
         if len(boundary_groups):
             lg = _phase_logger()
             lg.info(
@@ -1612,7 +1615,9 @@ def _dedup_local_with_margin(
                 )
 
     # Keep only main rows and required columns.
-    cols = [crd_col, tie_col, REPRESENTATIVE_RADIUS_DIAGNOSTIC_COLUMN]
+    cols = [crd_col, tie_col]
+    if representative_radius_diagnostics_enabled:
+        cols.append(REPRESENTATIVE_RADIUS_DIAGNOSTIC_COLUMN)
     if group_col and (group_col in solved.columns):
         cols.append(group_col)
 
@@ -1621,9 +1626,10 @@ def _dedup_local_with_margin(
     # Stable dtypes.
     out[crd_col] = _ensure_string_pyarrow(out[crd_col])
     out[tie_col] = _nullable_int8(out[tie_col])
-    out[REPRESENTATIVE_RADIUS_DIAGNOSTIC_COLUMN] = pd.to_numeric(
-        out[REPRESENTATIVE_RADIUS_DIAGNOSTIC_COLUMN], errors="coerce"
-    ).astype("float64")
+    if representative_radius_diagnostics_enabled:
+        out[REPRESENTATIVE_RADIUS_DIAGNOSTIC_COLUMN] = pd.to_numeric(
+            out[REPRESENTATIVE_RADIUS_DIAGNOSTIC_COLUMN], errors="coerce"
+        ).astype("float64")
     if group_col and (group_col in out.columns):
         out[group_col] = out[group_col].astype("Int64")
 
@@ -1650,6 +1656,7 @@ def _dedup_alignfunc_with_margin(
     crossmatch_radius_arcsec: float = 0.5,
     margin_threshold_arcsec: float = 5.0,
     margin_warning_fraction: float = 0.8,
+    representative_radius_diagnostics_enabled: bool = False,
 ) -> pd.DataFrame:
     """Adapter for LSDB/HATS `align_and_apply`.
 
@@ -1680,6 +1687,7 @@ def _dedup_alignfunc_with_margin(
         crossmatch_radius_arcsec=crossmatch_radius_arcsec,
         margin_threshold_arcsec=margin_threshold_arcsec,
         margin_warning_fraction=margin_warning_fraction,
+        representative_radius_diagnostics_enabled=representative_radius_diagnostics_enabled,
     )
 
 
@@ -1696,6 +1704,7 @@ def _dedup_local_no_margin(
     edge_log: bool = False,
     group_col: str | None = None,
     crossmatch_radius_arcsec: float = 0.5,
+    representative_radius_diagnostics_enabled: bool = False,
 ) -> pd.DataFrame:
     """Run dedup using only the main partition.
 
@@ -1730,8 +1739,9 @@ def _dedup_local_no_margin(
         cols = {
             crd_col: pd.Series(dtype="string[pyarrow]"),
             tie_col: pd.Series(dtype="Int8"),
-            REPRESENTATIVE_RADIUS_DIAGNOSTIC_COLUMN: pd.Series(dtype="float64"),
         }
+        if representative_radius_diagnostics_enabled:
+            cols[REPRESENTATIVE_RADIUS_DIAGNOSTIC_COLUMN] = pd.Series(dtype="float64")
         if group_col:
             cols[group_col] = pd.Series(dtype="Int64")
         return pd.DataFrame(cols)
@@ -1758,19 +1768,22 @@ def _dedup_local_no_margin(
         logger=_phase_logger(),
         group_col=group_col,
     )
-    solved[REPRESENTATIVE_RADIUS_DIAGNOSTIC_COLUMN] = (
-        _log_representative_radius_diagnostics(
-            solved,
-            group_col=group_col,
-            tie_col=tie_col,
-            crd_col=crd_col,
-            radius_arcsec=crossmatch_radius_arcsec,
-            partition_tag=partition_tag,
+    if representative_radius_diagnostics_enabled:
+        solved[REPRESENTATIVE_RADIUS_DIAGNOSTIC_COLUMN] = (
+            _log_representative_radius_diagnostics(
+                solved,
+                group_col=group_col,
+                tie_col=tie_col,
+                crd_col=crd_col,
+                radius_arcsec=crossmatch_radius_arcsec,
+                partition_tag=partition_tag,
+            )
         )
-    )
 
     # Select output columns.
-    cols = [crd_col, tie_col, REPRESENTATIVE_RADIUS_DIAGNOSTIC_COLUMN]
+    cols = [crd_col, tie_col]
+    if representative_radius_diagnostics_enabled:
+        cols.append(REPRESENTATIVE_RADIUS_DIAGNOSTIC_COLUMN)
     if group_col and (group_col in solved.columns):
         cols.append(group_col)
 
@@ -1779,9 +1792,10 @@ def _dedup_local_no_margin(
     # Stable dtypes.
     out[crd_col] = _ensure_string_pyarrow(out[crd_col])
     out[tie_col] = _nullable_int8(out[tie_col])
-    out[REPRESENTATIVE_RADIUS_DIAGNOSTIC_COLUMN] = pd.to_numeric(
-        out[REPRESENTATIVE_RADIUS_DIAGNOSTIC_COLUMN], errors="coerce"
-    ).astype("float64")
+    if representative_radius_diagnostics_enabled:
+        out[REPRESENTATIVE_RADIUS_DIAGNOSTIC_COLUMN] = pd.to_numeric(
+            out[REPRESENTATIVE_RADIUS_DIAGNOSTIC_COLUMN], errors="coerce"
+        ).astype("float64")
     if group_col and (group_col in out.columns):
         out[group_col] = out[group_col].astype("Int64")
 
@@ -1824,6 +1838,7 @@ def run_dedup_with_lsdb_map_partitions(
     crossmatch_radius_arcsec: float = 0.5,
     margin_threshold_arcsec: float = 5.0,
     margin_warning_fraction: float = 0.8,
+    representative_radius_diagnostics_enabled: bool = False,
 ) -> dd.DataFrame:
     """Compute dedup labels per partition via LSDB; align divisions if margin exists.
 
@@ -1887,8 +1902,11 @@ def run_dedup_with_lsdb_map_partitions(
         meta_dict = {
             crd_col: pd.Series(dtype="string[pyarrow]"),
             tie_col: pd.Series(dtype="Int8"),
-            REPRESENTATIVE_RADIUS_DIAGNOSTIC_COLUMN: pd.Series(dtype="float64"),
         }
+        if representative_radius_diagnostics_enabled:
+            meta_dict[REPRESENTATIVE_RADIUS_DIAGNOSTIC_COLUMN] = pd.Series(
+                dtype="float64"
+            )
         if group_col:
             meta_dict[group_col] = pd.Series(dtype="Int64")
         meta = pd.DataFrame(meta_dict)
@@ -1908,6 +1926,7 @@ def run_dedup_with_lsdb_map_partitions(
                 edge_log=edge_log,
                 group_col=group_col,
                 crossmatch_radius_arcsec=crossmatch_radius_arcsec,
+                representative_radius_diagnostics_enabled=representative_radius_diagnostics_enabled,
             )
         else:
             # ------------------------------------------------------------------
@@ -1973,6 +1992,7 @@ def run_dedup_with_lsdb_map_partitions(
                     crossmatch_radius_arcsec=float(crossmatch_radius_arcsec),
                     margin_threshold_arcsec=float(margin_threshold_arcsec),
                     margin_warning_fraction=float(margin_warning_fraction),
+                    representative_radius_diagnostics_enabled=representative_radius_diagnostics_enabled,
                 )
 
             # Build a Dask DataFrame from the delayed per-pixel label frames.
@@ -1982,10 +2002,11 @@ def run_dedup_with_lsdb_map_partitions(
         assign_map = {
             crd_col: labels_dd[crd_col].astype("string[pyarrow]"),
             tie_col: labels_dd[tie_col].astype("Int8"),
-            REPRESENTATIVE_RADIUS_DIAGNOSTIC_COLUMN: labels_dd[
-                REPRESENTATIVE_RADIUS_DIAGNOSTIC_COLUMN
-            ].astype("float64"),
         }
+        if representative_radius_diagnostics_enabled:
+            assign_map[REPRESENTATIVE_RADIUS_DIAGNOSTIC_COLUMN] = labels_dd[
+                REPRESENTATIVE_RADIUS_DIAGNOSTIC_COLUMN
+            ].astype("float64")
         if group_col:
             assign_map[group_col] = labels_dd[group_col].astype("Int64")
         labels_dd = labels_dd.assign(**assign_map)

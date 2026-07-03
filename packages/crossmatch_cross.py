@@ -796,13 +796,14 @@ def crossmatch_tiebreak(
     saturation_enabled = bool(
         (translation_config or {}).get("crossmatch_saturation_enabled", False)
     )
+    geometry_diagnostics_enabled = bool(
+        (translation_config or {}).get("crossmatch_geometry_diagnostics_enabled", False)
+    )
     warn_fraction = 0.01
     fail_raw = None
     if saturation_enabled:
         warn_fraction = float(
-            (translation_config or {}).get(
-                "crossmatch_saturation_warn_fraction", 0.01
-            )
+            (translation_config or {}).get("crossmatch_saturation_warn_fraction", 0.01)
         )
         fail_raw = (translation_config or {}).get(
             "crossmatch_saturation_fail_fraction", 0.10
@@ -810,7 +811,11 @@ def crossmatch_tiebreak(
     fail_fraction = None if fail_raw is None else float(fail_raw)
     if saturation_enabled and not 0.0 <= warn_fraction <= 1.0:
         raise ValueError("crossmatch_saturation_warn_fraction must be in [0, 1]")
-    if saturation_enabled and fail_fraction is not None and not warn_fraction <= fail_fraction <= 1.0:
+    if (
+        saturation_enabled
+        and fail_fraction is not None
+        and not warn_fraction <= fail_fraction <= 1.0
+    ):
         raise ValueError(
             "crossmatch_saturation_fail_fraction must be null or in "
             "[crossmatch_saturation_warn_fraction, 1]"
@@ -832,14 +837,14 @@ def crossmatch_tiebreak(
         radius_arcsec=radius,
         n_neighbors=k,
         suffixes=("left", "right"),
-        suffix_method='all_columns',
+        suffix_method="all_columns",
     )
     logger.info("Crossmatch done (%.2fs)", time.time() - t0)
 
     # 2) Build adjacency from CRD_ID pairs
     t0 = time.time()
     pair_cols = ["CRD_IDleft", "CRD_IDright"]
-    if "_dist_arcsec" in xmatched._ddf.columns:
+    if geometry_diagnostics_enabled and "_dist_arcsec" in xmatched._ddf.columns:
         pair_cols.append("_dist_arcsec")
     if saturation_enabled and "sourceleft" in xmatched._ddf.columns:
         pair_cols.append("sourceleft")
@@ -848,14 +853,15 @@ def crossmatch_tiebreak(
         pairs_adj: Dict[str, Set[str]] = {}
         logger.info("No pairs found; `compared_to` remains unchanged.")
     else:
-        log_pair_separation_diagnostics(
-            pairs_df,
-            left_col="CRD_IDleft",
-            right_col="CRD_IDright",
-            radius_arcsec=radius,
-            logger=logger,
-            context=f"crossmatch step={step}",
-        )
+        if geometry_diagnostics_enabled:
+            log_pair_separation_diagnostics(
+                pairs_df,
+                left_col="CRD_IDleft",
+                right_col="CRD_IDright",
+                radius_arcsec=radius,
+                logger=logger,
+                context=f"crossmatch step={step}",
+            )
         if saturation_enabled:
             _log_neighbor_saturation(
                 pairs_df,
@@ -875,11 +881,12 @@ def crossmatch_tiebreak(
         pairs_adj = _adjacency_from_pairs(
             pairs_df["CRD_IDleft"], pairs_df["CRD_IDright"]
         )
-        log_component_size_diagnostics(
-            pairs_adj,
-            logger=logger,
-            context=f"crossmatch step={step}",
-        )
+        if geometry_diagnostics_enabled:
+            log_component_size_diagnostics(
+                pairs_adj,
+                logger=logger,
+                context=f"crossmatch step={step}",
+            )
     total_links = sum(len(v) for v in pairs_adj.values())
     logger.info(
         "Adjacency built: links=%d nodes=%d (%.2fs)",
