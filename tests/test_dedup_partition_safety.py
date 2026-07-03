@@ -151,6 +151,27 @@ def test_global_tie_validation_detects_invalid_patterns():
     assert count_global_tie_invariant_violations(frame).compute() == 1
 
 
+def test_global_tie_validation_accepts_compact_labels_without_z_flag():
+    labels = dd.from_pandas(
+        pd.DataFrame(
+            {
+                "group_id": [1, 1, 2, 2, 3],
+                "tie_result": [1, 0, 2, 2, 3],
+            }
+        ),
+        npartitions=2,
+        sort=False,
+    )
+
+    assert (
+        count_global_tie_invariant_violations(
+            labels,
+            z_flag_col=None,
+        ).compute()
+        == 0
+    )
+
+
 def test_representative_radius_diagnostic_warns_for_transitive_chain():
     frame = pd.DataFrame(
         {

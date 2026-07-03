@@ -258,6 +258,7 @@ def _self_xmatch_pairs(
     total_by_source: dict,
     warn_fraction: float,
     fail_fraction: float | None,
+    geometry_diagnostics_enabled: bool = False,
 ) -> Dict[str, Set[str]]:
     """Run a self-crossmatch and return an adjacency (CRD_ID -> neighbor ids).
 
@@ -280,10 +281,10 @@ def _self_xmatch_pairs(
         radius_arcsec=radius_arcsec,
         n_neighbors=n_neighbors,
         suffixes=("left", "right"),
-        suffix_method='all_columns',
+        suffix_method="all_columns",
     )
     pair_cols = ["CRD_IDleft", "CRD_IDright"]
-    if "_dist_arcsec" in xmatched.columns:
+    if geometry_diagnostics_enabled and "_dist_arcsec" in xmatched.columns:
         pair_cols.append("_dist_arcsec")
     if total_by_source is not None and "sourceleft" in xmatched.columns:
         pair_cols.append("sourceleft")
@@ -291,14 +292,15 @@ def _self_xmatch_pairs(
     if len(pairs_df) == 0:
         logger.info("Self-crossmatch: no pairs found; `compared_to` remains unchanged.")
         return {}
-    log_pair_separation_diagnostics(
-        pairs_df,
-        left_col="CRD_IDleft",
-        right_col="CRD_IDright",
-        radius_arcsec=radius_arcsec,
-        logger=logger,
-        context="Self-crossmatch",
-    )
+    if geometry_diagnostics_enabled:
+        log_pair_separation_diagnostics(
+            pairs_df,
+            left_col="CRD_IDleft",
+            right_col="CRD_IDright",
+            radius_arcsec=radius_arcsec,
+            logger=logger,
+            context="Self-crossmatch",
+        )
     if total_by_source is not None:
         _log_neighbor_saturation(
             pairs_df,
@@ -314,11 +316,12 @@ def _self_xmatch_pairs(
     ].drop_duplicates()
 
     adj = _adjacency_from_pairs(pairs_df["CRD_IDleft"], pairs_df["CRD_IDright"])
-    log_component_size_diagnostics(
-        adj,
-        logger=logger,
-        context="Self-crossmatch",
-    )
+    if geometry_diagnostics_enabled:
+        log_component_size_diagnostics(
+            adj,
+            logger=logger,
+            context="Self-crossmatch",
+        )
     total_links = sum(len(v) for v in adj.values())
     logger.info(
         "Self-crossmatch: %d unique pairs across %d nodes", total_links, len(adj)
@@ -390,13 +393,14 @@ def crossmatch_auto(
     saturation_enabled = bool(
         (translation_config or {}).get("crossmatch_saturation_enabled", False)
     )
+    geometry_diagnostics_enabled = bool(
+        (translation_config or {}).get("crossmatch_geometry_diagnostics_enabled", False)
+    )
     warn_fraction = 0.01
     fail_raw = None
     if saturation_enabled:
         warn_fraction = float(
-            (translation_config or {}).get(
-                "crossmatch_saturation_warn_fraction", 0.01
-            )
+            (translation_config or {}).get("crossmatch_saturation_warn_fraction", 0.01)
         )
         fail_raw = (translation_config or {}).get(
             "crossmatch_saturation_fail_fraction", 0.10
@@ -404,7 +408,11 @@ def crossmatch_auto(
     fail_fraction = None if fail_raw is None else float(fail_raw)
     if saturation_enabled and not 0.0 <= warn_fraction <= 1.0:
         raise ValueError("crossmatch_saturation_warn_fraction must be in [0, 1]")
-    if saturation_enabled and fail_fraction is not None and not warn_fraction <= fail_fraction <= 1.0:
+    if (
+        saturation_enabled
+        and fail_fraction is not None
+        and not warn_fraction <= fail_fraction <= 1.0
+    ):
         raise ValueError(
             "crossmatch_saturation_fail_fraction must be null or in "
             "[crossmatch_saturation_warn_fraction, 1]"
@@ -445,6 +453,7 @@ def crossmatch_auto(
         total_by_source if saturation_enabled else None,
         warn_fraction,
         fail_fraction,
+        geometry_diagnostics_enabled,
     )
 
     # 2) Update `compared_to`
