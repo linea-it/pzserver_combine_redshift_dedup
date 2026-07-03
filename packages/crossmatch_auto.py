@@ -36,6 +36,7 @@ from crossmatch_diagnostics import (
     log_component_size_diagnostics,
     log_neighbor_count_diagnostics,
     log_pair_separation_diagnostics,
+    project_catalog_for_pair_crossmatch,
 )
 from utils import get_phase_logger
 
@@ -277,8 +278,12 @@ def _self_xmatch_pairs(
         radius_arcsec,
         n_neighbors,
     )
-    xmatched = catalog.crossmatch(
+    pair_catalog = project_catalog_for_pair_crossmatch(
         catalog,
+        include_source=total_by_source is not None,
+    )
+    xmatched = pair_catalog.crossmatch(
+        pair_catalog,
         radius_arcsec=radius_arcsec,
         n_neighbors=n_neighbors,
         suffixes=("left", "right"),

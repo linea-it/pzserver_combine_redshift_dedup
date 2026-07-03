@@ -23,12 +23,12 @@ def test_slurm_executor_uses_fixed_allocation_by_default(monkeypatch):
             "name": "slurm",
             "args": {
                 "instance": {"cores": 2, "processes": 1, "memory": "30GB"},
-                "scale": {"minimum_jobs": 14, "maximum_jobs": 14},
+                "scale": {"minimum_jobs": 15, "maximum_jobs": 15},
             },
         }
     )
 
-    assert cluster.kwargs["n_workers"] == 14
+    assert cluster.kwargs["n_workers"] == 15
     assert cluster.adapt_calls == []
 
 

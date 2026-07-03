@@ -11,6 +11,7 @@ from crossmatch_diagnostics import (  # noqa: E402
     log_component_size_diagnostics,
     log_neighbor_count_diagnostics,
     log_pair_separation_diagnostics,
+    project_catalog_for_pair_crossmatch,
 )
 
 
@@ -20,6 +21,34 @@ class RecordingLogger:
 
     def info(self, *args):
         self.info_calls.append(args)
+
+
+class FakeCatalog:
+    def __init__(self, frame, margin=None):
+        self.frame = frame
+        self.columns = frame.columns
+        self.margin = margin
+
+    def __getitem__(self, columns):
+        return FakeCatalog(self.frame.loc[:, columns].copy())
+
+
+def test_pair_catalog_projection_is_narrow_and_preserves_margin():
+    frame = pd.DataFrame(
+        {
+            "CRD_ID": ["A"],
+            "ra": [1.0],
+            "dec": [2.0],
+            "source": ["survey"],
+            "unused": ["large"],
+        }
+    )
+    catalog = FakeCatalog(frame, margin=FakeCatalog(frame.copy()))
+
+    projected = project_catalog_for_pair_crossmatch(catalog, include_source=True)
+
+    assert projected.columns.tolist() == ["CRD_ID", "ra", "dec", "source"]
+    assert projected.margin.columns.tolist() == ["CRD_ID", "ra", "dec", "source"]
 
 
 def test_compute_projected_pairs_transfers_only_requested_plain_columns():

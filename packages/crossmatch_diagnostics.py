@@ -9,6 +9,31 @@ import numpy as np
 import pandas as pd
 
 
+def project_catalog_for_pair_crossmatch(catalog, *, include_source: bool):
+    """Return a narrow LSDB catalog, preserving its projected margin.
+
+    LSDB crossmatch outputs include every input column.  Projecting only after
+    the crossmatch is too late for very large partitions because Distributed
+    may need to serialize the wide ``NestedFrame`` dependency first.  Narrowing
+    both the main catalog and its margin here prevents that wide result from
+    being created at all.
+    """
+    required = ["CRD_ID", "ra", "dec"]
+    if include_source and "source" in catalog.columns:
+        required.append("source")
+
+    missing = [column for column in required if column not in catalog.columns]
+    if missing:
+        raise KeyError(f"Crossmatch pair projection is missing columns: {missing}")
+
+    projected = catalog[required]
+    margin = getattr(catalog, "margin", None)
+    if margin is not None:
+        margin_columns = [column for column in required if column in margin.columns]
+        projected.margin = margin[margin_columns]
+    return projected
+
+
 def _project_pairs_partition(part, columns: list[str]) -> pd.DataFrame:
     """Return only pair columns as a plain pandas frame.
 
