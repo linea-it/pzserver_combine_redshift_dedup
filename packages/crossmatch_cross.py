@@ -47,6 +47,11 @@ import dask.dataframe as dd
 # Project
 # -----------------------
 from utils import get_phase_logger
+from crossmatch_diagnostics import (
+    log_component_size_diagnostics,
+    log_neighbor_count_diagnostics,
+    log_pair_separation_diagnostics,
+)
 from specz import (
     _build_collection_with_retry,
     _normalize_string_series_to_na,
@@ -144,6 +149,12 @@ def _log_neighbor_saturation(
     if source_col and source_col in unique_pairs:
         counts = unique_pairs.groupby([source_col, id_col], dropna=False).size()
         for source, source_counts in counts.groupby(level=0, dropna=False):
+            log_neighbor_count_diagnostics(
+                source_counts,
+                limit=limit,
+                logger=logger,
+                context=f"{context} source={source}",
+            )
             total = int(total_by_source.get(str(source), source_counts.size))
             saturated = int(source_counts.ge(limit).sum())
             fraction = saturated / total if total else 0.0
@@ -165,6 +176,12 @@ def _log_neighbor_saturation(
                 )
     else:
         counts = unique_pairs.groupby(id_col).size()
+        log_neighbor_count_diagnostics(
+            counts,
+            limit=limit,
+            logger=logger,
+            context=context,
+        )
         total = int(total_by_source.get("<all>", counts.size))
         saturated = int(counts.ge(limit).sum())
         fraction = saturated / total if total else 0.0
@@ -822,6 +839,8 @@ def crossmatch_tiebreak(
     # 2) Build adjacency from CRD_ID pairs
     t0 = time.time()
     pair_cols = ["CRD_IDleft", "CRD_IDright"]
+    if "_dist_arcsec" in xmatched._ddf.columns:
+        pair_cols.append("_dist_arcsec")
     if saturation_enabled and "sourceleft" in xmatched._ddf.columns:
         pair_cols.append("sourceleft")
     pairs_df = xmatched._ddf[pair_cols].compute()
@@ -829,6 +848,14 @@ def crossmatch_tiebreak(
         pairs_adj: Dict[str, Set[str]] = {}
         logger.info("No pairs found; `compared_to` remains unchanged.")
     else:
+        log_pair_separation_diagnostics(
+            pairs_df,
+            left_col="CRD_IDleft",
+            right_col="CRD_IDright",
+            radius_arcsec=radius,
+            logger=logger,
+            context=f"crossmatch step={step}",
+        )
         if saturation_enabled:
             _log_neighbor_saturation(
                 pairs_df,
@@ -847,6 +874,11 @@ def crossmatch_tiebreak(
         ].drop_duplicates()
         pairs_adj = _adjacency_from_pairs(
             pairs_df["CRD_IDleft"], pairs_df["CRD_IDright"]
+        )
+        log_component_size_diagnostics(
+            pairs_adj,
+            logger=logger,
+            context=f"crossmatch step={step}",
         )
     total_links = sum(len(v) for v in pairs_adj.values())
     logger.info(

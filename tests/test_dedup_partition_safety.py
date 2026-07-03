@@ -1,5 +1,6 @@
 import sys
 from pathlib import Path
+from unittest.mock import Mock, patch
 
 import dask
 import dask.dataframe as dd
@@ -12,6 +13,7 @@ from deduplication import (  # noqa: E402
     count_global_edge_group_mismatches,
     count_global_tie_invariant_violations,
     _dedup_local_with_margin,
+    _log_representative_radius_diagnostics,
     _validate_local_tie_invariants,
 )
 
@@ -146,3 +148,29 @@ def test_global_tie_validation_detects_invalid_patterns():
     )
 
     assert count_global_tie_invariant_violations(frame).compute() == 1
+
+
+def test_representative_radius_diagnostic_warns_for_transitive_chain():
+    frame = pd.DataFrame(
+        {
+            "group_id": [1, 1, 1],
+            "tie_result": [1, 0, 0],
+            "CRD_ID": ["A", "B", "C"],
+            "ra": [10.0, 10.0 + 0.4 / 3600.0, 10.0 + 0.8 / 3600.0],
+            "dec": [0.0, 0.0, 0.0],
+        }
+    )
+    logger = Mock()
+
+    with patch("deduplication._phase_logger", return_value=logger):
+        _log_representative_radius_diagnostics(
+            frame,
+            group_col="group_id",
+            tie_col="tie_result",
+            crd_col="CRD_ID",
+            radius_arcsec=0.5,
+            partition_tag="test",
+        )
+
+    logger.warning.assert_called_once()
+    assert "Representative-radius diagnostics" in logger.warning.call_args.args[0]

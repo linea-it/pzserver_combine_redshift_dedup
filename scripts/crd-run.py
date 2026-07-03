@@ -1616,6 +1616,7 @@ def main(
                         tie_col="tie_result",
                         edge_log=edge_log,
                         group_col=group_col,
+                        crossmatch_radius_arcsec=crossmatch_radius_arcsec,
                         margin_threshold_arcsec=margin_threshold_arcsec,
                         margin_warning_fraction=margin_warning_fraction,
                     )

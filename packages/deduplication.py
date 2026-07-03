@@ -163,6 +163,75 @@ def _validate_local_tie_invariants(
             )
 
 
+def _log_representative_radius_diagnostics(
+    frame: pd.DataFrame,
+    *,
+    group_col: str | None,
+    tie_col: str,
+    crd_col: str,
+    radius_arcsec: float,
+    partition_tag: str,
+) -> None:
+    """Warn when a local component extends beyond a deterministic representative."""
+    if not group_col or group_col not in frame or frame.empty:
+        return
+
+    work = frame[[group_col, tie_col, crd_col, "ra", "dec"]].copy()
+    work["ra"] = pd.to_numeric(work["ra"], errors="coerce")
+    work["dec"] = pd.to_numeric(work["dec"], errors="coerce")
+    work = work.dropna(subset=[group_col, "ra", "dec"])
+    sizes = work.groupby(group_col)[crd_col].transform("size")
+    work = work[sizes >= 2]
+    if work.empty:
+        return
+
+    tie = pd.to_numeric(work[tie_col], errors="coerce")
+    work["_representative_rank"] = np.select(
+        [tie.eq(1), tie.eq(2)], [0, 1], default=2
+    )
+    representatives = (
+        work.sort_values(
+            [group_col, "_representative_rank", crd_col], kind="stable"
+        )
+        .drop_duplicates(group_col)
+        .set_index(group_col)[["ra", "dec"]]
+        .rename(columns={"ra": "_rep_ra", "dec": "_rep_dec"})
+    )
+    work = work.join(representatives, on=group_col)
+
+    ra = np.radians(work["ra"].to_numpy(dtype="float64"))
+    dec = np.radians(work["dec"].to_numpy(dtype="float64"))
+    rep_ra = np.radians(work["_rep_ra"].to_numpy(dtype="float64"))
+    rep_dec = np.radians(work["_rep_dec"].to_numpy(dtype="float64"))
+    dra = (ra - rep_ra + np.pi) % (2 * np.pi) - np.pi
+    sin_ddec = np.sin((dec - rep_dec) / 2.0)
+    sin_dra = np.sin(dra / 2.0)
+    hav = sin_ddec**2 + np.cos(dec) * np.cos(rep_dec) * sin_dra**2
+    angular = 2.0 * np.arcsin(np.sqrt(np.clip(hav, 0.0, 1.0)))
+    work["_radius_arcsec"] = np.degrees(angular) * 3600.0
+    max_radius = work.groupby(group_col)["_radius_arcsec"].max()
+    exceeding = max_radius[max_radius > float(radius_arcsec)]
+    if exceeding.empty:
+        return
+
+    p90, p99 = np.quantile(max_radius.to_numpy(), [0.90, 0.99])
+    _phase_logger().warning(
+        "%s Representative-radius diagnostics: components=%d "
+        "components_exceeding_%.3farcsec=%d fraction_exceeding=%.6f "
+        "p90_max_radius=%.4farcsec p99_max_radius=%.4farcsec "
+        "max_radius=%.4farcsec sample=%s",
+        partition_tag,
+        int(max_radius.size),
+        float(radius_arcsec),
+        int(exceeding.size),
+        float(exceeding.size / max_radius.size),
+        float(p90),
+        float(p99),
+        float(max_radius.max()),
+        [(int(group), float(value)) for group, value in exceeding.head(5).items()],
+    )
+
+
 def _parse_compared_to_cell(val) -> List[str]:
     """Parse a single `compared_to` cell into a list of CRD_ID strings."""
     if val is None or (isinstance(val, float) and math.isnan(val)):
@@ -1363,6 +1432,7 @@ def _dedup_local_with_margin(
     tie_col: str = "tie_result",
     edge_log: bool = False,
     group_col: str | None = None,
+    crossmatch_radius_arcsec: float = 0.5,
     margin_threshold_arcsec: float = 5.0,
     margin_warning_fraction: float = 0.8,
 ) -> pd.DataFrame:
@@ -1452,6 +1522,14 @@ def _dedup_local_with_margin(
         partition_tag=partition_tag,
         logger=_phase_logger(),
         group_col=group_col,
+    )
+    _log_representative_radius_diagnostics(
+        solved,
+        group_col=group_col,
+        tie_col=tie_col,
+        crd_col=crd_col,
+        radius_arcsec=crossmatch_radius_arcsec,
+        partition_tag=partition_tag,
     )
 
     if group_col and group_col in solved.columns:
@@ -1547,6 +1625,7 @@ def _dedup_alignfunc_with_margin(
     tie_col: str = "tie_result",
     edge_log: bool = False,
     group_col: str | None = None,
+    crossmatch_radius_arcsec: float = 0.5,
     margin_threshold_arcsec: float = 5.0,
     margin_warning_fraction: float = 0.8,
 ) -> pd.DataFrame:
@@ -1576,6 +1655,7 @@ def _dedup_alignfunc_with_margin(
         tie_col=tie_col,
         edge_log=edge_log,
         group_col=group_col,
+        crossmatch_radius_arcsec=crossmatch_radius_arcsec,
         margin_threshold_arcsec=margin_threshold_arcsec,
         margin_warning_fraction=margin_warning_fraction,
     )
@@ -1593,6 +1673,7 @@ def _dedup_local_no_margin(
     tie_col: str = "tie_result",
     edge_log: bool = False,
     group_col: str | None = None,
+    crossmatch_radius_arcsec: float = 0.5,
 ) -> pd.DataFrame:
     """Run dedup using only the main partition.
 
@@ -1615,7 +1696,9 @@ def _dedup_local_no_margin(
     pm = _to_pandas(part_main)
 
     # Project to required columns.
-    needed = {crd_col, compared_col, z_col, tie_col} | set(tiebreaking_priority or [])
+    needed = {crd_col, compared_col, z_col, tie_col, "ra", "dec"} | set(
+        tiebreaking_priority or []
+    )
     if instrument_type_priority is not None:
         needed.add("instrument_type_homogenized")
     pm = _shrink_to_needed(pm, needed, crd_col, compared_col, z_col)
@@ -1651,6 +1734,14 @@ def _dedup_local_no_margin(
         partition_tag=partition_tag,
         logger=_phase_logger(),
         group_col=group_col,
+    )
+    _log_representative_radius_diagnostics(
+        solved,
+        group_col=group_col,
+        tie_col=tie_col,
+        crd_col=crd_col,
+        radius_arcsec=crossmatch_radius_arcsec,
+        partition_tag=partition_tag,
     )
 
     # Select output columns.
@@ -1702,6 +1793,7 @@ def run_dedup_with_lsdb_map_partitions(
     tie_col: str = "tie_result",
     edge_log: bool = False,
     group_col: str | None = None,  # new
+    crossmatch_radius_arcsec: float = 0.5,
     margin_threshold_arcsec: float = 5.0,
     margin_warning_fraction: float = 0.8,
 ) -> dd.DataFrame:
@@ -1786,6 +1878,7 @@ def run_dedup_with_lsdb_map_partitions(
                 tie_col=tie_col,
                 edge_log=edge_log,
                 group_col=group_col,
+                crossmatch_radius_arcsec=crossmatch_radius_arcsec,
             )
         else:
             # ------------------------------------------------------------------
@@ -1848,6 +1941,7 @@ def run_dedup_with_lsdb_map_partitions(
                     tie_col=tie_col,
                     edge_log=edge_log,
                     group_col=group_col,
+                    crossmatch_radius_arcsec=float(crossmatch_radius_arcsec),
                     margin_threshold_arcsec=float(margin_threshold_arcsec),
                     margin_warning_fraction=float(margin_warning_fraction),
                 )

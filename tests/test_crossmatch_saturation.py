@@ -52,7 +52,8 @@ def test_saturation_warns_using_all_source_objects_as_denominator():
     )
 
     assert len(logger.warning_calls) == 1
-    assert not logger.info_calls
+    assert len(logger.info_calls) == 1
+    assert "returned-match diagnostics" in logger.info_calls[0][0]
 
 
 def test_saturation_can_fail_or_be_disabled():
