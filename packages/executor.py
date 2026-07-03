@@ -46,7 +46,7 @@ def get_executor(executor_config: Dict[str, Any], logs_dir: str | None = None):
       - Local: start a LocalCluster(**args).
       - SLURM: start SLURMCluster with n_workers = minimum_jobs * processes.
         Each job will use the provided cores, processes, and memory.
-        Optionally enable adapt() with maximum_jobs.
+        Optionally enable adapt() when scale.adaptive is true.
 
     Args:
         executor_config: Dictionary with:
@@ -58,6 +58,7 @@ def get_executor(executor_config: Dict[str, Any], logs_dir: str | None = None):
                   - scale:
                       * minimum_jobs (int)
                       * maximum_jobs (int)
+                      * adaptive (bool, default false)
         logs_dir: Directory to store SLURM job logs (if provided).
 
     Returns:
@@ -104,6 +105,7 @@ def get_executor(executor_config: Dict[str, Any], logs_dir: str | None = None):
 
         min_jobs = int(scale_cfg.get("minimum_jobs", 0))
         max_jobs = int(scale_cfg.get("maximum_jobs", 0) or 0)
+        adaptive = bool(scale_cfg.get("adaptive", False))
 
         # n_workers in SLURMCluster = total worker processes
         n_workers_init = min_jobs * processes
@@ -126,10 +128,18 @@ def get_executor(executor_config: Dict[str, Any], logs_dir: str | None = None):
         cluster = SLURMCluster(n_workers=n_workers_init, **instance_cfg)
         logger.info("SLURMCluster started with instance args=%s", instance_cfg)
 
-        # Optional: cap number of jobs adaptively
-        if max_jobs > 0:
+        # Adaptive SLURM scaling can thrash on this pipeline because its task
+        # graph alternates between driver-heavy and worker-heavy stages. Keep a
+        # stable allocation unless adaptive scaling is explicitly requested.
+        if adaptive and max_jobs > 0:
             cluster.adapt(minimum_jobs=min_jobs, maximum_jobs=max_jobs)
-            logger.info("Adaptive ceiling enabled: maximum_jobs=%d", max_jobs)
+            logger.info(
+                "Adaptive scaling enabled: minimum_jobs=%d maximum_jobs=%d",
+                min_jobs,
+                max_jobs,
+            )
+        else:
+            logger.info("Fixed SLURM allocation enabled: jobs=%d", min_jobs)
 
         return cluster
 

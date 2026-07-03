@@ -48,6 +48,7 @@ import dask.dataframe as dd
 # -----------------------
 from utils import get_phase_logger
 from crossmatch_diagnostics import (
+    compute_projected_pairs,
     log_component_size_diagnostics,
     log_neighbor_count_diagnostics,
     log_pair_separation_diagnostics,
@@ -848,7 +849,7 @@ def crossmatch_tiebreak(
         pair_cols.append("_dist_arcsec")
     if saturation_enabled and "sourceleft" in xmatched._ddf.columns:
         pair_cols.append("sourceleft")
-    pairs_df = xmatched._ddf[pair_cols].compute()
+    pairs_df = compute_projected_pairs(xmatched._ddf, pair_cols)
     if len(pairs_df) == 0:
         pairs_adj: Dict[str, Set[str]] = {}
         logger.info("No pairs found; `compared_to` remains unchanged.")
