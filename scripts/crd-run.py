@@ -712,7 +712,7 @@ def main(
         log_init.error("Failed to parse flags_translation_file: %s", e, exc_info=True)
         raise
     crossmatch_radius_arcsec = float(
-        translation_config.get("crossmatch_radius_arcsec", 0.75)
+        translation_config.get("crossmatch_radius_arcsec", 0.5)
     )
     margin_threshold_arcsec = float(
         translation_config.get("margin_threshold_arcsec", 5.0)
