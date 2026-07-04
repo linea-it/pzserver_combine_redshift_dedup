@@ -21,7 +21,22 @@ class Slurm(BaseModel):
     class Scale(BaseModel):
         minimum_jobs: int = 11
         maximum_jobs: int = 11
-        adaptive: bool = False
+        worker_recovery_timeout_seconds: float = 600.0
+        worker_recovery_check_interval_seconds: float = 10.0
+
+        @model_validator(mode="after")
+        def validate_limits(self):
+            if self.minimum_jobs < 1:
+                raise ValueError("minimum_jobs must be at least 1")
+            if self.maximum_jobs < self.minimum_jobs:
+                raise ValueError("maximum_jobs must be >= minimum_jobs")
+            if self.worker_recovery_timeout_seconds <= 0:
+                raise ValueError("worker_recovery_timeout_seconds must be positive")
+            if self.worker_recovery_check_interval_seconds <= 0:
+                raise ValueError(
+                    "worker_recovery_check_interval_seconds must be positive"
+                )
+            return self
 
     instance: Instance = Instance()
     scale: Scale = Scale()

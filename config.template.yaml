@@ -25,7 +25,8 @@ executor:
 #    scale:
 #      minimum_jobs: 11
 #      maximum_jobs: 11
-#      adaptive: false
+#      worker_recovery_timeout_seconds: 600
+#      worker_recovery_check_interval_seconds: 10
 
 inputs:
   specz:
