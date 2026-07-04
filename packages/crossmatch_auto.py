@@ -15,6 +15,7 @@ Public API:
 # -----------------------
 import logging
 import os
+import shutil
 import time
 from typing import TYPE_CHECKING, Dict, Iterable, List, Set
 
@@ -26,17 +27,26 @@ if TYPE_CHECKING:
 # -----------------------
 import numpy as np
 import pandas as pd
+import dask
+import dask.dataframe as dd
+from dask.distributed import get_client
 
 # -----------------------
 # Project
 # -----------------------
-from specz import DTYPE_STR  # Arrow-backed string dtype
+from specz import DTYPE_STR, _build_collection_with_retry
+from crossmatch_cross import (
+    _attach_distributed_neighbors,
+    _log_neighbor_saturation_distributed,
+    _normalize_ddf_expected_types,
+    _safe_to_parquet,
+)
 from crossmatch_diagnostics import (
-    compute_projected_pairs,
     log_component_size_diagnostics,
     log_neighbor_count_diagnostics,
     log_pair_separation_diagnostics,
     project_catalog_for_pair_crossmatch,
+    stage_projected_pairs,
 )
 from utils import get_phase_logger
 
@@ -261,8 +271,9 @@ def _self_xmatch_pairs(
     warn_fraction: float,
     fail_fraction: float | None,
     geometry_diagnostics_enabled: bool = False,
-) -> Dict[str, Set[str]]:
-    """Run a self-crossmatch and return an adjacency (CRD_ID -> neighbor ids).
+    staging_path: str = "self_crossmatch_pairs",
+) -> tuple[dd.DataFrame, int, int]:
+    """Run a self-crossmatch and return narrow, unique ID pairs.
 
     Args:
         catalog: LSDB catalog to crossmatch with itself.
@@ -271,7 +282,7 @@ def _self_xmatch_pairs(
         logger: Logger.
 
     Returns:
-        Dict[str, Set[str]]: Mapping of CRD_ID to neighbor ids.
+        tuple: Staged pair dataframe, undirected link count, and node count.
     """
     logger.info(
         'Running self-crossmatch: radius=%.3f" n_neighbors=%d',
@@ -294,11 +305,38 @@ def _self_xmatch_pairs(
         pair_cols.append("_dist_arcsec")
     if total_by_source is not None and "sourceleft" in xmatched.columns:
         pair_cols.append("sourceleft")
-    pairs_df = compute_projected_pairs(xmatched._ddf, pair_cols)
-    if len(pairs_df) == 0:
+    raw_path = os.path.join(staging_path, "raw")
+    pairs_path = os.path.join(staging_path, "pairs")
+    raw_pairs = stage_projected_pairs(xmatched._ddf, pair_cols, raw_path)
+    pairs = raw_pairs.astype(
+        {"CRD_IDleft": DTYPE_STR, "CRD_IDright": DTYPE_STR}
+    )
+    pairs = pairs[pairs["CRD_IDleft"] != pairs["CRD_IDright"]]
+    pairs = pairs.drop_duplicates(subset=["CRD_IDleft", "CRD_IDright"])
+    _safe_to_parquet(pairs, pairs_path, write_index=False)
+    pairs = dd.read_parquet(pairs_path, engine="pyarrow")
+    pair_count, node_count = dask.compute(
+        pairs.map_partitions(len).sum(),
+        dd.concat([pairs["CRD_IDleft"], pairs["CRD_IDright"]]).nunique(),
+    )
+    pair_count = int(pair_count)
+    node_count = int(node_count)
+    if not pair_count:
         logger.info("Self-crossmatch: no pairs found; `compared_to` remains unchanged.")
-        return {}
-    if geometry_diagnostics_enabled:
+    if total_by_source is not None and pair_count:
+        _log_neighbor_saturation_distributed(
+            pairs,
+            id_col="CRD_IDleft",
+            source_col="sourceleft" if "sourceleft" in pairs.columns else None,
+            limit=n_neighbors,
+            logger=logger,
+            context="Self-crossmatch",
+            total_by_source=total_by_source,
+            warn_fraction=warn_fraction,
+            fail_fraction=fail_fraction,
+        )
+    if geometry_diagnostics_enabled and pair_count:
+        pairs_df = pairs.compute()
         log_pair_separation_diagnostics(
             pairs_df,
             left_col="CRD_IDleft",
@@ -307,32 +345,21 @@ def _self_xmatch_pairs(
             logger=logger,
             context="Self-crossmatch",
         )
-    if total_by_source is not None:
-        _log_neighbor_saturation(
-            pairs_df,
-            limit=n_neighbors,
-            logger=logger,
-            total_by_source=total_by_source,
-            warn_fraction=warn_fraction,
-            fail_fraction=fail_fraction,
+        adj = _adjacency_from_pairs(
+            pairs_df["CRD_IDleft"], pairs_df["CRD_IDright"]
         )
-    pairs_df = pairs_df.astype({"CRD_IDleft": "string", "CRD_IDright": "string"})
-    pairs_df = pairs_df[
-        pairs_df["CRD_IDleft"] != pairs_df["CRD_IDright"]
-    ].drop_duplicates()
-
-    adj = _adjacency_from_pairs(pairs_df["CRD_IDleft"], pairs_df["CRD_IDright"])
-    if geometry_diagnostics_enabled:
         log_component_size_diagnostics(
             adj,
             logger=logger,
             context="Self-crossmatch",
         )
-    total_links = sum(len(v) for v in adj.values())
+    total_links = 2 * pair_count
     logger.info(
-        "Self-crossmatch: %d unique pairs across %d nodes", total_links, len(adj)
+        "Self-crossmatch: %d links across %d nodes without global adjacency",
+        total_links,
+        node_count,
     )
-    return adj
+    return pairs, total_links, node_count
 
 
 def _update_compared_to(
@@ -450,8 +477,12 @@ def crossmatch_auto(
         collection_path_auto,
     )
 
-    # 1) Self-crossmatch -> adjacency (CRD_ID -> neighbor ids)
-    pairs_adj = _self_xmatch_pairs(
+    staging_root = os.path.join(parent_dir, f".{artifact_auto}_distributed_pairs")
+    shutil.rmtree(staging_root, ignore_errors=True)
+    os.makedirs(staging_root, exist_ok=True)
+
+    # 1) Self-crossmatch -> distributed narrow pair table
+    pairs_ddf, total_links, n_nodes = _self_xmatch_pairs(
         catalog,
         radius,
         k,
@@ -460,22 +491,51 @@ def crossmatch_auto(
         warn_fraction,
         fail_fraction,
         geometry_diagnostics_enabled,
+        staging_root,
     )
 
-    # 2) Update `compared_to`
-    updated = _update_compared_to(catalog, pairs_adj)
-    total_links = sum(len(v) for v in pairs_adj.values())
-    n_nodes = len(pairs_adj)
-
-    # 3) Persist as a NEW collection in the parent directory
+    # 2) Persist as a NEW collection in the parent directory. For non-empty
+    # pairs, aggregate and join through Dask instead of embedding one global
+    # adjacency mapping into every partition task.
     logger.info(
         "Writing collection: base_dir=%s catalog_name=%s", parent_dir, artifact_auto
     )
-    updated.write_catalog(
-        collection_path_auto,
-        as_collection=True,
-        overwrite=True,
-    )
+    if total_links == 0:
+        catalog.write_catalog(
+            collection_path_auto,
+            as_collection=True,
+            overwrite=True,
+        )
+        shutil.rmtree(staging_root, ignore_errors=True)
+    else:
+        neighbors_path = os.path.join(staging_root, "neighbors")
+        merged_path = os.path.join(staging_root, "merged")
+        updated_ddf = _attach_distributed_neighbors(
+            catalog._ddf,
+            pairs_ddf,
+            id_column="CRD_IDleft",
+            neighbor_column="CRD_IDright",
+            staging_path=neighbors_path,
+            symmetric=True,
+        )
+        updated_ddf = _normalize_ddf_expected_types(
+            updated_ddf, translation_config
+        )
+        _safe_to_parquet(updated_ddf, merged_path, write_index=False)
+        _build_collection_with_retry(
+            parquet_path=merged_path,
+            logs_dir=logs_dir,
+            logger=logger,
+            client=get_client(),
+            try_margin=True,
+            margin_threshold=float(
+                (translation_config or {}).get("margin_threshold_arcsec", 5.0)
+            ),
+            output_path=collection_path_auto,
+            output_artifact_name=artifact_auto,
+            catalog_artifact_name=artifact_auto,
+        )
+        shutil.rmtree(staging_root, ignore_errors=True)
     logger.info("Write complete: path=%s", collection_path_auto)
 
     # END (per-catalog)

@@ -27,12 +27,14 @@ Public API:
 USE_LSDB_CONCAT: bool = True  # Toggle behavior as described above.
 BACKEND_LSDB_LABEL = "LSDB+write_catalog"
 BACKEND_LEGACY_LABEL = "Dask+Parquet+import"
+BACKEND_DISTRIBUTED_PAIRS_LABEL = "distributed-pairs+Parquet+import"
 
 # -----------------------
 # Standard library
 # -----------------------
 import logging
 import os
+import shutil
 import time
 from typing import Dict, Iterable, List, Set
 
@@ -41,6 +43,7 @@ from typing import Dict, Iterable, List, Set
 # -----------------------
 import numpy as np
 import pandas as pd
+import dask
 import dask.dataframe as dd
 
 # -----------------------
@@ -48,11 +51,11 @@ import dask.dataframe as dd
 # -----------------------
 from utils import get_phase_logger
 from crossmatch_diagnostics import (
-    compute_projected_pairs,
     log_component_size_diagnostics,
     log_neighbor_count_diagnostics,
     log_pair_separation_diagnostics,
     project_catalog_for_pair_crossmatch,
+    stage_projected_pairs,
 )
 from specz import (
     _build_collection_with_retry,
@@ -91,7 +94,7 @@ def _get_backend_label() -> str:
     Returns:
         str: Active backend label.
     """
-    return BACKEND_LSDB_LABEL if USE_LSDB_CONCAT else BACKEND_LEGACY_LABEL
+    return BACKEND_DISTRIBUTED_PAIRS_LABEL
 
 
 # -----------------------
@@ -211,6 +214,82 @@ def _catalog_source_totals(catalog) -> dict:
     return {"<all>": int(catalog._ddf.map_partitions(len).sum().compute())}
 
 
+def _log_neighbor_saturation_distributed(
+    pairs,
+    *,
+    id_col: str,
+    source_col: str | None,
+    limit: int,
+    logger: logging.LoggerAdapter,
+    context: str,
+    total_by_source: dict,
+    warn_fraction: float,
+    fail_fraction: float | None,
+) -> None:
+    """Log saturation summaries without collecting pair rows on the driver."""
+    group_cols = [id_col]
+    sources: list[object] = [None]
+    if source_col and source_col in pairs.columns:
+        group_cols.insert(0, source_col)
+        sources = pairs[source_col].dropna().drop_duplicates().compute().tolist()
+
+    counts = pairs.groupby(group_cols).size().rename("count").to_frame().reset_index()
+    for source in sources:
+        source_counts = counts["count"]
+        label = context
+        total_key = "<all>"
+        if source is not None and source_col is not None:
+            source_counts = counts.loc[counts[source_col] == source, "count"]
+            label = f"{context} source={source}"
+            total_key = str(source)
+
+        count, maximum, p50, p90, p99, ge2, ge5, saturated = dask.compute(
+            source_counts.count(),
+            source_counts.max(),
+            source_counts.quantile(0.50),
+            source_counts.quantile(0.90),
+            source_counts.quantile(0.99),
+            source_counts.ge(2).sum(),
+            source_counts.ge(5).sum(),
+            source_counts.ge(limit).sum(),
+        )
+        count = int(count)
+        saturated = int(saturated)
+        total = int(total_by_source.get(total_key, count))
+        fraction = saturated / total if total else 0.0
+        logger.info(
+            "%s returned-match diagnostics: objects_with_matches=%d "
+            "p50=%.1f p90=%.1f p99=%.1f max=%d fraction_ge_2=%.6f "
+            "fraction_ge_5=%.6f fraction_at_limit=%.6f limit=%d",
+            label,
+            count,
+            float(p50) if count else 0.0,
+            float(p90) if count else 0.0,
+            float(p99) if count else 0.0,
+            int(maximum) if count else 0,
+            int(ge2) / count if count else 0.0,
+            int(ge5) / count if count else 0.0,
+            fraction,
+            limit,
+        )
+        log_method = logger.warning if fraction >= warn_fraction else logger.info
+        log_method(
+            "%s neighbor saturation: at_limit=%d total_objects=%d "
+            "fraction=%.6f limit=%d",
+            label,
+            saturated,
+            total,
+            fraction,
+            limit,
+        )
+        if fail_fraction is not None and fraction >= fail_fraction:
+            raise RuntimeError(
+                f"{label}: neighbor saturation is {fraction:.6f}, reaching "
+                f"failure threshold {fail_fraction:.6f}; increase "
+                "crossmatch_n_neighbors"
+            )
+
+
 def _merge_compared_to_partition(
     part: pd.DataFrame,
     pairs_adj: Dict[str, Iterable[str]],
@@ -274,6 +353,119 @@ def _merge_compared_to_partition(
 
     p["compared_to"] = pd.Series(pd.array(merged_vals, dtype=DTYPE_STR), index=p.index)
     return p
+
+
+def _merge_compared_to_column_partition(
+    part: pd.DataFrame,
+    new_column: str = "_new_compared_to",
+) -> pd.DataFrame:
+    """Union an aggregated neighbor column into ``compared_to``."""
+    p = part.copy()
+    if "compared_to" not in p.columns:
+        p["compared_to"] = pd.Series(
+            pd.array([pd.NA] * len(p), dtype=DTYPE_STR), index=p.index
+        )
+
+    def _tokens(value) -> set[str]:
+        if isinstance(value, (list, set, tuple)):
+            values = value
+        else:
+            if pd.isna(value):
+                return set()
+            values = str(value).split(",")
+        return {
+            token
+            for raw in values
+            if (token := str(raw).strip()) and token != "<NA>"
+        }
+
+    merged_values: list[object] = []
+    for crd_id, old_value, new_value in zip(
+        p["CRD_ID"].astype(str), p["compared_to"], p[new_column]
+    ):
+        neighbors = _tokens(old_value) | _tokens(new_value)
+        neighbors.discard(crd_id)
+        merged_values.append(", ".join(sorted(neighbors)) if neighbors else pd.NA)
+
+    p["compared_to"] = pd.Series(
+        pd.array(merged_values, dtype=DTYPE_STR), index=p.index
+    )
+    return p.drop(columns=[new_column])
+
+
+def _join_unique_neighbors(values: pd.Series) -> str:
+    """Return a deterministic comma-separated set for one grouped CRD_ID."""
+    return ", ".join(sorted(set(values.dropna().astype(str))))
+
+
+def _aggregate_distributed_neighbors(
+    pairs_ddf,
+    *,
+    id_column: str,
+    neighbor_column: str,
+    staging_path: str,
+    symmetric: bool = False,
+):
+    """Aggregate and stage a reusable distributed neighbor table."""
+    directional = pairs_ddf[[id_column, neighbor_column]].rename(
+        columns={id_column: "CRD_ID", neighbor_column: "_neighbor"}
+    )
+    if symmetric:
+        reverse = pairs_ddf[[id_column, neighbor_column]].rename(
+            columns={neighbor_column: "CRD_ID", id_column: "_neighbor"}
+        )
+        directional = dd.concat([directional, reverse])
+    directional = directional.astype(
+        {"CRD_ID": DTYPE_STR, "_neighbor": DTYPE_STR}
+    )
+    directional = directional[
+        directional["CRD_ID"] != directional["_neighbor"]
+    ]
+    neighbor_meta = pd.Series(
+        name="_new_compared_to",
+        dtype="string",
+        index=pd.Index([], name="CRD_ID", dtype="string"),
+    )
+    neighbors = (
+        directional.groupby("CRD_ID")["_neighbor"]
+        .apply(_join_unique_neighbors, meta=neighbor_meta)
+        .to_frame()
+        .reset_index()
+    )
+    _safe_to_parquet(neighbors, staging_path, write_index=False)
+    return dd.read_parquet(staging_path, engine="pyarrow")
+
+
+def _merge_distributed_neighbors(ddf, neighbors):
+    """Merge one dataframe with a pre-aggregated neighbor table."""
+    normalized_ddf = ddf.assign(CRD_ID=ddf["CRD_ID"].astype(DTYPE_STR))
+    neighbors = neighbors.assign(CRD_ID=neighbors["CRD_ID"].astype(DTYPE_STR))
+    merged = normalized_ddf.merge(neighbors, how="left", on="CRD_ID")
+    meta = _merge_compared_to_column_partition(merged._meta)
+    return merged.map_partitions(
+        _merge_compared_to_column_partition,
+        meta=meta,
+    )
+
+
+def _attach_distributed_neighbors(
+    ddf,
+    pairs_ddf,
+    *,
+    id_column: str,
+    neighbor_column: str,
+    staging_path: str,
+    symmetric: bool = False,
+):
+    """Aggregate pairs once and attach their neighbors to one dataframe."""
+    neighbors = _aggregate_distributed_neighbors(
+        pairs_ddf,
+        id_column=id_column,
+        neighbor_column=neighbor_column,
+        staging_path=staging_path,
+        symmetric=symmetric,
+    )
+    return _merge_distributed_neighbors(ddf, neighbors)
 
 
 def _ensure_compared_to_meta(meta_df: pd.DataFrame) -> pd.DataFrame:
@@ -761,6 +953,60 @@ def _concat_parquet_import(
     return collection_path
 
 
+def _distributed_pairs_update_and_import(
+    left_cat,
+    right_cat,
+    pairs_ddf,
+    temp_dir: str,
+    logs_dir: str,
+    step,
+    client,
+    translation_config: dict | None,
+    logger: logging.LoggerAdapter,
+) -> str:
+    """Update both catalogs without embedding global adjacency in task graphs."""
+    staging_root = os.path.join(temp_dir, f"distributed_pairs_step{step}")
+    merged_path = os.path.join(staging_root, "merged")
+    collection_path_target = os.path.join(temp_dir, f"merged_step{step}_hats")
+    logger.info(
+        "Distributed compared_to update: step=%s staging=%s",
+        step,
+        staging_root,
+    )
+
+    neighbors = _aggregate_distributed_neighbors(
+        pairs_ddf,
+        id_column="CRD_IDleft",
+        neighbor_column="CRD_IDright",
+        staging_path=os.path.join(staging_root, "neighbors"),
+        symmetric=True,
+    )
+    left_ddf = _merge_distributed_neighbors(left_cat._ddf, neighbors)
+    right_ddf = _merge_distributed_neighbors(right_cat._ddf, neighbors)
+    merged = dd.concat([left_ddf, right_ddf])
+    merged = _normalize_ddf_expected_types(merged, translation_config)
+    _safe_to_parquet(merged, merged_path, write_index=False)
+    logger.info("Distributed updated Parquet written: step=%s path=%s", step, merged_path)
+
+    schema_hints_local = _get_expr_schema_hints(translation_config)
+    collection_path = _build_collection_with_retry(
+        parquet_path=merged_path,
+        logs_dir=logs_dir,
+        logger=logger,
+        client=client,
+        try_margin=True,
+        schema_hints=schema_hints_local or None,
+        margin_threshold=float(
+            (translation_config or {}).get("margin_threshold_arcsec", 5.0)
+        ),
+        output_path=collection_path_target,
+        output_artifact_name=f"merged_step{step}_hats",
+        catalog_artifact_name=f"merged_step{step}",
+    )
+    shutil.rmtree(staging_root, ignore_errors=True)
+    return collection_path
+
+
 # -----------------------
 # Main logic
 # -----------------------
@@ -851,79 +1097,79 @@ def crossmatch_tiebreak(
     )
     logger.info("Crossmatch done (%.2fs)", time.time() - t0)
 
-    # 2) Build adjacency from CRD_ID pairs
+    # 2) Project and stage pair columns inside workers. No pair rows are
+    # gathered on the driver in the production path.
     t0 = time.time()
     pair_cols = ["CRD_IDleft", "CRD_IDright"]
     if geometry_diagnostics_enabled and "_dist_arcsec" in xmatched._ddf.columns:
         pair_cols.append("_dist_arcsec")
     if saturation_enabled and "sourceleft" in xmatched._ddf.columns:
         pair_cols.append("sourceleft")
-    pairs_df = compute_projected_pairs(xmatched._ddf, pair_cols)
-    if len(pairs_df) == 0:
-        pairs_adj: Dict[str, Set[str]] = {}
+    staging_root = os.path.join(temp_dir, f"distributed_pairs_step{step}")
+    raw_pairs_path = os.path.join(staging_root, "raw_pairs")
+    pairs_path = os.path.join(staging_root, "pairs")
+    shutil.rmtree(staging_root, ignore_errors=True)
+    os.makedirs(staging_root, exist_ok=True)
+    raw_pairs = stage_projected_pairs(xmatched._ddf, pair_cols, raw_pairs_path)
+    pairs = raw_pairs.astype(
+        {"CRD_IDleft": DTYPE_STR, "CRD_IDright": DTYPE_STR}
+    )
+    pairs = pairs[pairs["CRD_IDleft"] != pairs["CRD_IDright"]]
+    pairs = pairs.drop_duplicates(subset=["CRD_IDleft", "CRD_IDright"])
+    _safe_to_parquet(pairs, pairs_path, write_index=False)
+    pairs = dd.read_parquet(pairs_path, engine="pyarrow")
+
+    pair_count, node_count = dask.compute(
+        pairs.map_partitions(len).sum(),
+        dd.concat([pairs["CRD_IDleft"], pairs["CRD_IDright"]]).nunique(),
+    )
+    pair_count = int(pair_count)
+    node_count = int(node_count)
+    total_links = 2 * pair_count
+    if not pair_count:
         logger.info("No pairs found; `compared_to` remains unchanged.")
-    else:
-        if geometry_diagnostics_enabled:
-            log_pair_separation_diagnostics(
-                pairs_df,
-                left_col="CRD_IDleft",
-                right_col="CRD_IDright",
-                radius_arcsec=radius,
-                logger=logger,
-                context=f"crossmatch step={step}",
-            )
-        if saturation_enabled:
-            _log_neighbor_saturation(
-                pairs_df,
-                id_col="CRD_IDleft",
-                source_col="sourceleft" if "sourceleft" in pairs_df else None,
-                limit=k,
-                logger=logger,
-                context=f"crossmatch step={step}",
-                total_by_source=total_by_source,
-                warn_fraction=warn_fraction,
-                fail_fraction=fail_fraction,
-            )
-        pairs_df = pairs_df.astype({"CRD_IDleft": "string", "CRD_IDright": "string"})
-        pairs_df = pairs_df[
-            pairs_df["CRD_IDleft"] != pairs_df["CRD_IDright"]
-        ].drop_duplicates()
-        pairs_adj = _adjacency_from_pairs(
-            pairs_df["CRD_IDleft"], pairs_df["CRD_IDright"]
+    if saturation_enabled and pair_count:
+        _log_neighbor_saturation_distributed(
+            pairs,
+            id_col="CRD_IDleft",
+            source_col="sourceleft" if "sourceleft" in pairs.columns else None,
+            limit=k,
+            logger=logger,
+            context=f"crossmatch step={step}",
+            total_by_source=total_by_source,
+            warn_fraction=warn_fraction,
+            fail_fraction=fail_fraction,
         )
-        if geometry_diagnostics_enabled:
-            log_component_size_diagnostics(
-                pairs_adj,
-                logger=logger,
-                context=f"crossmatch step={step}",
-            )
-    total_links = sum(len(v) for v in pairs_adj.values())
+    if geometry_diagnostics_enabled and pair_count:
+        diagnostic_pairs = pairs.compute()
+        log_pair_separation_diagnostics(
+            diagnostic_pairs,
+            left_col="CRD_IDleft",
+            right_col="CRD_IDright",
+            radius_arcsec=radius,
+            logger=logger,
+            context=f"crossmatch step={step}",
+        )
+        diagnostic_adj = _adjacency_from_pairs(
+            diagnostic_pairs["CRD_IDleft"], diagnostic_pairs["CRD_IDright"]
+        )
+        log_component_size_diagnostics(
+            diagnostic_adj,
+            logger=logger,
+            context=f"crossmatch step={step}",
+        )
     logger.info(
-        "Adjacency built: links=%d nodes=%d (%.2fs)",
+        "Pair summary built without global adjacency: links=%d nodes=%d (%.2fs)",
         total_links,
-        len(pairs_adj),
+        node_count,
         time.time() - t0,
     )
 
-    # 3) Update `compared_to` on both catalogs, partition-wise
-    t0 = time.time()
-
-    left_meta = _ensure_compared_to_meta(left_cat._ddf._meta)
-    right_meta = _ensure_compared_to_meta(right_cat._ddf._meta)
-
-    left_updated = left_cat.map_partitions(
-        _merge_compared_to_partition, pairs_adj, meta=left_meta
-    )
-    right_updated = right_cat.map_partitions(
-        _merge_compared_to_partition, pairs_adj, meta=right_meta
-    )
-    logger.info("Compared_to updated on partitions (%.2fs)", time.time() - t0)
-
-    # 4) Export path A: LSDB concat + write_catalog
-    if USE_LSDB_CONCAT:
+    # With no new edges, retain the cheaper spatial concat path.
+    if total_links == 0:
         collection_path = _concat_and_write_hats(
-            left_updated,
-            right_updated,
+            left_cat,
+            right_cat,
             temp_dir,
             step,
             translation_config,
@@ -934,29 +1180,32 @@ def crossmatch_tiebreak(
             "END crossmatch_update_compared_to: step=%s links=%d nodes=%d output=%s (%.2fs)",
             step,
             total_links,
-            len(pairs_adj),
+            node_count,
             collection_path,
             time.time() - t0_all,
         )
+        shutil.rmtree(staging_root, ignore_errors=True)
         return collection_path
 
-    # 4b) Export path B (legacy): Dask concat + Parquet + import
-    collection_path = _concat_parquet_import(
-        left_updated,
-        right_updated,
+    # Aggregate and join neighbor strings in the distributed dataframe. The
+    # resulting Parquet is reimported so spatial HATS metadata and margins are
+    # rebuilt from the updated rows.
+    collection_path = _distributed_pairs_update_and_import(
+        left_cat,
+        right_cat,
+        pairs,
         temp_dir,
         logs_dir,
         step,
         client,
         translation_config,
-        logger=logger,
-        log_steps=True,
+        logger,
     )
     logger.info(
         "END crossmatch_update_compared_to: step=%s links=%d nodes=%d output=%s (%.2fs)",
         step,
         total_links,
-        len(pairs_adj),
+        node_count,
         collection_path,
         time.time() - t0_all,
     )

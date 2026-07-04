@@ -3,6 +3,7 @@ import types
 from pathlib import Path
 
 import pandas as pd
+import dask.dataframe as dd
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "packages"))
@@ -11,7 +12,10 @@ if "tables_io" not in sys.modules:
     tables_io.types = types.SimpleNamespace(PD_DATAFRAME="PD_DATAFRAME")
     sys.modules["tables_io"] = tables_io
 
-from crossmatch_cross import _log_neighbor_saturation  # noqa: E402
+from crossmatch_cross import (  # noqa: E402
+    _log_neighbor_saturation,
+    _log_neighbor_saturation_distributed,
+)
 
 
 class RecordingLogger:
@@ -75,3 +79,22 @@ def test_saturation_can_fail_or_be_disabled():
     _log_neighbor_saturation(
         logger=RecordingLogger(), fail_fraction=None, **kwargs
     )
+
+
+def test_distributed_saturation_returns_only_scalar_summaries():
+    logger = RecordingLogger()
+
+    _log_neighbor_saturation_distributed(
+        dd.from_pandas(_saturated_pairs(), npartitions=2),
+        id_col="CRD_IDleft",
+        source_col="sourceleft",
+        limit=2,
+        logger=logger,
+        context="test",
+        total_by_source={"survey": 100},
+        warn_fraction=0.01,
+        fail_fraction=None,
+    )
+
+    assert len(logger.warning_calls) == 1
+    assert any("returned-match diagnostics" in call[0] for call in logger.info_calls)

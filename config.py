@@ -16,7 +16,7 @@ class Slurm(BaseModel):
         memory: str = "40GB"
         queue: str = "cpu_pipelines"
         account: str = "hpc-pipelines"
-        job_extra_directives: list[str] = ["--propagate", "--time=04:00:00"]
+        job_extra_directives: list[str] = ["--propagate", "--time=12:00:00"]
 
     class Scale(BaseModel):
         minimum_jobs: int = 11
