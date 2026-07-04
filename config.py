@@ -13,14 +13,14 @@ class Slurm(BaseModel):
     class Instance(BaseModel):
         cores: int = 2
         processes: int = 1
-        memory: str = "40GB"
+        memory: str = "20GB"
         queue: str = "cpu_pipelines"
         account: str = "hpc-pipelines"
         job_extra_directives: list[str] = ["--propagate", "--time=12:00:00"]
 
     class Scale(BaseModel):
-        minimum_jobs: int = 11
-        maximum_jobs: int = 11
+        minimum_jobs: int = 10
+        maximum_jobs: int = 22
         worker_recovery_timeout_seconds: float = 600.0
         worker_recovery_check_interval_seconds: float = 10.0
 

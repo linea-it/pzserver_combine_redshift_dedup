@@ -16,15 +16,15 @@ executor:
 #    instance:
 #      cores: 2
 #      processes: 1
-#      memory: "40GB"
+#      memory: "20GB"
 #      queue: "cpu_small"
 #      account: "hpc-public"
 #      job_extra_directives:
 #        - "--propagate"
 #        - "--time=12:00:00"
 #    scale:
-#      minimum_jobs: 11
-#      maximum_jobs: 11
+#      minimum_jobs: 10
+#      maximum_jobs: 22
 #      worker_recovery_timeout_seconds: 600
 #      worker_recovery_check_interval_seconds: 10
 
