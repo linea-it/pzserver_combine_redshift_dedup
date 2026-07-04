@@ -15,7 +15,7 @@ class FakeSlurmCluster:
         self.adapt_calls.append(kwargs)
 
 
-def test_slurm_executor_uses_fixed_allocation_by_default(monkeypatch):
+def test_slurm_executor_starts_minimum_workers_and_always_enables_adapt(monkeypatch):
     monkeypatch.setattr(executor, "SLURMCluster", FakeSlurmCluster)
 
     cluster = executor.get_executor(
@@ -29,10 +29,10 @@ def test_slurm_executor_uses_fixed_allocation_by_default(monkeypatch):
     )
 
     assert cluster.kwargs["n_workers"] == 11
-    assert cluster.adapt_calls == []
+    assert cluster.adapt_calls == [{"minimum_jobs": 11, "maximum_jobs": 11}]
 
 
-def test_slurm_executor_enables_adaptive_scaling_only_explicitly(monkeypatch):
+def test_slurm_executor_supports_different_adaptive_limits(monkeypatch):
     monkeypatch.setattr(executor, "SLURMCluster", FakeSlurmCluster)
 
     cluster = executor.get_executor(
@@ -43,7 +43,6 @@ def test_slurm_executor_enables_adaptive_scaling_only_explicitly(monkeypatch):
                 "scale": {
                     "minimum_jobs": 7,
                     "maximum_jobs": 15,
-                    "adaptive": True,
                 },
             },
         }

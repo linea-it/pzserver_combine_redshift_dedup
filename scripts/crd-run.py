@@ -51,6 +51,7 @@ from executor import get_executor
 from product_handle import save_dataframe
 from resource_usage import ResourceUsageMonitor
 from specz import prepare_catalog
+from worker_health import WorkerFloorMonitor
 from utils import (
     configure_exception_hook,
     configure_warning_handler,
@@ -66,6 +67,7 @@ from utils import (
 __all__ = ["main"]
 
 _resource_usage_monitor: ResourceUsageMonitor | None = None
+_worker_floor_monitor: WorkerFloorMonitor | None = None
 
 
 # -----------------------
@@ -565,7 +567,7 @@ def main(
     config_path: str, cwd: str = ".", base_dir_override: str | None = None
 ) -> None:
     """Run the CRC pipeline end-to-end."""
-    global _resource_usage_monitor
+    global _resource_usage_monitor, _worker_floor_monitor
 
     delete_temp_files = True  # set True to aggressively clean intermediates
 
@@ -770,7 +772,7 @@ def main(
     _resource_usage_monitor = ResourceUsageMonitor(client)
     _resource_usage_monitor.start()
 
-    # Ensure the minimum number of workers start within 10 seconds
+    # Do not start pipeline work until the configured worker floor is ready.
     exec_args = config.get("executor", {}).get("args", {}) or {}
     instance_cfg = exec_args.get("instance", {}) or {}
     scale_cfg = exec_args.get("scale", {}) or {}
@@ -778,26 +780,52 @@ def main(
     procs = int(instance_cfg.get("processes", 1) or 1)
     min_jobs = scale_cfg.get("minimum_jobs")
     min_workers = 0 if min_jobs is None else int(min_jobs) * procs
+    recovery_timeout = float(
+        scale_cfg.get("worker_recovery_timeout_seconds", 600.0)
+    )
+    recovery_interval = float(
+        scale_cfg.get("worker_recovery_check_interval_seconds", 10.0)
+    )
+
+    def _abort_degraded_cluster() -> None:
+        try:
+            client.close(timeout=5)
+        finally:
+            cluster.close()
 
     if min_workers > 0:
         log_init.info(
-            "Waiting up to 10s for minimum_workers=%d to start...", min_workers
+            "Waiting up to %.1fs for minimum_workers=%d to start...",
+            recovery_timeout,
+            min_workers,
         )
         try:
-            client.wait_for_workers(min_workers, timeout=10)
-        except Exception:
-            current_workers = len(client.scheduler_info().get("workers", {}))
-            log_init.warning(
-                "Timeout: waited 10 seconds but minimum_workers=%d did not start "
-                "(current=%d). Proceeding anyway.",
+            client.wait_for_workers(min_workers, timeout=recovery_timeout)
+        except Exception as exc:
+            try:
+                current_workers = len(client.scheduler_info().get("workers", {}))
+            except Exception:
+                current_workers = -1
+            log_init.error(
+                "Minimum worker floor was not reached during startup: "
+                "minimum_workers=%d current=%d timeout=%.1fs. Aborting.",
                 min_workers,
                 current_workers,
+                recovery_timeout,
             )
+            try:
+                _abort_degraded_cluster()
+            except Exception:
+                log_init.exception("Failed to close cluster after startup timeout.")
+            raise RuntimeError(
+                "Dask minimum worker floor was not reached during startup."
+            ) from exc
         else:
             current_workers = len(client.scheduler_info().get("workers", {}))
             log_init.info(
-                "Confirmed: minimum_workers=%d started within 10s (current=%d).",
+                "Confirmed: minimum_workers=%d started within %.1fs (current=%d).",
                 min_workers,
+                recovery_timeout,
                 current_workers,
             )
 
@@ -806,6 +834,24 @@ def main(
         "WORKERS STILL RUNNING=%d.",
         current_workers,
     )
+
+    if min_workers > 0:
+        _worker_floor_monitor = WorkerFloorMonitor(
+            client,
+            minimum_workers=min_workers,
+            recovery_timeout_seconds=recovery_timeout,
+            check_interval_seconds=recovery_interval,
+            logger=_phase_logger(base_logger, "resources"),
+            on_timeout=_abort_degraded_cluster,
+        )
+        _worker_floor_monitor.start()
+        log_init.info(
+            "Worker-floor monitor enabled: minimum_workers=%d "
+            "recovery_timeout=%.1fs check_interval=%.1fs.",
+            min_workers,
+            recovery_timeout,
+            recovery_interval,
+        )
 
     log_init.info("END init: pipeline bootstrap")
 
@@ -1496,6 +1542,8 @@ def main(
             base_logger.error(
                 "Unknown combine_mode: %s", combine_mode, extra={"phase": "crossmatch"}
             )
+            if _worker_floor_monitor is not None:
+                _worker_floor_monitor.stop()
             client.close()
             cluster.close()
             return
@@ -2074,6 +2122,11 @@ def main(
 
     # Update process info
     try:
+        if _worker_floor_monitor is not None and _worker_floor_monitor.timed_out:
+            raise RuntimeError(
+                "Dask worker count stayed below the configured minimum beyond "
+                "the recovery timeout."
+            )
         update_process_info(
             process_info,
             process_info_path,
@@ -2208,6 +2261,8 @@ def main(
             log_cons.warning("Could not delete temp_dir %s: %s", temp_dir, e)
 
     log_cons.info("END consolidation: export complete")
+    if _worker_floor_monitor is not None:
+        _worker_floor_monitor.stop()
     client.close()
     cluster.close()
 
@@ -2271,6 +2326,8 @@ if __name__ == "__main__":
             _resource_usage_monitor.report(
                 logging.LoggerAdapter(lg, {"phase": "resources"})
             )
+        if _worker_floor_monitor is not None:
+            _worker_floor_monitor.stop()
         msg = f"Pipeline {'completed successfully' if ok else 'terminated with errors'} in {dur:.2f} seconds. (run dir: {base_dir})"
         if lg.handlers:
             logging.LoggerAdapter(lg, {"phase": "consolidation"}).info(msg)
