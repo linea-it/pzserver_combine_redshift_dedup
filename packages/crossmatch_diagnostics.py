@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Mapping, Set as AbstractSet
 import logging
 
+import dask.dataframe as dd
 import numpy as np
 import pandas as pd
 
@@ -62,6 +63,23 @@ def compute_projected_pairs(ddf, columns: list[str]) -> pd.DataFrame:
     if type(result) is not pd.DataFrame:
         result = pd.DataFrame(result)
     return result
+
+
+def stage_projected_pairs(ddf, columns: list[str], path: str):
+    """Project pair columns inside workers and stage them as Parquet.
+
+    Unlike :func:`compute_projected_pairs`, this never gathers all pair rows on
+    the driver. The returned Dask dataframe starts from the staged dataset, so
+    downstream shuffles also avoid retaining the original LSDB graph.
+    """
+    meta = _project_pairs_partition(ddf._meta, columns).iloc[:0]
+    projected = ddf.map_partitions(
+        _project_pairs_partition,
+        columns,
+        meta=meta,
+    )
+    projected.to_parquet(path, engine="pyarrow", write_index=False)
+    return dd.read_parquet(path, engine="pyarrow")
 
 
 def log_pair_separation_diagnostics(

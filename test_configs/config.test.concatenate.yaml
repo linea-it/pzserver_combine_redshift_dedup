@@ -21,7 +21,7 @@ executor:
 #      account: "hpc-public"
 #      job_extra_directives:
 #        - "--propagate"
-#        - "--time=2:00:00"
+#        - "--time=12:00:00"
 #    scale:
 #      minimum_jobs: 4
 #      maximum_jobs: 12

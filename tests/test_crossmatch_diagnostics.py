@@ -12,6 +12,7 @@ from crossmatch_diagnostics import (  # noqa: E402
     log_neighbor_count_diagnostics,
     log_pair_separation_diagnostics,
     project_catalog_for_pair_crossmatch,
+    stage_projected_pairs,
 )
 
 
@@ -71,6 +72,29 @@ def test_compute_projected_pairs_transfers_only_requested_plain_columns():
 
     assert type(result) is pd.DataFrame
     assert result.columns.tolist() == ["CRD_IDleft", "CRD_IDright", "sourceleft"]
+    assert result["CRD_IDleft"].tolist() == ["A", "B"]
+
+
+def test_stage_projected_pairs_roundtrips_without_unused_columns(tmp_path):
+    source = dd.from_pandas(
+        pd.DataFrame(
+            {
+                "CRD_IDleft": ["A", "B"],
+                "CRD_IDright": ["C", "D"],
+                "large_unused_column": ["x" * 100, "y" * 100],
+            }
+        ),
+        npartitions=2,
+    )
+
+    staged = stage_projected_pairs(
+        source,
+        ["CRD_IDleft", "CRD_IDright"],
+        str(tmp_path / "pairs"),
+    )
+    result = staged.compute(scheduler="synchronous")
+
+    assert result.columns.tolist() == ["CRD_IDleft", "CRD_IDright"]
     assert result["CRD_IDleft"].tolist() == ["A", "B"]
 
 
