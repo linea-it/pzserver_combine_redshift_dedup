@@ -16,15 +16,15 @@ executor:
 #    instance:
 #      cores: 2
 #      processes: 1
-#      memory: "30GB"
+#      memory: "40GB"
 #      queue: "cpu_small"
 #      account: "hpc-public"
 #      job_extra_directives:
 #        - "--propagate"
 #        - "--time=2:00:00"
 #    scale:
-#      minimum_jobs: 15
-#      maximum_jobs: 15
+#      minimum_jobs: 11
+#      maximum_jobs: 11
 #      adaptive: false
 
 inputs:
