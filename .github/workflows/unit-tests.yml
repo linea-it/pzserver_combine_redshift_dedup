@@ -72,4 +72,8 @@ jobs:
           conda info --envs
 
       - name: Run pre-commit validation
+        env:
+          # Branch protection is a local developer guard. CI must validate the
+          # resulting commit after it has legitimately been merged into main.
+          SKIP: no-commit-to-branch
         run: pre-commit run --all-files
