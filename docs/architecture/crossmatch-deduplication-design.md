@@ -14,16 +14,16 @@ The central design choice is deliberate:
 - pandas is used only inside bounded, per-partition computations or small-data
   fast paths.
 
-This is not a replacement of HATS with a generic tabular pipeline. It is a
-separation of responsibilities intended to preserve the HATS spatial model
-while avoiding unnecessarily large Dask/NestedFrame graphs in operations that
-do not require spatial semantics.
+This architecture separates spatial and relational responsibilities. It keeps
+the HATS spatial model at the core of the pipeline while using simpler
+distributed tabular representations for stages where spatial semantics are not
+required.
 
 ## Executive summary
 
-The pipeline does not abandon LSDB or HATS. For this pipeline and workload
-profile, it avoids using `LSDB Catalog.concat()` followed by
-`write_catalog()` on large, accumulated distributed graphs.
+For this pipeline and workload profile, the large-catalog path uses
+`LSDB Catalog.concat()` and `write_catalog()` selectively, and stages the
+heavier non-spatial transformations through Dask and Parquet boundaries.
 
 In our production-scale runs, that path kept the full LSDB/NestedFrame lineage
 attached through crossmatching, neighbor aggregation, catalog updates,
@@ -97,10 +97,9 @@ This projection is still an LSDB/HATS catalog. Its HATS partitioning and
 projected margin are preserved. Consequently, LSDB still controls the spatial
 search and boundary handling.
 
-Projecting before the crossmatch is important. Projecting the output after a
-wide crossmatch is too late: the underlying graph can still reference and
-serialize the wide input NestedFrames. Early projection prevents that wide
-crossmatch result from being constructed.
+Projecting before the crossmatch is important. It keeps the spatial stage narrow
+from the start, so the underlying graph does not need to reference and
+serialize wide input NestedFrames.
 
 ### 3. Narrow pair table
 
@@ -160,9 +159,9 @@ Projected HATS catalog A  ---- LSDB crossmatch ----  Projected HATS catalog B
                   hats-import rebuilds HATS + margins
 ```
 
-The complete catalogs are not needed to calculate angular distances. They are
-used immediately afterward to restore the complete scientific rows and attach
-the graph edges identified by the spatial operation.
+The complete catalogs are used immediately afterward to restore the complete
+scientific rows and attach the graph edges identified by the spatial
+operation.
 
 ## Why the neighbor update uses Dask joins
 
@@ -175,12 +174,12 @@ B          A
 C          A
 ```
 
-This is a relational join by `CRD_ID`, not a spatial join. The neighbor table
+This is a relational join by `CRD_ID`, rather than a spatial join. The neighbor table
 has no coordinates, HATS pixels, margins, or spatial metadata. Converting it
 into an artificial HATS catalog would add work without adding spatial
 correctness.
 
-The appropriate operation is therefore a distributed Dask merge:
+At this stage, the natural operation is a distributed Dask merge:
 
 ```text
 complete catalog rows LEFT JOIN neighbor table ON CRD_ID
@@ -220,8 +219,7 @@ The output remains complete; only the execution representation changes.
 
 ## Why Parquet is an architectural boundary
 
-Parquet is not used merely as a file-format bridge. It is a checkpoint
-between two distributed phases.
+Parquet serves as a checkpoint between two distributed phases.
 
 Before the checkpoint, the graph describes how rows were produced from prior
 crossmatches, aggregations, and joins. After reopening the Parquet dataset, the
@@ -238,7 +236,7 @@ This boundary provides:
 
 ## Why `hats-import` is used after staging
 
-The Dask concat produces complete tabular rows but does not, by itself, create a
+The Dask concat produces complete tabular rows, but it does not, by itself, create a
 HATS collection. `hats-import` is then responsible for reconstructing:
 
 - spatial pixel organization;
@@ -246,9 +244,8 @@ HATS collection. `hats-import` is then responsible for reconstructing:
 - catalog properties;
 - the configured margin catalog.
 
-The result of this staging step is therefore not a permanent non-HATS catalog.
-Parquet is an intermediate boundary, and the next persistent processing
-artifact is again a valid HATS collection.
+This staging step produces an intermediate boundary, after which the next
+persistent processing artifact is again a valid HATS collection.
 
 ## Deduplication architecture
 
@@ -326,7 +323,8 @@ catalog and are read by the deduplication solver.
 
 ## Fast paths intentionally retained
 
-The pipeline does not ban `concat()` or `write_catalog()`.
+The pipeline retains `concat()` and `write_catalog()` where they are a good
+fit.
 
 They remain appropriate when the graph is small and simple:
 
@@ -337,9 +335,8 @@ They remain appropriate when the graph is small and simple:
   `write_catalog()`;
 - large and lazy HATS outputs use Parquet staging and `hats-import`.
 
-The choice is based on execution scale and graph complexity, not on any claim
-that the LSDB APIs are generally unsuitable. It should be read as a
-workload-specific execution tradeoff.
+The choice is based on execution scale and graph complexity. It should be read
+as a workload-specific execution tradeoff.
 
 ## Why HATS is not used for every intermediate table
 
@@ -351,7 +348,7 @@ semantics. Some intermediate datasets do not:
 - per-object tie labels;
 - a tabular concatenation waiting to be reimported.
 
-Forcing these structures into HATS would require artificial coordinates,
+Representing these structures as HATS datasets would require artificial coordinates,
 unnecessary indexing, extra metadata, and additional import/write cycles. It
 would not improve the correctness of a key-based groupby or join.
 
@@ -371,12 +368,12 @@ The checkpoint-based path has costs:
 
 These costs are accepted because, in this workload, they replace less
 predictable scheduler and worker memory pressure with bounded distributed I/O.
-On production-scale catalogs, stability and recoverability are more important
-than avoiding a single intermediate write.
+At production scale, this tradeoff favors bounded execution, recoverability,
+and operational clarity.
 
 ## Future opportunities for a more direct LSDB path
 
-The current design should not prevent future LSDB optimizations. If LSDB gains
+The current design remains compatible with future LSDB optimizations. If LSDB gains
 a large-catalog concat/write path that materializes partitions incrementally,
 cuts lineage before writing, or accepts narrow key-based updates without
 retaining the complete preceding graph, this pipeline design can be
