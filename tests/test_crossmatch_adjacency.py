@@ -13,11 +13,17 @@ if "tables_io" not in sys.modules:
 
 from crossmatch_auto import (  # noqa: E402
     _adjacency_from_pairs as auto_adjacency,
+)
+from crossmatch_auto import (
     _merge_compared_to_partition as auto_merge_compared_to,
 )
 from crossmatch_cross import (  # noqa: E402
     _adjacency_from_pairs as cross_adjacency,
+)
+from crossmatch_cross import (
     _attach_distributed_neighbors,
+)
+from crossmatch_cross import (
     _merge_compared_to_partition as cross_merge_compared_to,
 )
 

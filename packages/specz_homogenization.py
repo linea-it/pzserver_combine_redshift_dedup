@@ -467,7 +467,7 @@ def _homogenize(
             # User-provided 'z_flag_homogenized' is present. Validate allowed domain {0,1,2,3,4} (NaN allowed).
             logger.info(f"{product_name} 'z_flag_homogenized' already exists; validating user-provided values.")
             allowed = {0.0, 1.0, 2.0, 3.0, 4.0, 6.0}
-        
+
             vals = dd.to_numeric(df["z_flag_homogenized"], errors="coerce")
             # NaN is allowed; only non-NaN values outside the allowed set are invalid
             invalid_mask = (~dd.isna(vals)) & ~vals.isin(list(allowed))
@@ -475,14 +475,14 @@ def _homogenize(
                 invalid_mask.sum(), vals.count()
             )
             validated_non_null_counts["z_flag_homogenized"] = int(non_null_count)
-        
+
             if invalid_count > 0:
                 examples = df["z_flag_homogenized"].loc[invalid_mask].head(5, compute=True).tolist()
                 raise ValueError(
                     f"[{product_name}] Invalid values in user-provided 'z_flag_homogenized'. "
                     f"Allowed set is {sorted(allowed)} (NaN allowed). Examples of invalid values: {examples}"
                 )
-        
+
             # Cast to Arrow-backed float dtype for consistency
             df["z_flag_homogenized"] = vals.map_partitions(
                 lambda s: s.astype(DTYPE_FLOAT),
@@ -537,12 +537,12 @@ def _homogenize(
             # User-provided 'instrument_type_homogenized' is present. Validate allowed domain {"s","p","g"}.
             logger.info(f"{product_name} 'instrument_type_homogenized' already exists; validating user-provided values.")
             allowed = {"s", "p", "g"}
-        
+
             normed = df["instrument_type_homogenized"].map_partitions(
                 _normalize_string_series_to_na,
                 meta=pd.Series(pd.array([], dtype=DTYPE_STR)),
             ).str.lower()
-        
+
             invalid_mask = (~dd.isna(normed)) & ~normed.isin(list(allowed))
             invalid_count, non_null_count = dask.compute(
                 invalid_mask.sum(), normed.count()
@@ -550,14 +550,14 @@ def _homogenize(
             validated_non_null_counts["instrument_type_homogenized"] = int(
                 non_null_count
             )
-        
+
             if invalid_count > 0:
                 examples = df["instrument_type_homogenized"].loc[invalid_mask].head(5, compute=True).tolist()
                 raise ValueError(
                     f"[{product_name}] Invalid values in user-provided 'instrument_type_homogenized'. "
                     f"Allowed set is {sorted(allowed)}. Examples of invalid values: {examples}"
                 )
-        
+
             # Keep normalized lower-case values for consistency
             df["instrument_type_homogenized"] = normed
 

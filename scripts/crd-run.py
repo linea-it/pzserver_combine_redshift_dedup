@@ -10,35 +10,36 @@ from __future__ import annotations
 # Standard library
 # -----------------------
 import argparse
-from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 import glob
 import json
-import os
-import shutil
-import time
-import warnings
-from typing import Any
 
 # -----------------------
 # Logging
 # -----------------------
 import logging
+import os
+import shutil
+import time
+import warnings
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
+from typing import Any
 
 # -----------------------
 # Third-party
 # -----------------------
 import dask
 import dask.dataframe as dd
-import pandas as pd
-import numpy as np
-from dask.distributed import Client, as_completed, performance_report, wait as dask_wait
 import lsdb
+import numpy as np
+import pandas as pd
 
 # -----------------------
 # Project
 # -----------------------
 from crossmatch_auto import crossmatch_auto
 from crossmatch_cross import crossmatch_tiebreak_safe
+from dask.distributed import Client, as_completed, performance_report
+from dask.distributed import wait as dask_wait
 from deduplication import (
     REPRESENTATIVE_RADIUS_DIAGNOSTIC_COLUMN,
     count_global_edge_group_mismatches,
@@ -52,7 +53,6 @@ from executor import get_executor
 from product_handle import save_dataframe
 from resource_usage import ResourceUsageMonitor
 from specz import prepare_catalog, validate_combine_configuration
-from worker_health import WorkerFloorMonitor
 from utils import (
     configure_exception_hook,
     configure_warning_handler,
@@ -64,6 +64,7 @@ from utils import (
     start_crc_log_collector,
     update_process_info,
 )
+from worker_health import WorkerFloorMonitor
 
 __all__ = ["main"]
 

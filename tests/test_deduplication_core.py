@@ -8,7 +8,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "packages"))
 
 from deduplication import deduplicate_pandas  # noqa: E402
 
-
 INSTRUMENT_PRIORITY = {"s": 3, "g": 2, "p": 1}
 
 

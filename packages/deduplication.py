@@ -10,36 +10,36 @@ Dask/LSDB per-partition driver (`run_dedup_with_lsdb_map_partitions`).
 # -----------------------
 # Standard library
 # -----------------------
+import hashlib
+import logging
+import math
 from typing import (
+    Dict,
     Iterable,
+    List,
     Mapping,
     Sequence,
-    Dict,
-    List,
 )
-import math
-import logging
-import hashlib
+
+import dask.dataframe as dd
 
 # -----------------------
 # Third-party
 # -----------------------
 import numpy as np
 import pandas as pd
-import dask.dataframe as dd
 
 REPRESENTATIVE_RADIUS_DIAGNOSTIC_COLUMN = "_diag_representative_max_radius_arcsec"
 
 # -----------------------
 # Project
 # -----------------------
-from utils import get_phase_logger, log_phase
-
 from lsdb.dask.merge_catalog_functions import (
+    align_and_apply,
     concat_align_catalogs,
     get_aligned_pixels_from_alignment,
-    align_and_apply,
 )
+from utils import get_phase_logger, log_phase
 
 # -----------------------
 # Logger (child of 'crc')

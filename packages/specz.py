@@ -27,7 +27,8 @@ import dask
 import dask.dataframe as dd
 import numpy as np
 import pandas as pd
-from dask.distributed import get_client as _get_client, wait
+from dask.distributed import get_client as _get_client
+from dask.distributed import wait
 
 dask.config.set({"dataframe.shuffle.method": "tasks"})
 os.environ.setdefault("DASK_DISTRIBUTED__SHUFFLE__METHOD", "tasks")
@@ -38,15 +39,17 @@ os.environ.setdefault("DASK_DISTRIBUTED__SHUFFLE__METHOD", "tasks")
 import hats  # noqa: F401
 from product_handle import (
     ProductHandle,
+)
+from product_handle import (
     build_collection_with_retry as _build_collection_with_retry,
 )
-from utils import ensure_crc_logger
 from specz_homogenization import (
     JADES_LETTER_TO_SCORE,
     VIMOS_FLAG_TO_SCORE,
-    _honor_user_homogenized_mapping,
     _homogenize,
+    _honor_user_homogenized_mapping,
 )
+from utils import ensure_crc_logger
 
 if TYPE_CHECKING:
     from dask.distributed import Client  # noqa: F401

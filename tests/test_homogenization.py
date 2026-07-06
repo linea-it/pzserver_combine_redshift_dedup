@@ -14,13 +14,12 @@ if "tables_io" not in sys.modules:
     tables_io.types = types.SimpleNamespace(PD_DATAFRAME="PD_DATAFRAME")
     sys.modules["tables_io"] = tables_io
 
-from specz_homogenization import _homogenize  # noqa: E402
 from specz import (  # noqa: E402
     _normalize_custom_tiebreaking_priorities,
     _requires_z_flag_homogenization,
     validate_combine_configuration,
 )
-
+from specz_homogenization import _homogenize  # noqa: E402
 
 LOGGER = logging.getLogger("test.homogenization")
 

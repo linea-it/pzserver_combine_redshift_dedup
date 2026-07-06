@@ -11,11 +11,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "packages"))
 
 from deduplication import (  # noqa: E402
     _collapse_within_dz,
-    count_global_edge_group_mismatches,
-    count_global_tie_invariant_violations,
     _dedup_local_with_margin,
     _log_representative_radius_diagnostics,
     _validate_local_tie_invariants,
+    count_global_edge_group_mismatches,
+    count_global_tie_invariant_violations,
 )
 
 

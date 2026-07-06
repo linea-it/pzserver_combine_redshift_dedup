@@ -25,16 +25,10 @@ if TYPE_CHECKING:
 # -----------------------
 # Third-party
 # -----------------------
-import numpy as np
-import pandas as pd
 import dask
 import dask.dataframe as dd
-from dask.distributed import get_client
-
-# -----------------------
-# Project
-# -----------------------
-from specz import DTYPE_STR, _build_collection_with_retry
+import numpy as np
+import pandas as pd
 from crossmatch_cross import (
     _attach_distributed_neighbors,
     _log_neighbor_saturation_distributed,
@@ -48,6 +42,12 @@ from crossmatch_diagnostics import (
     project_catalog_for_pair_crossmatch,
     stage_projected_pairs,
 )
+from dask.distributed import get_client
+
+# -----------------------
+# Project
+# -----------------------
+from specz import DTYPE_STR, _build_collection_with_retry
 from utils import get_phase_logger
 
 __all__ = ["crossmatch_auto"]

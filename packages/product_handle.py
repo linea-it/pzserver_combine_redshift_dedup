@@ -15,8 +15,8 @@ import glob
 import io
 import json
 import os
-from importlib.metadata import PackageNotFoundError, version
 import shutil
+from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 
 # -----------------------
