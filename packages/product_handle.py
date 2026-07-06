@@ -957,6 +957,14 @@ def save_dataframe(
     ext = format_.lower()
 
     if ext == "parquet":
+        if _is_dask_dataframe(df):
+            _write_single_parquet_from_dask(
+                df,
+                Path(f"{output_path}.parquet"),
+                temp_dir=temp_dir,
+                logger=logger,
+            )
+            return
         try:
             df2 = df.reset_index(drop=True)
         except Exception:
@@ -985,6 +993,15 @@ def save_dataframe(
         return
 
     # CSV/FITS start from numpy_nullable to stabilize null semantics
+    if ext == "csv" and _is_dask_dataframe(df):
+        _write_single_csv_from_dask(
+            df,
+            Path(f"{output_path}.csv"),
+            temp_dir=temp_dir,
+            logger=logger,
+        )
+        return
+
     df_np = df.convert_dtypes(dtype_backend="numpy_nullable", convert_boolean=False)
 
     if ext == "csv":
@@ -1249,9 +1266,110 @@ def _ensure_staged_parquet_non_empty(parquet_path: Path) -> None:
         return
 
     raise RuntimeError(
-        "Final catalog is empty after HATS parquet staging. "
+        "Final catalog is empty after Parquet staging. "
         "Nothing can be consolidated."
     )
+
+
+def _stage_distributed_single_file_input(
+    data,
+    output_path: Path,
+    temp_dir,
+    logger,
+) -> Path:
+    """Materialize a Dask dataframe once as distributed Parquet parts."""
+    staging_root = Path(temp_dir) if temp_dir else output_path.parent / "temp"
+    parquet_path = staging_root / f".{output_path.name}_parts"
+    if parquet_path.exists():
+        shutil.rmtree(parquet_path, ignore_errors=True)
+    parquet_path.mkdir(parents=True, exist_ok=True)
+    _log_info(logger, "Staging distributed single-file output at %s", parquet_path)
+    data.to_parquet(
+        str(parquet_path),
+        engine="pyarrow",
+        write_index=False,
+        overwrite=True,
+    )
+    _ensure_staged_parquet_non_empty(parquet_path)
+    return parquet_path
+
+
+def _write_single_parquet_from_dask(
+    data,
+    output_path: Path,
+    *,
+    temp_dir,
+    logger,
+) -> None:
+    """Write one Parquet file after distributed staging, one batch at a time."""
+    parquet_path = _stage_distributed_single_file_input(
+        data, output_path, temp_dir, logger
+    )
+    parts = sorted(parquet_path.rglob("*.parquet"))
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    temporary_output = output_path.with_name(f".{output_path.name}.tmp")
+    temporary_output.unlink(missing_ok=True)
+
+    writer = None
+    try:
+        for part_path in parts:
+            source = pq.ParquetFile(part_path)
+            if writer is None:
+                writer = pq.ParquetWriter(temporary_output, source.schema_arrow)
+            for batch in source.iter_batches(batch_size=65_536):
+                writer.write_table(pa.Table.from_batches([batch]))
+        if writer is None:
+            raise RuntimeError("Distributed Parquet staging produced no readable parts")
+        writer.close()
+        writer = None
+        temporary_output.replace(output_path)
+    except Exception:
+        if writer is not None:
+            writer.close()
+        temporary_output.unlink(missing_ok=True)
+        raise
+    else:
+        shutil.rmtree(parquet_path, ignore_errors=True)
+        _log_info(logger, "Finished single Parquet output: %s", output_path)
+
+
+def _write_single_csv_from_dask(
+    data,
+    output_path: Path,
+    *,
+    temp_dir,
+    logger,
+) -> None:
+    """Write one CSV after distributed staging, one Arrow batch at a time."""
+    parquet_path = _stage_distributed_single_file_input(
+        data, output_path, temp_dir, logger
+    )
+    parts = sorted(parquet_path.rglob("*.parquet"))
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    temporary_output = output_path.with_name(f".{output_path.name}.tmp")
+    temporary_output.unlink(missing_ok=True)
+
+    wrote_header = False
+    try:
+        with temporary_output.open("w", encoding="utf-8", newline="") as handle:
+            for part_path in parts:
+                source = pq.ParquetFile(part_path)
+                for batch in source.iter_batches(batch_size=65_536):
+                    batch.to_pandas().to_csv(
+                        handle,
+                        index=False,
+                        header=not wrote_header,
+                    )
+                    wrote_header = True
+        if not wrote_header:
+            raise RuntimeError("Distributed Parquet staging produced no CSV rows")
+        temporary_output.replace(output_path)
+    except Exception:
+        temporary_output.unlink(missing_ok=True)
+        raise
+    else:
+        shutil.rmtree(parquet_path, ignore_errors=True)
+        _log_info(logger, "Finished single CSV output: %s", output_path)
 
 
 def build_collection_with_retry(

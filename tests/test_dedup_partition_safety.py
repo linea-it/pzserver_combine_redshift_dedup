@@ -55,6 +55,36 @@ def test_boundary_component_has_same_canonical_group_from_both_pixels():
     assert from_b_pixel["tie_result"] == 0
 
 
+def test_custom_priority_keeps_star_semantics_without_flag_ranking():
+    rows = [
+        {
+            **_row("A", "B, S", 10.0, 4.0),
+            "custom_score": 1.0,
+        },
+        {
+            **_row("B", "A, S", 10.0 + 0.1 / 3600.0, 3.0),
+            "custom_score": 10.0,
+        },
+        {
+            **_row("S", "A, B", 10.0 + 0.2 / 3600.0, 6.0),
+            "custom_score": 100.0,
+        },
+    ]
+
+    result = _dedup_local_with_margin(
+        pd.DataFrame(rows),
+        pd.DataFrame(),
+        pixel=None,
+        tiebreaking_priority=["custom_score"],
+        instrument_type_priority=None,
+        group_col="group_id",
+    ).set_index("CRD_ID")
+
+    assert result["tie_result"].astype(int).to_dict() == {"A": 0, "B": 1, "S": 3}
+    assert result.loc["A", "group_id"] == result.loc["B", "group_id"]
+    assert result.loc["S", "group_id"] != result.loc["B", "group_id"]
+
+
 def test_local_invariant_accepts_single_winner_and_hard_tie():
     frame = pd.DataFrame(
         {

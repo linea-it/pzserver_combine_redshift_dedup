@@ -194,6 +194,8 @@ def _homogenize(
     product_name: str,
     logger: logging.Logger,
     type_cast_ok: bool,
+    *,
+    require_z_flag_homogenized: bool = False,
 ) -> tuple[dd.DataFrame, bool, list, dict, dict]:
     """Compute homogenized columns for tie-breaking.
 
@@ -203,6 +205,8 @@ def _homogenize(
         product_name: Catalog identifier.
         logger: Logger.
         type_cast_ok: Whether `type` was normalized.
+        require_z_flag_homogenized: Create and validate the flag for semantic
+            star classification even when it is not a ranking priority.
 
     Returns:
         Tuple: (df, used_type_fastpath, tiebreaking_priority, instrument_type_priority, translation_rules_uc)
@@ -211,6 +215,8 @@ def _homogenize(
     instrument_type_priority = translation_config.get("instrument_type_priority", {})
     translation_rules_uc = {k.upper(): v for k, v in translation_config.get("translation_rules", {}).items()}
     validated_non_null_counts: dict[str, int] = {}
+    z_flag_is_priority = "z_flag_homogenized" in tiebreaking_priority
+    needs_z_flag = z_flag_is_priority or require_z_flag_homogenized
 
     # -----------------------
     # Vectorized translator
@@ -436,7 +442,7 @@ def _homogenize(
             return 4.0
         return np.nan
 
-    if "z_flag_homogenized" in tiebreaking_priority:
+    if needs_z_flag:
         if "z_flag_homogenized" not in df.columns:
             if can_use_zflag_as_quality():
                 logger.info(f"{product_name} Using 'z_flag' fast path for z_flag_homogenized.")
@@ -556,20 +562,22 @@ def _homogenize(
             df["instrument_type_homogenized"] = normed
 
     # --- post-homogenization sanity checks (required columns must not be all-NaN) ---
-    if "z_flag_homogenized" in tiebreaking_priority:
+    if needs_z_flag:
         if "z_flag_homogenized" not in df.columns:
             raise ValueError(
-                f"[{product_name}] 'z_flag_homogenized' is required by tiebreaking_priority but is missing after homogenization."
+                f"[{product_name}] 'z_flag_homogenized' is required for "
+                "star classification but is missing after homogenization."
             )
-        non_null = validated_non_null_counts.get("z_flag_homogenized")
-        if non_null is None:
-            non_null = dask.compute(df["z_flag_homogenized"].count())[0]
-        if int(non_null) == 0:
-            raise ValueError(
-                f"[{product_name}] All values in 'z_flag_homogenized' are NaN. "
-                "This column is required (in tiebreaking_priority) and must contain at least one non-NaN value. "
-                "Verify YAML translations / fast-path logic and input columns."
-            )
+        if z_flag_is_priority:
+            non_null = validated_non_null_counts.get("z_flag_homogenized")
+            if non_null is None:
+                non_null = dask.compute(df["z_flag_homogenized"].count())[0]
+            if int(non_null) == 0:
+                raise ValueError(
+                    f"[{product_name}] All values in 'z_flag_homogenized' are NaN. "
+                    "This column is required (in tiebreaking_priority) and must contain at least one non-NaN value. "
+                    "Verify YAML translations / fast-path logic and input columns."
+                )
 
     if "instrument_type_homogenized" in tiebreaking_priority:
         if "instrument_type_homogenized" not in df.columns:

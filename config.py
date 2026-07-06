@@ -19,9 +19,11 @@ class Slurm(BaseModel):
         job_extra_directives: list[str] = ["--propagate", "--time=12:00:00"]
 
     class Scale(BaseModel):
-        minimum_jobs: int = 10
+        minimum_jobs: int = 3
         maximum_jobs: int = 22
-        worker_recovery_timeout_seconds: float = 600.0
+        adaptive_interval_seconds: float = 10.0
+        adaptive_scale_down_delay_seconds: float = 180.0
+        worker_recovery_timeout_seconds: float = 360.0
         worker_recovery_check_interval_seconds: float = 10.0
 
         @model_validator(mode="after")
@@ -30,6 +32,12 @@ class Slurm(BaseModel):
                 raise ValueError("minimum_jobs must be at least 1")
             if self.maximum_jobs < self.minimum_jobs:
                 raise ValueError("maximum_jobs must be >= minimum_jobs")
+            if self.adaptive_interval_seconds <= 0:
+                raise ValueError("adaptive_interval_seconds must be positive")
+            if self.adaptive_scale_down_delay_seconds <= 0:
+                raise ValueError(
+                    "adaptive_scale_down_delay_seconds must be positive"
+                )
             if self.worker_recovery_timeout_seconds <= 0:
                 raise ValueError("worker_recovery_timeout_seconds must be positive")
             if self.worker_recovery_check_interval_seconds <= 0:
@@ -93,7 +101,7 @@ class Inputs(BaseModel):
 class Param(BaseModel):
     combine_type: str = "concatenate"
     extra_columns: dict[str, Any] = Field(default_factory=dict)
-    # Valid cuts are 1, 2, 3, 4, 5, 6. Invalid values skip the cut with a warning.
+    # Zero disables the cut; valid active cuts are 1, 2, 3, 4, 5, 6.
     z_flag_homogenized_value_to_cut: float = 3.0
     flags_translation_file: str = str(Path(MAINDIR, "flags_translation.yaml"))
     insert_DP1_footprint_flag: bool = False

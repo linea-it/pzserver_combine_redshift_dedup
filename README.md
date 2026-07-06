@@ -32,13 +32,6 @@ unit tests:
 pytest
 ```
 
-Integration tests execute the complete pipeline, may manage a separate runtime
-environment, and are excluded from the default suite. Run them explicitly with:
-
-```bash
-pytest -m slow
-```
-
 ### Pre-commit checks
 
 With `pipe_crd_dev` activated, install the repository hook once:
@@ -64,7 +57,9 @@ progress for that pull request.
 
 ### Test data
 
-This repository currently contains a basic dataset, for testing purposes only. The ideal is to connect the pipelines to systems with access to a larger datasets.
+The repository contains three small sample catalogs used by
+`config.template.yaml` for local smoke runs. Unit tests create their own
+temporary fixtures and do not depend on these files.
 
 ### Install
 
@@ -72,17 +67,8 @@ The only requirement is to have `micromamba` available in `PATH`:
 
 ```bash
 git clone https://github.com/linea-it/pzserver_combine_redshift_dedup && cd pzserver_combine_redshift_dedup
-./setup.sh
-source env.sh
-```
-
-To install all pipelines at once:
-
-```bash
 ./install.sh
 ```
-
-The `setup.sh` will suggest a directory where the pipelines and datasets are installed, type 'yes' to confirm or 'no' to configure the desired path in each case with the respective environment variables and then run again `setup.sh`.
 
 The installation script creates the `pipe_crd` environment with `micromamba`.
 
@@ -95,20 +81,9 @@ export MAMBA_ROOT_PREFIX=/path/to/shared/or/persistent/micromamba
 
 ## Run a pipeline
 
-To execute, simply:
+Copy and edit the example configuration, then execute the pipeline:
 
 ```bash
-# execute combine redshift catalogs
+cp config.template.yaml config.yaml
 ./run.sh config.yaml process001
-```
-
-
-## Validation notebook
-
-To validate your test results, use the notebook `validation.ipynb`:
-
-```
-conda install -c conda-forge jupyterlab ipykernel
-python -m ipykernel install --user --name=pipe_crd
-jupyter lab
 ```

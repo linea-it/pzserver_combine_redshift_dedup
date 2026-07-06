@@ -2330,6 +2330,127 @@ def _maybe_collection(
 # -----------------------
 # Main orchestrator
 # -----------------------
+def _requires_z_flag_homogenization(combine_mode: str, cut_value: object) -> bool:
+    """Whether preparation needs the semantic flag outside ranking priorities."""
+    if combine_mode in {
+        "concatenate_and_mark_duplicates",
+        "concatenate_and_remove_duplicates",
+    }:
+        return True
+    try:
+        numeric_cut = float(cut_value)
+    except (TypeError, ValueError):
+        return False
+    return numeric_cut in {1.0, 2.0, 3.0, 4.0, 5.0, 6.0}
+
+
+def validate_combine_configuration(
+    combine_mode: object,
+    tiebreaking_priority: object,
+    cut_value: object,
+    logger: logging.LoggerAdapter | logging.Logger | None = None,
+) -> tuple[str, list[str]]:
+    """Validate combine semantics before any catalog preparation starts."""
+    normalized_mode = str(combine_mode or "").strip().lower()
+    valid_modes = {
+        "concatenate",
+        "concatenate_and_mark_duplicates",
+        "concatenate_and_remove_duplicates",
+    }
+    if normalized_mode not in valid_modes:
+        raise ValueError(
+            f"Invalid combine_type={combine_mode!r}; expected one of "
+            f"{sorted(valid_modes)}"
+        )
+
+    if tiebreaking_priority is None:
+        priorities: list[str] = []
+    elif isinstance(tiebreaking_priority, (list, tuple)):
+        priorities = [str(value).strip() for value in tiebreaking_priority]
+    else:
+        raise TypeError("tiebreaking_priority must be a list of column names")
+    if any(not value for value in priorities):
+        raise ValueError("tiebreaking_priority cannot contain empty column names")
+    if len(set(priorities)) != len(priorities):
+        raise ValueError("tiebreaking_priority cannot contain duplicate columns")
+    if normalized_mode != "concatenate" and not priorities:
+        raise ValueError(
+            f"tiebreaking_priority must be non-empty for {normalized_mode}"
+        )
+
+    try:
+        numeric_cut = float(cut_value) if cut_value is not None else None
+    except (TypeError, ValueError):
+        numeric_cut = None
+    if (
+        normalized_mode == "concatenate_and_remove_duplicates"
+        and numeric_cut == 6.0
+        and logger is not None
+    ):
+        logger.warning(
+            "z_flag_homogenized_value_to_cut=6 retains only stars, while "
+            "concatenate_and_remove_duplicates excludes tie_result=3; the final "
+            "catalog will normally be empty."
+        )
+    return normalized_mode, priorities
+
+
+def _normalize_custom_tiebreaking_priorities(
+    df: dd.DataFrame,
+    priorities: list[str],
+    product_name: str,
+    logger: logging.LoggerAdapter | logging.Logger,
+) -> dd.DataFrame:
+    """Require and normalize generic ranking columns for one input catalog."""
+    custom_priorities = [
+        column
+        for column in priorities
+        if column
+        not in {"z_flag_homogenized", "instrument_type_homogenized"}
+    ]
+    for column in custom_priorities:
+        if column not in df.columns:
+            raise ValueError(
+                f"[{product_name}] Custom tiebreaking priority '{column}' is "
+                "missing; custom priorities must exist in every input catalog"
+            )
+
+        original = df[column]
+        numeric = dd.to_numeric(original, errors="coerce")
+        total_rows, original_non_null, valid_numeric, coerced_invalid = dask.compute(
+            df.map_partitions(len).sum(),
+            (~original.isna()).sum(),
+            (~numeric.isna()).sum(),
+            ((~original.isna()) & numeric.isna()).sum(),
+        )
+        total_rows = int(total_rows)
+        original_non_null = int(original_non_null)
+        valid_numeric = int(valid_numeric)
+        coerced_invalid = int(coerced_invalid)
+        if valid_numeric == 0:
+            raise ValueError(
+                f"[{product_name}] Custom tiebreaking priority '{column}' has "
+                "no valid numeric values"
+            )
+        invalid_fraction = (
+            coerced_invalid / original_non_null if original_non_null else 0.0
+        )
+        logger.info(
+            "[%s] Custom priority '%s': rows=%d valid_numeric=%d "
+            "missing=%d coerced_invalid=%d invalid_fraction=%.6f; "
+            "normalized_dtype=float64",
+            product_name,
+            column,
+            total_rows,
+            valid_numeric,
+            total_rows - original_non_null,
+            coerced_invalid,
+            invalid_fraction,
+        )
+        df = df.assign(**{column: numeric.astype("float64")})
+    return df
+
+
 def prepare_catalog(
     entry: dict,
     translation_config: dict,
@@ -2370,6 +2491,10 @@ def prepare_catalog(
 
     extra_columns = _normalize_extra_columns_config(param_config.get("extra_columns"))
 
+    z_flag_homogenized_value_to_cut = param_config.get(
+        "z_flag_homogenized_value_to_cut", None
+    )
+
     # 1) Load product
     ph = ProductHandle(entry["path"])
     df = ph.to_ddf()
@@ -2398,12 +2523,25 @@ def prepare_catalog(
         tiebreaking_priority,
         instrument_type_priority,  # noqa: F841
         translation_rules_uc,
-    ) = _homogenize(df, translation_config, product_name, lg, type_cast_ok=type_cast_ok)
+    ) = _homogenize(
+        df,
+        translation_config,
+        product_name,
+        lg,
+        type_cast_ok=type_cast_ok,
+        require_z_flag_homogenized=_requires_z_flag_homogenization(
+            combine_mode,
+            z_flag_homogenized_value_to_cut,
+        ),
+    )
+    df = _normalize_custom_tiebreaking_priorities(
+        df,
+        list(tiebreaking_priority),
+        product_name,
+        lg,
+    )
 
     # 7) Apply cut based on z_flag_homogenized if requested
-    z_flag_homogenized_value_to_cut = param_config.get(
-        "z_flag_homogenized_value_to_cut", None
-    )
     if (
         z_flag_homogenized_value_to_cut is not None
         and "z_flag_homogenized" in df.columns
@@ -2416,10 +2554,14 @@ def prepare_catalog(
                 z_flag_homogenized_value_to_cut,
             )
         else:
-            if cut_val not in {1.0, 2.0, 3.0, 4.0, 5.0, 6.0}:
+            if cut_val == 0.0:
+                # Zero is the explicit no-cut sentinel. It is summarized once
+                # by the driver instead of repeated for every input catalog.
+                pass
+            elif cut_val not in {1.0, 2.0, 3.0, 4.0, 5.0, 6.0}:
                 lg.warning(
-                    "Invalid z_flag_homogenized_value_to_cut=%s; valid cut values "
-                    "are 1, 2, 3, 4, 5, 6. Skipping cut.",
+                    "Invalid z_flag_homogenized_value_to_cut=%s; use 0 to disable "
+                    "the cut or one of 1, 2, 3, 4, 5, 6. Skipping cut.",
                     z_flag_homogenized_value_to_cut,
                 )
             else:

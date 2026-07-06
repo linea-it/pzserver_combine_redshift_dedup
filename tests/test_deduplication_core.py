@@ -150,6 +150,24 @@ def test_missing_priority_column_fails_clearly():
         )
 
 
+def test_missing_semantic_star_flag_fails_clearly():
+    frame = pd.DataFrame(
+        {
+            "CRD_ID": ["A"],
+            "compared_to": [pd.NA],
+            "z": [0.1],
+            "custom_score": [1.0],
+        }
+    )
+
+    with pytest.raises(KeyError, match="z_flag_homogenized"):
+        deduplicate_pandas(
+            frame,
+            tiebreaking_priority=["custom_score"],
+            group_col="group_id",
+        )
+
+
 def test_instrument_priority_mapping_is_required_when_used():
     with pytest.raises(ValueError, match="instrument_type_priority is required"):
         deduplicate_pandas(

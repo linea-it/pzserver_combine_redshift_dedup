@@ -31,7 +31,7 @@ def test_staged_parquet_validation_rejects_empty_output(
             tmp_path / "part-0.parquet",
         )
 
-    with pytest.raises(RuntimeError, match="empty after HATS parquet staging"):
+    with pytest.raises(RuntimeError, match="empty after Parquet staging"):
         _ensure_staged_parquet_non_empty(tmp_path)
 
 
