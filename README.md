@@ -51,9 +51,10 @@ Run the same checks manually across the repository with:
 pre-commit run --all-files
 ```
 
-Pull requests run the same Ruff and lightweight unit-test checks automatically
-through GitHub Actions. New commits cancel any older validation run still in
-progress for that pull request.
+Pull requests targeting `main` and commits merged into `main` run the same Ruff
+and lightweight unit-test checks automatically through GitHub Actions. The
+workflow also validates its own GitHub Actions configuration. New commits cancel
+older validation runs still in progress for the same pull request or branch.
 
 ### Test data
 
