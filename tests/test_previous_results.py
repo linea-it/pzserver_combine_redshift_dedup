@@ -7,12 +7,11 @@ from pathlib import Path
 import dask.dataframe as dd
 import pandas as pd
 
-
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "packages"))
 
 from specz import (  # noqa: E402
-    _drop_previous_results,
     _copy_extra_columns_from_sources,
+    _drop_previous_results,
     _normalize_extra_columns_config,
     _prefer_pipeline_output_id_mapping,
     _select_output_columns,

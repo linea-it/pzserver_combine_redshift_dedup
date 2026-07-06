@@ -9,7 +9,11 @@ tiebreaking_priority:
   # - It exists in all catalogs being crossmatched.
   # - It is numeric (except for 'instrument_type_homogenized', which uses a string-to-priority mapping).
   # - Higher values are considered better; lower values are worse.
+  # Generic priority columns are normalized to float64 per catalog and must
+  # contain at least one valid numeric value in every input catalog.
   # The columns will be evaluated in the order listed to resolve duplicates.
+  # In deduplication modes, z_flag_homogenized is still created and preserved
+  # for star classification (value 6), even when omitted from this ranking.
 
 delta_z_threshold: 0.001    # Maximum allowed redshift difference (|z1 - z2|) to resolve hard ties
                              # Applied only when initial tiebreaking via columns results in a tie (tie_result == 2)
@@ -133,7 +137,7 @@ translation_rules:
       6: 6
     instrument_type_translation:
       default: "s"
-      
+
   ASTRODEEP:
     z_flag_translation:
       conditions:
@@ -149,7 +153,7 @@ translation_rules:
         - expr: "zspec_survey == '-'"
           value: "p"
       default: "p"
-      
+
   ASTRODEEP-JWST:
     z_flag_translation:
       conditions:

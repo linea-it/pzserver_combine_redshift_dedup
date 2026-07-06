@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Set as AbstractSet
 import logging
+from collections.abc import Mapping
+from collections.abc import Set as AbstractSet
 
 import dask.dataframe as dd
 import numpy as np

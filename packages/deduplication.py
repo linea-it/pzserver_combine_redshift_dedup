@@ -10,36 +10,36 @@ Dask/LSDB per-partition driver (`run_dedup_with_lsdb_map_partitions`).
 # -----------------------
 # Standard library
 # -----------------------
+import hashlib
+import logging
+import math
 from typing import (
+    Dict,
     Iterable,
+    List,
     Mapping,
     Sequence,
-    Dict,
-    List,
 )
-import math
-import logging
-import hashlib
+
+import dask.dataframe as dd
 
 # -----------------------
 # Third-party
 # -----------------------
 import numpy as np
 import pandas as pd
-import dask.dataframe as dd
 
 REPRESENTATIVE_RADIUS_DIAGNOSTIC_COLUMN = "_diag_representative_max_radius_arcsec"
 
 # -----------------------
 # Project
 # -----------------------
-from utils import get_phase_logger, log_phase
-
 from lsdb.dask.merge_catalog_functions import (
+    align_and_apply,
     concat_align_catalogs,
     get_aligned_pixels_from_alignment,
-    align_and_apply,
 )
+from utils import get_phase_logger, log_phase
 
 # -----------------------
 # Logger (child of 'crc')
@@ -76,6 +76,8 @@ __all__ = [
     "run_dedup_with_lsdb_map_partitions",
     "count_global_edge_group_mismatches",
     "count_global_tie_invariant_violations",
+    "filter_dask_by_tie_treatment",
+    "filter_pandas_by_tie_treatment",
 ]
 
 
@@ -141,6 +143,10 @@ def _validate_local_tie_invariants(
     z_flag_col: str = "z_flag_homogenized",
 ) -> None:
     """Validate winner/hard-tie semantics for every local component."""
+    if z_flag_col not in df.columns:
+        raise KeyError(
+            f"Missing required semantic column '{z_flag_col}' for star classification"
+        )
     zf = pd.to_numeric(df[z_flag_col], errors="coerce")
     tie = pd.to_numeric(df[tie_col], errors="coerce")
     stars = zf.eq(6.0)
@@ -273,7 +279,8 @@ def filter_pandas_by_tie_treatment(
     """Apply final winner/hard-tie policy to an in-memory result frame.
 
     Returns the filtered frame, the effective option, and the number of
-    hard-tie groups resolved by ``draw_one``.
+    hard-tie groups resolved by ``draw_one``. Selection is deterministic by
+    the smallest ``CRD_ID`` when that column is available.
     """
     if tie_col not in df.columns:
         raise RuntimeError(f"Expected '{tie_col}' column for remove-duplicates mode")
@@ -302,13 +309,23 @@ def filter_pandas_by_tie_treatment(
                 candidates.to_numpy(dtype=bool, na_value=False)
             )
             if candidate_positions.size:
-                rng = np.random.default_rng(random_state)
                 winners = []
                 candidate_groups = gid.iloc[candidate_positions]
                 for _, positions in pd.Series(
                     candidate_positions, index=candidate_groups.to_numpy()
                 ).groupby(level=0, sort=False):
-                    winners.append(int(rng.choice(positions.to_numpy())))
+                    group_positions = positions.to_numpy(dtype=int)
+                    if "CRD_ID" in df.columns:
+                        winners.append(
+                            min(
+                                group_positions,
+                                key=lambda pos: str(df.iloc[int(pos)]["CRD_ID"]),
+                            )
+                        )
+                    else:
+                        # Preserve the former API for frames without CRD_ID.
+                        rng = np.random.default_rng(random_state)
+                        winners.append(int(rng.choice(group_positions)))
                 resolved_groups = len(winners)
                 tie_num = tie_num.copy()
                 tie_num.iloc[candidate_positions] = 0
@@ -317,6 +334,56 @@ def filter_pandas_by_tie_treatment(
 
     keep_mask = tie_num.isin([1, 2]) if effective == "keep_all" else tie_num.eq(1)
     return out.loc[keep_mask].copy(), effective, resolved_groups
+
+
+def filter_dask_by_tie_treatment(
+    df: dd.DataFrame,
+    option: str,
+    *,
+    tie_col: str = "tie_result",
+    group_col: str = "group_id",
+    crd_col: str = "CRD_ID",
+) -> tuple[dd.DataFrame, str]:
+    """Apply the final tie policy lazily to a distributed dataframe.
+
+    ``draw_one`` deterministically selects the lexicographically smallest
+    ``CRD_ID`` from each hard-tie group. Only hard-tie candidates participate
+    in the groupby and merge; the full catalog is never collected by the
+    driver.
+    """
+    if tie_col not in df.columns:
+        raise RuntimeError(f"Expected '{tie_col}' column for remove-duplicates mode")
+
+    effective = str(option or "remove_all").strip().lower()
+    if effective not in {"remove_all", "keep_all", "draw_one"}:
+        effective = "remove_all"
+
+    tie_num = dd.to_numeric(df[tie_col], errors="coerce").fillna(0).astype("int8")
+    if effective == "keep_all":
+        return df.loc[tie_num.isin([1, 2])], effective
+    if effective == "remove_all":
+        return df.loc[tie_num.eq(1)], effective
+
+    if group_col not in df.columns or crd_col not in df.columns:
+        return df.loc[tie_num.eq(1)], "remove_all"
+
+    ordinary_winners = df.loc[tie_num.eq(1)]
+    hard_candidates = df.loc[tie_num.eq(2) & ~df[group_col].isna()]
+    winner_ids = (
+        hard_candidates[[group_col, crd_col]]
+        .groupby(group_col)[crd_col]
+        .min()
+        .rename("__draw_one_crd")
+        .to_frame()
+        .reset_index()
+    )
+    selected_hard = hard_candidates.merge(
+        winner_ids,
+        left_on=[group_col, crd_col],
+        right_on=[group_col, "__draw_one_crd"],
+        how="inner",
+    ).drop(columns=["__draw_one_crd"])
+    return dd.concat([ordinary_winners, selected_hard]), effective
 
 
 # -----------------------
@@ -965,7 +1032,7 @@ def deduplicate_pandas(
     Returns:
         pd.DataFrame: Deduplicated dataframe with tie labels.
     """
-    required = {crd_col, compared_col, z_col}
+    required = {crd_col, compared_col, z_col, "z_flag_homogenized"}
     missing = sorted(required - set(df.columns))
     if missing:
         raise KeyError(f"Missing required columns: {missing}")
@@ -1041,6 +1108,13 @@ def deduplicate_pandas(
     # Try to bridge NA rows via neighbor groups from the fast path label map
     if na_mask.any() and labels_edge.size:
         pos_na = np.flatnonzero(na_mask)
+        # Stars never participate in non-star components, even when they point
+        # to an already-labelled neighbor. Leave them for the singleton path.
+        if zf_series is not None:
+            bridge_is_star = np.asarray(
+                zf_series.iloc[pos_na].eq(6).fillna(False), dtype=bool
+            )
+            pos_na = pos_na[~bridge_is_star]
         cmp_str_all = out[compared_col].astype("string").str.strip()
         cmp_lists = cmp_str_all.iloc[pos_na].str.split(",")
         sub = pd.DataFrame({"pos": pos_na, "nbr": cmp_lists}).explode(
@@ -1472,10 +1546,18 @@ def _dedup_local_with_margin(
     mg = _to_pandas(part_margin)
 
     # Project to required columns.
-    needed = {crd_col, compared_col, z_col, tie_col, "ra", "dec"} | set(
+    needed = {
+        crd_col,
+        compared_col,
+        z_col,
+        tie_col,
+        "ra",
+        "dec",
+        "z_flag_homogenized",
+    } | set(
         tiebreaking_priority or []
     )
-    if instrument_type_priority is not None:
+    if "instrument_type_homogenized" in set(tiebreaking_priority or []):
         needed.add("instrument_type_homogenized")
     pm = _shrink_to_needed(pm, needed, crd_col, compared_col, z_col)
     mg = _shrink_to_needed(mg, needed, crd_col, compared_col, z_col)
@@ -1727,10 +1809,18 @@ def _dedup_local_no_margin(
     pm = _to_pandas(part_main)
 
     # Project to required columns.
-    needed = {crd_col, compared_col, z_col, tie_col, "ra", "dec"} | set(
+    needed = {
+        crd_col,
+        compared_col,
+        z_col,
+        tie_col,
+        "ra",
+        "dec",
+        "z_flag_homogenized",
+    } | set(
         tiebreaking_priority or []
     )
-    if instrument_type_priority is not None:
+    if "instrument_type_homogenized" in set(tiebreaking_priority or []):
         needed.add("instrument_type_homogenized")
     pm = _shrink_to_needed(pm, needed, crd_col, compared_col, z_col)
 
@@ -1880,7 +1970,12 @@ def run_dedup_with_lsdb_map_partitions(
         )
 
         # Strict schema checks: required base + all tiebreaking priority columns
-        required_base = {crd_col, compared_col, z_col}
+        required_base = {
+            crd_col,
+            compared_col,
+            z_col,
+            "z_flag_homogenized",
+        }
         _assert_required(main_ddf, required_base, "main")
         _assert_priorities(main_ddf, list(tiebreaking_priority), "main")
 

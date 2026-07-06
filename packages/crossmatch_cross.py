@@ -38,18 +38,14 @@ import shutil
 import time
 from typing import Dict, Iterable, List, Set
 
+import dask
+import dask.dataframe as dd
+
 # -----------------------
 # Third-party
 # -----------------------
 import numpy as np
 import pandas as pd
-import dask
-import dask.dataframe as dd
-
-# -----------------------
-# Project
-# -----------------------
-from utils import get_phase_logger
 from crossmatch_diagnostics import (
     log_component_size_diagnostics,
     log_neighbor_count_diagnostics,
@@ -58,15 +54,20 @@ from crossmatch_diagnostics import (
     stage_projected_pairs,
 )
 from specz import (
-    _build_collection_with_retry,
-    _normalize_string_series_to_na,
-    _add_missing_with_dtype,
-    DTYPE_STR,
+    DTYPE_BOOL,
     DTYPE_FLOAT,
     DTYPE_INT,
-    DTYPE_BOOL,
     DTYPE_INT8,
+    DTYPE_STR,
+    _add_missing_with_dtype,
+    _build_collection_with_retry,
+    _normalize_string_series_to_na,
 )
+
+# -----------------------
+# Project
+# -----------------------
+from utils import get_phase_logger
 
 __all__ = ["crossmatch_tiebreak", "crossmatch_tiebreak_safe"]
 

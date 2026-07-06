@@ -52,8 +52,7 @@ from typing import Any, Tuple
 # Third-party
 # -----------------------
 import pandas as pd  # kept for other utilities in this module
-import yaml          # kept for other utilities in this module
-
+import yaml  # kept for other utilities in this module
 
 # -----------------------
 # Globals
@@ -299,7 +298,7 @@ def ensure_crc_logger(log_dir: str, level: int = logging.INFO) -> logging.Logger
             if isinstance(lvl_candidate, int):
                 level = lvl_candidate
         # --- END: env override for log level ---
-        
+
         logger.setLevel(level)
         logger.propagate = False
 
@@ -373,7 +372,7 @@ def ensure_crc_logger(log_dir: str, level: int = logging.INFO) -> logging.Logger
             logging.getLogger().setLevel(logging.WARNING)
             logging.getLogger("dask").setLevel(logging.WARNING)
             logging.getLogger("distributed").setLevel(logging.WARNING)
-            logging.getLogger("lsdb").setLevel(logging.INFO)  
+            logging.getLogger("lsdb").setLevel(logging.INFO)
             logging.getLogger("urllib3").setLevel(logging.WARNING)
 
         # Mark configured for this PID.

@@ -1,12 +1,16 @@
 import sys
 from pathlib import Path
 
+import dask.dataframe as dd
 import pandas as pd
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "packages"))
 
-from deduplication import filter_pandas_by_tie_treatment  # noqa: E402
+from deduplication import (  # noqa: E402
+    filter_dask_by_tie_treatment,
+    filter_pandas_by_tie_treatment,
+)
 
 
 def _results():
@@ -43,8 +47,7 @@ def test_draw_one_keeps_exactly_one_candidate_per_hard_tie():
 
     assert effective == "draw_one"
     assert resolved == 1
-    assert "winner" in set(result["CRD_ID"])
-    assert len(set(result["CRD_ID"]) & {"tie-a", "tie-b"}) == 1
+    assert set(result["CRD_ID"]) == {"winner", "tie-a"}
     assert "star" not in set(result["CRD_ID"])
 
 
@@ -61,3 +64,29 @@ def test_draw_one_without_group_id_falls_back_to_remove_all():
 def test_final_tie_filter_requires_tie_result():
     with pytest.raises(RuntimeError, match="tie_result"):
         filter_pandas_by_tie_treatment(pd.DataFrame({"CRD_ID": ["A"]}), "remove_all")
+
+
+def test_distributed_draw_one_is_lazy_and_deterministic():
+    frame = pd.DataFrame(
+        {
+            "CRD_ID": ["winner", "loser", "tie-b", "tie-a", "tie-d", "tie-c"],
+            "group_id": [1, 1, 2, 2, 3, 3],
+            "tie_result": [1, 0, 2, 2, 2, 2],
+        }
+    )
+    distributed = dd.from_pandas(frame, npartitions=3, sort=False)
+
+    result, effective = filter_dask_by_tie_treatment(distributed, "draw_one")
+
+    assert isinstance(result, dd.DataFrame)
+    assert effective == "draw_one"
+    assert set(result.compute()["CRD_ID"]) == {"winner", "tie-a", "tie-c"}
+
+
+def test_distributed_draw_one_without_group_id_falls_back_to_remove_all():
+    distributed = dd.from_pandas(_results().drop(columns="group_id"), npartitions=2)
+
+    result, effective = filter_dask_by_tie_treatment(distributed, "draw_one")
+
+    assert effective == "remove_all"
+    assert set(result.compute()["CRD_ID"]) == {"winner"}

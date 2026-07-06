@@ -8,7 +8,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "packages"))
 
 from deduplication import deduplicate_pandas  # noqa: E402
 
-
 INSTRUMENT_PRIORITY = {"s": 3, "g": 2, "p": 1}
 
 
@@ -147,6 +146,24 @@ def test_missing_priority_column_fails_clearly():
         deduplicate_pandas(
             pd.DataFrame([_row("A", "B"), _row("B", "A")]),
             tiebreaking_priority=["unknown_priority"],
+        )
+
+
+def test_missing_semantic_star_flag_fails_clearly():
+    frame = pd.DataFrame(
+        {
+            "CRD_ID": ["A"],
+            "compared_to": [pd.NA],
+            "z": [0.1],
+            "custom_score": [1.0],
+        }
+    )
+
+    with pytest.raises(KeyError, match="z_flag_homogenized"):
+        deduplicate_pandas(
+            frame,
+            tiebreaking_priority=["custom_score"],
+            group_col="group_id",
         )
 
 

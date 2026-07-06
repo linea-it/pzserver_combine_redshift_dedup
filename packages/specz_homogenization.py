@@ -194,6 +194,8 @@ def _homogenize(
     product_name: str,
     logger: logging.Logger,
     type_cast_ok: bool,
+    *,
+    require_z_flag_homogenized: bool = False,
 ) -> tuple[dd.DataFrame, bool, list, dict, dict]:
     """Compute homogenized columns for tie-breaking.
 
@@ -203,6 +205,8 @@ def _homogenize(
         product_name: Catalog identifier.
         logger: Logger.
         type_cast_ok: Whether `type` was normalized.
+        require_z_flag_homogenized: Create and validate the flag for semantic
+            star classification even when it is not a ranking priority.
 
     Returns:
         Tuple: (df, used_type_fastpath, tiebreaking_priority, instrument_type_priority, translation_rules_uc)
@@ -211,6 +215,8 @@ def _homogenize(
     instrument_type_priority = translation_config.get("instrument_type_priority", {})
     translation_rules_uc = {k.upper(): v for k, v in translation_config.get("translation_rules", {}).items()}
     validated_non_null_counts: dict[str, int] = {}
+    z_flag_is_priority = "z_flag_homogenized" in tiebreaking_priority
+    needs_z_flag = z_flag_is_priority or require_z_flag_homogenized
 
     # -----------------------
     # Vectorized translator
@@ -436,7 +442,7 @@ def _homogenize(
             return 4.0
         return np.nan
 
-    if "z_flag_homogenized" in tiebreaking_priority:
+    if needs_z_flag:
         if "z_flag_homogenized" not in df.columns:
             if can_use_zflag_as_quality():
                 logger.info(f"{product_name} Using 'z_flag' fast path for z_flag_homogenized.")
@@ -461,7 +467,7 @@ def _homogenize(
             # User-provided 'z_flag_homogenized' is present. Validate allowed domain {0,1,2,3,4} (NaN allowed).
             logger.info(f"{product_name} 'z_flag_homogenized' already exists; validating user-provided values.")
             allowed = {0.0, 1.0, 2.0, 3.0, 4.0, 6.0}
-        
+
             vals = dd.to_numeric(df["z_flag_homogenized"], errors="coerce")
             # NaN is allowed; only non-NaN values outside the allowed set are invalid
             invalid_mask = (~dd.isna(vals)) & ~vals.isin(list(allowed))
@@ -469,14 +475,14 @@ def _homogenize(
                 invalid_mask.sum(), vals.count()
             )
             validated_non_null_counts["z_flag_homogenized"] = int(non_null_count)
-        
+
             if invalid_count > 0:
                 examples = df["z_flag_homogenized"].loc[invalid_mask].head(5, compute=True).tolist()
                 raise ValueError(
                     f"[{product_name}] Invalid values in user-provided 'z_flag_homogenized'. "
                     f"Allowed set is {sorted(allowed)} (NaN allowed). Examples of invalid values: {examples}"
                 )
-        
+
             # Cast to Arrow-backed float dtype for consistency
             df["z_flag_homogenized"] = vals.map_partitions(
                 lambda s: s.astype(DTYPE_FLOAT),
@@ -531,12 +537,12 @@ def _homogenize(
             # User-provided 'instrument_type_homogenized' is present. Validate allowed domain {"s","p","g"}.
             logger.info(f"{product_name} 'instrument_type_homogenized' already exists; validating user-provided values.")
             allowed = {"s", "p", "g"}
-        
+
             normed = df["instrument_type_homogenized"].map_partitions(
                 _normalize_string_series_to_na,
                 meta=pd.Series(pd.array([], dtype=DTYPE_STR)),
             ).str.lower()
-        
+
             invalid_mask = (~dd.isna(normed)) & ~normed.isin(list(allowed))
             invalid_count, non_null_count = dask.compute(
                 invalid_mask.sum(), normed.count()
@@ -544,32 +550,34 @@ def _homogenize(
             validated_non_null_counts["instrument_type_homogenized"] = int(
                 non_null_count
             )
-        
+
             if invalid_count > 0:
                 examples = df["instrument_type_homogenized"].loc[invalid_mask].head(5, compute=True).tolist()
                 raise ValueError(
                     f"[{product_name}] Invalid values in user-provided 'instrument_type_homogenized'. "
                     f"Allowed set is {sorted(allowed)}. Examples of invalid values: {examples}"
                 )
-        
+
             # Keep normalized lower-case values for consistency
             df["instrument_type_homogenized"] = normed
 
     # --- post-homogenization sanity checks (required columns must not be all-NaN) ---
-    if "z_flag_homogenized" in tiebreaking_priority:
+    if needs_z_flag:
         if "z_flag_homogenized" not in df.columns:
             raise ValueError(
-                f"[{product_name}] 'z_flag_homogenized' is required by tiebreaking_priority but is missing after homogenization."
+                f"[{product_name}] 'z_flag_homogenized' is required for "
+                "star classification but is missing after homogenization."
             )
-        non_null = validated_non_null_counts.get("z_flag_homogenized")
-        if non_null is None:
-            non_null = dask.compute(df["z_flag_homogenized"].count())[0]
-        if int(non_null) == 0:
-            raise ValueError(
-                f"[{product_name}] All values in 'z_flag_homogenized' are NaN. "
-                "This column is required (in tiebreaking_priority) and must contain at least one non-NaN value. "
-                "Verify YAML translations / fast-path logic and input columns."
-            )
+        if z_flag_is_priority:
+            non_null = validated_non_null_counts.get("z_flag_homogenized")
+            if non_null is None:
+                non_null = dask.compute(df["z_flag_homogenized"].count())[0]
+            if int(non_null) == 0:
+                raise ValueError(
+                    f"[{product_name}] All values in 'z_flag_homogenized' are NaN. "
+                    "This column is required (in tiebreaking_priority) and must contain at least one non-NaN value. "
+                    "Verify YAML translations / fast-path logic and input columns."
+                )
 
     if "instrument_type_homogenized" in tiebreaking_priority:
         if "instrument_type_homogenized" not in df.columns:

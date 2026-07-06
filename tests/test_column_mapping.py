@@ -15,7 +15,6 @@ if "tables_io" not in sys.modules:
 
 from specz import _validate_and_rename  # noqa: E402
 
-
 LOGGER = logging.getLogger("test.column_mapping")
 
 

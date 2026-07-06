@@ -118,4 +118,3 @@ class WorkerFloorMonitor:
         self._stop_event.set()
         if self._thread is not None and self._thread is not threading.current_thread():
             self._thread.join(timeout=max(1.0, self.check_interval_seconds * 2))
-

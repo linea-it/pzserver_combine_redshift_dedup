@@ -10,39 +10,41 @@ from __future__ import annotations
 # Standard library
 # -----------------------
 import argparse
-from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 import glob
 import json
-import os
-import shutil
-import time
-import warnings
-from typing import Any
 
 # -----------------------
 # Logging
 # -----------------------
 import logging
+import os
+import shutil
+import time
+import warnings
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
+from typing import Any
 
 # -----------------------
 # Third-party
 # -----------------------
 import dask
 import dask.dataframe as dd
-import pandas as pd
-import numpy as np
-from dask.distributed import Client, as_completed, performance_report, wait as dask_wait
 import lsdb
+import numpy as np
+import pandas as pd
 
 # -----------------------
 # Project
 # -----------------------
 from crossmatch_auto import crossmatch_auto
 from crossmatch_cross import crossmatch_tiebreak_safe
+from dask.distributed import Client, as_completed, performance_report
+from dask.distributed import wait as dask_wait
 from deduplication import (
     REPRESENTATIVE_RADIUS_DIAGNOSTIC_COLUMN,
     count_global_edge_group_mismatches,
     count_global_tie_invariant_violations,
+    filter_dask_by_tie_treatment,
     filter_pandas_by_tie_treatment,
     run_dedup_with_lsdb_map_partitions,
     validate_spatial_safety,
@@ -50,8 +52,7 @@ from deduplication import (
 from executor import get_executor
 from product_handle import save_dataframe
 from resource_usage import ResourceUsageMonitor
-from specz import prepare_catalog
-from worker_health import WorkerFloorMonitor
+from specz import prepare_catalog, validate_combine_configuration
 from utils import (
     configure_exception_hook,
     configure_warning_handler,
@@ -63,6 +64,7 @@ from utils import (
     start_crc_log_collector,
     update_process_info,
 )
+from worker_health import WorkerFloorMonitor
 
 __all__ = ["main"]
 
@@ -643,6 +645,16 @@ def main(
             )
 
     log_init.info("START init: pipeline bootstrap")
+    cut_value = param_config.get("z_flag_homogenized_value_to_cut")
+    try:
+        cut_value_numeric = float(cut_value) if cut_value is not None else None
+    except (TypeError, ValueError):
+        cut_value_numeric = None
+    if cut_value_numeric == 0.0:
+        log_init.info(
+            "z_flag_homogenized cut disabled explicitly "
+            "(z_flag_homogenized_value_to_cut=0)."
+        )
     configure_warning_handler(base_logger)
     warnings.filterwarnings(
         "ignore",
@@ -761,9 +773,13 @@ def main(
             " - %s: %.1f MB", entry["internal_name"], _filesize_mb(entry["path"])
         )
 
-    combine_mode = param_config.get(
-        "combine_type", "concatenate_and_mark_duplicates"
-    ).lower()
+    combine_mode, validated_priorities = validate_combine_configuration(
+        param_config.get("combine_type", "concatenate_and_mark_duplicates"),
+        translation_config.get("tiebreaking_priority", []),
+        param_config.get("z_flag_homogenized_value_to_cut"),
+        log_init,
+    )
+    translation_config["tiebreaking_priority"] = validated_priorities
     completed = read_completed_steps(os.path.join(temp_dir, "process_resume.log"))
 
     # --- Dask cluster/client ---
@@ -1270,10 +1286,12 @@ def main(
                 df_final = dd.concat(
                     [dd.read_parquet(i["prepared_path"]) for i in prepared_info]
                 )
-                if output_format == "hats":
+                if output_format in {"hats", "parquet", "csv"}:
                     log_cross.info(
-                        "Concatenate graph built lazily for HATS output "
+                        "Concatenate graph kept lazy for distributed output "
+                        "format=%s "
                         "(npartitions=%s).",
+                        output_format,
                         getattr(df_final, "npartitions", "unknown"),
                     )
                 else:
@@ -1896,11 +1914,12 @@ def main(
                 # Final materialization: avoid pulling the full dataframe to the
                 # driver when HATS output can consume a Dask dataframe directly.
                 try:
-                    if output_format == "hats":
+                    if output_format in {"hats", "parquet", "csv"}:
                         df_final = merged
                         log_dedup.info(
-                            "Keeping final merged dataframe lazy for HATS output "
-                            "(npartitions=%s).",
+                            "Keeping final merged dataframe lazy for distributed "
+                            "output format=%s (npartitions=%s).",
+                            output_format,
                             getattr(df_final, "npartitions", "unknown"),
                         )
                     else:
@@ -1948,7 +1967,11 @@ def main(
         "START consolidation: staging artifacts into process dir (base_dir=%s)",
         base_dir,
     )
-    lazy_hats_output = output_format == "hats" and _is_dask_dataframe(df_final)
+    lazy_distributed_output = output_format in {
+        "hats",
+        "parquet",
+        "csv",
+    } and _is_dask_dataframe(df_final)
 
     log_cons.info(
         "Final dataframe backend=%s npartitions=%s columns=%d",
@@ -1978,50 +2001,47 @@ def main(
             )
             tie_treatment_option = "remove_all"
 
-        if lazy_hats_output and tie_treatment_option == "draw_one":
-            log_cons.info(
-                "tie_treatment_option=draw_one requires pandas consolidation; "
-                "computing final dataframe before draw-one filtering."
-            )
-            df_final = df_final.compute()
-            lazy_hats_output = False
-
-        if lazy_hats_output:
+        if lazy_distributed_output:
             if "tie_result" not in df_final.columns:
                 raise RuntimeError(
                     "Expected 'tie_result' column for remove-duplicates mode"
                 )
             else:
                 log_cons.info(
-                    "Applying lazy Dask tie_result filter for HATS output "
+                    "Applying lazy Dask tie_result filter for distributed output "
                     "(tie_treatment_option=%s).",
                     tie_treatment_option,
                 )
                 try:
-                    tie_num = (
-                        dd.to_numeric(df_final["tie_result"], errors="coerce")
-                        .fillna(0)
-                        .astype("int8")
+                    requested_option = tie_treatment_option
+                    df_final, tie_treatment_option = filter_dask_by_tie_treatment(
+                        df_final,
+                        tie_treatment_option,
                     )
-                    if tie_treatment_option == "keep_all":
-                        keep_mask = tie_num.isin([1, 2])
+                    if (
+                        requested_option == "draw_one"
+                        and tie_treatment_option != "draw_one"
+                    ):
                         log_cons.info(
-                            "Filtering rows lazily by tie_result in {1,2} (keep_all)."
+                            "draw_one requires CRD_ID and group_id; falling back "
+                            "to remove_all."
                         )
+                    elif tie_treatment_option == "draw_one":
+                        log_cons.info(
+                            "Resolving hard ties lazily and deterministically by "
+                            "the smallest CRD_ID in each group."
+                        )
+                    elif tie_treatment_option == "keep_all":
+                        log_cons.info("Filtering lazily by tie_result in {1,2}.")
                     else:
-                        keep_mask = tie_num.eq(1)
-                        log_cons.info(
-                            "Filtering rows lazily by tie_result == 1 (%s).",
-                            tie_treatment_option,
-                        )
-                    df_final = df_final.loc[keep_mask]
+                        log_cons.info("Filtering lazily by tie_result == 1.")
                 except Exception as e:
                     log_cons.error(
                         "FAILED while applying lazy tie_result filter: %s", e
                     )
                     raise
 
-        if lazy_hats_output:
+        if lazy_distributed_output:
             pass
         elif "tie_result" not in df_final.columns:
             raise RuntimeError(
@@ -2054,7 +2074,7 @@ def main(
                 log_cons.error("FAILED while filtering by tie_treatment_option: %s", e)
                 raise
 
-    if not lazy_hats_output:
+    if not lazy_distributed_output:
         _ensure_non_empty_final_dataframe(
             df_final,
             log_cons,
@@ -2062,7 +2082,7 @@ def main(
         )
     else:
         log_cons.info(
-            "Deferring empty-output validation until after HATS parquet staging."
+            "Deferring empty-output validation until distributed parquet staging."
         )
 
     # Stage final output with your save_dataframe
