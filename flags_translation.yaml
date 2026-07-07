@@ -40,7 +40,7 @@ instrument_type_priority:
   g: 2     # Grism
   p: 1     # Photometric (least reliable)
 
-# === Survey-specific translation rules for z_flag and type ===
+# === Survey-specific translation rules for z_flag, instrument, and object type ===
 # These are our internal definitions used to harmonize redshift quality and instrument types across surveys.
 # The quality flag system is inspired by the VVDS survey but adapted to our needs:
 #
@@ -55,6 +55,10 @@ instrument_type_priority:
 # Each block corresponds to a survey name and includes:
 # - z_flag_translation: how to map original quality flags or based on conditions into a standardized quality scale (0-6)
 # - instrument_type_translation: how to map original types into a standard label (s, g, p)
+# - object_type_translation: how to map classifications into star, qso, or galaxy.
+#   Its default is null; catalogs without object classifications are valid.
+#   A rule may declare `source: <raw_column>` and `optional_source: true` to
+#   discover a non-standard input column without a frontend columns mapping.
 # You can mix value-based mappings and conditional rules (using Python expressions)
 
 save_expr_columns: false
@@ -84,6 +88,11 @@ translation_rules:
       default: "s"
 
   2DFLENS:
+    object_type_translation:
+      conditions:
+        - expr: "z_flag == 6"
+          value: "star"
+      default: null
     z_flag_translation:
       1: 0
       2: 1
@@ -94,6 +103,12 @@ translation_rules:
       default: "s"
 
   2MRS:
+    object_type_translation:
+      conditions:
+        # ZCAT type -9 combines QSO and generic AGN, so it is intentionally unknown.
+        - expr: "str(TYPE)[:2] == '-9'"
+          value: null
+      default: "galaxy"
     z_flag_translation:
       conditions:
         - expr: "z_err == 0"
@@ -107,6 +122,11 @@ translation_rules:
       default: "s"
 
   3D-HST:
+    object_type_translation:
+      conditions:
+        - expr: "z_best_s == 0"
+          value: "star"
+      default: null
     z_flag_translation:
       conditions:
         - expr: "z_best_s == 0"
@@ -129,6 +149,11 @@ translation_rules:
       default: "g"
 
   6DFGS:
+    object_type_translation:
+      conditions:
+        - expr: "z_flag == 6"
+          value: "star"
+      default: null
     z_flag_translation:
       1: 0
       2: 1
@@ -179,6 +204,13 @@ translation_rules:
       default: "s"
 
   COSMOS2020_CLASSIC:
+    object_type_translation:
+      conditions:
+        - expr: "lp_type == 0"
+          value: "galaxy"
+        - expr: "lp_type == 1"
+          value: "star"
+      default: null
     z_flag_translation:
       conditions:
         - expr: "lp_type == -9 or not np.isfinite(z)"
@@ -196,6 +228,11 @@ translation_rules:
       default: "p"
 
   COSMOS_SRC:
+    object_type_translation:
+      conditions:
+        - expr: "10 <= z_flag < 20"
+          value: "qso"
+      default: null
     z_flag_translation:
       conditions:
         - expr: "np.trunc(float(z_flag)) - 10*np.trunc(np.trunc(float(z_flag))/10) == 0"
@@ -215,6 +252,15 @@ translation_rules:
       default: "s"
 
   COSMOS_Web:
+    object_type_translation:
+      conditions:
+        - expr: "type == '0'"
+          value: "galaxy"
+        - expr: "type == '1'"
+          value: "star"
+        - expr: "type == '2'"
+          value: "qso"
+      default: null
     z_flag_translation:
       conditions:
         - expr: "type != 1 and z_flag != 0"
@@ -232,6 +278,17 @@ translation_rules:
       default: "p"
 
   DEIMOS_10K:
+    object_type_translation:
+      conditions:
+        - expr: "Remarks.str.strip().str.lower().isin(['star', 'm star'])"
+          value: "star"
+        - expr: "Remarks.str.contains(',star$', case=False, na=False, regex=True)"
+          value: "star"
+        - expr: "Remarks.str.contains('[(]QSO[)]|,QSO$', case=False, na=False, regex=True)"
+          value: "qso"
+        - expr: "10 <= z_flag < 20"
+          value: "qso"
+      default: null
     z_flag_translation:
       conditions:
         - expr: "np.trunc(float(z_flag)) - 10*np.trunc(np.trunc(float(z_flag))/10) == 0"
@@ -251,6 +308,15 @@ translation_rules:
       default: "s"
 
   DESI:
+    object_type_translation:
+      conditions:
+        - expr: "SPECTYPE == 'STAR'"
+          value: "star"
+        - expr: "SPECTYPE == 'QSO'"
+          value: "qso"
+        - expr: "SPECTYPE == 'GALAXY'"
+          value: "galaxy"
+      default: null
     z_flag_translation:
       conditions:
         - expr: "SPECTYPE != 'STAR' and z_flag != 0 and ZCAT_PRIMARY != True"
@@ -268,6 +334,15 @@ translation_rules:
       default: "s"
 
   DESI_DR1:
+    object_type_translation:
+      conditions:
+        - expr: "SPECTYPE == 'STAR'"
+          value: "star"
+        - expr: "SPECTYPE == 'QSO'"
+          value: "qso"
+        - expr: "SPECTYPE == 'GALAXY'"
+          value: "galaxy"
+      default: null
     z_flag_translation:
       conditions:
         - expr: "SPECTYPE != 'STAR' and z_flag != 0 and ZCAT_PRIMARY != True"
@@ -285,6 +360,15 @@ translation_rules:
       default: "s"
 
   DESI_DEEP_PILOT:
+    object_type_translation:
+      conditions:
+        - expr: "SPECTYPE == 'STAR'"
+          value: "star"
+        - expr: "SPECTYPE == 'QSO'"
+          value: "qso"
+        - expr: "SPECTYPE == 'GALAXY'"
+          value: "galaxy"
+      default: null
     z_flag_translation:
       conditions:
         - expr: "np.trunc(float(z_flag)) - 10*np.trunc(np.trunc(float(z_flag))/10) == 0"
@@ -302,6 +386,15 @@ translation_rules:
       default: "s"
 
   ELAISS1OID:
+    object_type_translation:
+      conditions:
+        - expr: "Class == 1"
+          value: "qso"
+        - expr: "Class == 2 or Class == 3 or Class == 6"
+          value: "galaxy"
+        - expr: "Class == 4"
+          value: "star"
+      default: null
     z_flag_translation:
       0: 0
       1: 1
@@ -318,6 +411,15 @@ translation_rules:
       default: "p"
 
   ELAISFBMC:
+    object_type_translation:
+      conditions:
+        - expr: "tSp == 1 or tSp == 2 or tSp == 3"
+          value: "galaxy"
+        - expr: "tSp == 5"
+          value: "qso"
+        - expr: "tSp == 7"
+          value: "star"
+      default: null
     z_flag_translation:
       0: 0
       1: 1
@@ -334,12 +436,25 @@ translation_rules:
       default: "p"
 
   ELG_FIGS:
+    object_type_translation:
+      default: "galaxy"
     z_flag_translation:
       default: 3
     instrument_type_translation:
       default: "s"
 
   EUCLID_Q1:
+    # spe_class is discovered directly in the raw dataframe by the backend.
+    # The current production catalog does not contain it, so its absence must
+    # safely produce null output without requiring a frontend column mapping.
+    object_type_translation:
+      source: spe_class
+      optional_source: true
+      STAR: "star"
+      GALAXY: "galaxy"
+      QSO: "qso"
+      UNDEF: null
+      default: null
     z_flag_translation:
       conditions:
         - expr: "z_flag == 0.0"
@@ -357,6 +472,11 @@ translation_rules:
       default: "s"
 
   FMOS_COSMOS:
+    object_type_translation:
+      conditions:
+        - expr: "z_flag == -1"
+          value: "star"
+      default: null
     z_flag_translation:
       -99: 0
       0: 0
@@ -442,6 +562,17 @@ translation_rules:
       default: "s"
 
   OZDES:
+    object_type_translation:
+      conditions:
+        - expr: "Object_types.str.contains('Galaxy|LRG|ELG|SN_host|SN_free_host|RedMaGiC', case=False, na=False)"
+          value: "galaxy"
+        - expr: "Object_types.str.contains('QSO', case=False, na=False)"
+          value: "qso"
+        - expr: "Object_types.str.contains('BBstar|FStar|RNDstars|BrightStar|WhiteDwarf', case=False, na=False)"
+          value: "star"
+        - expr: "z_flag == 6"
+          value: "star"
+      default: null
     z_flag_translation:
       1: 0
       2: 1
@@ -452,6 +583,13 @@ translation_rules:
       default: "s"
 
   PRIMUS:
+    object_type_translation:
+      conditions:
+        - expr: "CLASS == 'GALAXY'"
+          value: "galaxy"
+        - expr: "CLASS == 'STAR'"
+          value: "star"
+      default: null
     z_flag_translation:
       -1: 0
       2: 1
@@ -461,6 +599,15 @@ translation_rules:
       default: "g"
 
   SDSS_DR17:
+    object_type_translation:
+      conditions:
+        - expr: "CLASS == 'STAR'"
+          value: "star"
+        - expr: "CLASS == 'QSO'"
+          value: "qso"
+        - expr: "CLASS == 'GALAXY'"
+          value: "galaxy"
+      default: null
     z_flag_translation:
       conditions:
         - expr: "CLASS != 'STAR' and z_flag != 0 and SPECPRIMARY != 1"
@@ -478,6 +625,15 @@ translation_rules:
       default: "s"
 
   SDSS_DR19:
+    object_type_translation:
+      conditions:
+        - expr: "CLASS == 'STAR'"
+          value: "star"
+        - expr: "CLASS == 'QSO'"
+          value: "qso"
+        - expr: "CLASS == 'GALAXY'"
+          value: "galaxy"
+      default: null
     z_flag_translation:
       conditions:
         - expr: "CLASS != 'STAR' and z_flag != 0 and SPECPRIMARY != 1"
@@ -495,6 +651,16 @@ translation_rules:
       default: "s"
 
   SWIRE-REVISED:
+    object_type_translation:
+      conditions:
+        - expr: "mst < 0"
+          value: "star"
+        - expr: "mst > 0"
+          value: "galaxy"
+        # Explicit QSO templates take precedence over the morphology scale.
+        - expr: "(13 <= J1 <= 30) or (13 <= J2 <= 15)"
+          value: "qso"
+      default: null
     z_flag_translation:
       0: 0
       1: 1
@@ -511,6 +677,11 @@ translation_rules:
       default: "p"
 
   VANDELS:
+    object_type_translation:
+      conditions:
+        - expr: "np.trunc(float(z_flag)) == 13 or np.trunc(float(z_flag)) == 14 or np.trunc(float(z_flag)) == 19 or np.trunc(float(z_flag)) == 213 or np.trunc(float(z_flag)) == 214 or np.trunc(float(z_flag)) == 219"
+          value: "qso"
+      default: null
     z_flag_translation:
       conditions:
         - expr: "np.trunc(float(z_flag)) - 10*np.trunc(np.trunc(float(z_flag))/10) == 0"
@@ -530,6 +701,13 @@ translation_rules:
       default: "s"
 
   VIMOS:
+    object_type_translation:
+      conditions:
+        - expr: "COMM.str.strip().str.lower() == 'star'"
+          value: "star"
+        - expr: "COMM.str.contains('[(]BLAGN[)]', case=False, na=False, regex=True)"
+          value: "qso"
+      default: null
     z_flag_translation:
       4: 4
       3: 3
@@ -540,6 +718,15 @@ translation_rules:
       default: "s"
 
   VIPERS_PDR2:
+    object_type_translation:
+      conditions:
+        - expr: "classFlag == -1"
+          value: "star"
+        # Spectroscopic BLAGN classification takes precedence over the
+        # photometric stellar-like classification.
+        - expr: "np.trunc(float(z_flag)) == 13 or np.trunc(float(z_flag)) == 14 or np.trunc(float(z_flag)) == 19 or np.trunc(float(z_flag)) == 213 or np.trunc(float(z_flag)) == 214 or np.trunc(float(z_flag)) == 219"
+          value: "qso"
+      default: null
     z_flag_translation:
       conditions:
         - expr: "classFlag == -1"
@@ -576,6 +763,11 @@ translation_rules:
       default: "s"
 
   VVDS:
+    object_type_translation:
+      conditions:
+        - expr: "10 <= z_flag < 20"
+          value: "qso"
+      default: null
     z_flag_translation:
       conditions:
         - expr: "np.trunc(float(z_flag)) - 10*np.trunc(np.trunc(float(z_flag))/10) == 0"
@@ -595,6 +787,15 @@ translation_rules:
       default: "s"
 
   XMM_LSS:
+    object_type_translation:
+      conditions:
+        - expr: "Class == 'STA'"
+          value: "star"
+        - expr: "Class == 'QSO'"
+          value: "qso"
+        - expr: "Class == 'ALG' or Class == 'ELG'"
+          value: "galaxy"
+      default: null
     z_flag_translation:
       conditions:
         - expr: "Class == 'STA'"
@@ -610,6 +811,11 @@ translation_rules:
       default: "s"
 
   ZCOSMOS:
+    object_type_translation:
+      conditions:
+        - expr: "10 <= z_flag < 20"
+          value: "qso"
+      default: null
     z_flag_translation:
       conditions:
         - expr: "np.trunc(float(z_flag)) - 10*np.trunc(np.trunc(float(z_flag))/10) == 0"

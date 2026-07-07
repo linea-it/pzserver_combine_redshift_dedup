@@ -6,6 +6,7 @@ This module contains only the logic related to computing or honoring the
 homogenized columns:
     - z_flag_homogenized
     - instrument_type_homogenized
+    - object_type_homogenized
 
 It is intended to be imported by the main `specz.py` module.
 Functions are copied verbatim from the original file to avoid behavior changes.
@@ -129,6 +130,17 @@ def _honor_user_homogenized_mapping(
         else:
             logger.warning(f"{product_name} YAML says instrument_type<-instrument_type_homogenized, but missing.")
 
+    if norm(cols_cfg.get("object_type")) == "object_type_homogenized":
+        if "object_type" in df.columns:
+            df["object_type_homogenized"] = _ensure_single_series(df, "object_type")
+            logger.info(
+                f"{product_name} Using user-provided homogenized object_type via YAML mapping."
+            )
+        else:
+            logger.warning(
+                f"{product_name} YAML says object_type<-object_type_homogenized, but missing."
+            )
+
     return df
 
 
@@ -223,8 +235,12 @@ def _homogenize(
     # -----------------------
     def _translate_column_vectorized(df: dd.DataFrame, key: str, out_col: str, out_kind: str) -> dd.DataFrame:
         """Apply YAML translation rules per partition."""
-        assert key in {"z_flag", "instrument_type"}
-        assert out_col in {"z_flag_homogenized", "instrument_type_homogenized"}
+        assert key in {"z_flag", "instrument_type", "object_type"}
+        assert out_col in {
+            "z_flag_homogenized",
+            "instrument_type_homogenized",
+            "object_type_homogenized",
+        }
         assert out_kind in {"float", "str"}
 
         def _partition(p: pd.DataFrame) -> pd.DataFrame:
@@ -320,9 +336,27 @@ def _homogenize(
                     fill_vals = pd.Series([default_val] * int(mask_s.sum()), index=out.index[mask_s], dtype=DTYPE_STR)
                     out.loc[mask_s] = out.loc[mask_s].fillna(fill_vals)
 
-                direct = {k: v for k, v in rule.items() if k not in {"conditions", "default"}}
+                source_col = str(rule.get("source", key))
+                optional_source = bool(rule.get("optional_source", False))
+                direct = {
+                    k: v
+                    for k, v in rule.items()
+                    if k not in {
+                        "conditions",
+                        "default",
+                        "source",
+                        "optional_source",
+                    }
+                }
                 if direct:
-                    col = s.loc[mask_s, key]
+                    if source_col not in s.columns:
+                        if optional_source:
+                            continue
+                        raise ValueError(
+                            f"Missing source column '{source_col}' for survey "
+                            f"'{sname}' and translation '{out_col}'."
+                        )
+                    col = s.loc[mask_s, source_col]
                     is_num = pd.api.types.is_numeric_dtype(col)
                     if key == "z_flag":
                         is_num = True
@@ -560,6 +594,39 @@ def _homogenize(
 
             # Keep normalized lower-case values for consistency
             df["instrument_type_homogenized"] = normed
+
+    # object_type_homogenized is an output-schema field, not a ranking field.
+    # An entirely-null result is valid for catalogs without classification data.
+    if "object_type_homogenized" not in df.columns:
+        df = _translate_column_vectorized(
+            df,
+            key="object_type",
+            out_col="object_type_homogenized",
+            out_kind="str",
+        )
+
+    object_types = df["object_type_homogenized"].map_partitions(
+        _normalize_string_series_to_na,
+        meta=pd.Series(pd.array([], dtype=DTYPE_STR)),
+    ).str.lower()
+    allowed_object_types = {"star", "qso", "galaxy"}
+    invalid_object_mask = (~dd.isna(object_types)) & ~object_types.isin(
+        list(allowed_object_types)
+    )
+    invalid_object_count = int(invalid_object_mask.sum().compute())
+    if invalid_object_count:
+        examples = (
+            df["object_type_homogenized"]
+            .loc[invalid_object_mask]
+            .head(5, compute=True)
+            .tolist()
+        )
+        raise ValueError(
+            f"[{product_name}] Invalid values in 'object_type_homogenized'. "
+            f"Allowed set is {sorted(allowed_object_types)} (NaN allowed). "
+            f"Examples of invalid values: {examples}"
+        )
+    df["object_type_homogenized"] = object_types
 
     # --- post-homogenization sanity checks (required columns must not be all-NaN) ---
     if needs_z_flag:

@@ -1340,6 +1340,7 @@ def _validate_and_rename(
         "z": DTYPE_FLOAT,
         "z_flag": DTYPE_FLOAT,
         "z_err": DTYPE_FLOAT,
+        "object_type": DTYPE_STR,
     }
     for col, pd_dtype in base_schema.items():
         if col not in df.columns:
@@ -2180,7 +2181,10 @@ def _select_output_columns(
         "group_id",
     ]
 
-    # Optional homogenized fields.
+    # Homogenized object type is part of every output, including all-null catalogs.
+    final_cols.append("object_type_homogenized")
+
+    # Optional homogenized fields used by the legacy quality/ranking logic.
     if "z_flag_homogenized" in df.columns:
         final_cols.append("z_flag_homogenized")
     if "instrument_type_homogenized" in df.columns:

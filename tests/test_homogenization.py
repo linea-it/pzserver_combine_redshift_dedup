@@ -7,6 +7,7 @@ from unittest.mock import Mock
 import dask.dataframe as dd
 import pandas as pd
 import pytest
+import yaml
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "packages"))
 if "tables_io" not in sys.modules:
@@ -52,6 +53,369 @@ def test_yaml_flag_translation_applies_direct_default_and_condition():
     result, *_ = _homogenize(frame, config, "demo", LOGGER, type_cast_ok=False)
 
     assert result.compute()["z_flag_homogenized"].astype(float).tolist() == [2, 0, 4]
+
+
+def test_object_type_is_always_present_and_may_be_entirely_null():
+    frame = dd.from_pandas(
+        pd.DataFrame({"survey": ["unknown", "unknown"]}),
+        npartitions=1,
+        sort=False,
+    )
+
+    result, *_ = _homogenize(frame, {}, "demo", LOGGER, type_cast_ok=False)
+
+    computed = result.compute()
+    assert "object_type_homogenized" in computed
+    assert computed["object_type_homogenized"].isna().all()
+
+
+def test_object_type_translation_uses_canonical_renamed_z_flag():
+    frame = dd.from_pandas(
+        pd.DataFrame(
+            {
+                "survey": ["demo", "demo", "demo"],
+                "object_type": [pd.NA, pd.NA, pd.NA],
+                "z_flag": [13, 4, 24],
+            }
+        ),
+        npartitions=1,
+        sort=False,
+    )
+    config = {
+        "translation_rules": {
+            "DEMO": {
+                "object_type_translation": {
+                    "conditions": [
+                        {"expr": "10 <= z_flag < 20", "value": "qso"}
+                    ],
+                    "default": None,
+                }
+            }
+        }
+    }
+
+    result, *_ = _homogenize(frame, config, "demo", LOGGER, type_cast_ok=False)
+
+    assert result.compute()["object_type_homogenized"].tolist() == [
+        "qso",
+        pd.NA,
+        pd.NA,
+    ]
+
+
+def test_object_type_rejects_values_outside_domain():
+    frame = dd.from_pandas(
+        pd.DataFrame({"object_type_homogenized": ["STAR", "agn"]}),
+        npartitions=1,
+        sort=False,
+    )
+
+    with pytest.raises(ValueError, match="Invalid values"):
+        _homogenize(frame, {}, "demo", LOGGER, type_cast_ok=False)
+
+
+def test_catalog_object_type_rules_use_renamed_flags_and_conservative_defaults():
+    config_path = Path(__file__).resolve().parents[1] / "flags_translation.yaml"
+    config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    config["tiebreaking_priority"] = []
+    frame = dd.from_pandas(
+        pd.DataFrame(
+            {
+                "survey": [
+                    "PRIMUS",
+                    "VVDS",
+                    "VUDS",
+                    "VANDELS",
+                    "VIPERS_PDR2",
+                    "OZDES",
+                    "OZDES",
+                ],
+                "object_type": [pd.NA] * 7,
+                "z_flag": [4, 14.5, 23, 214, 213.5, 4, 6],
+                "CLASS": ["AGN", pd.NA, pd.NA, pd.NA, pd.NA, pd.NA, pd.NA],
+                "classFlag": [pd.NA, pd.NA, pd.NA, pd.NA, 1, pd.NA, pd.NA],
+                "Object_types": [
+                    pd.NA,
+                    pd.NA,
+                    pd.NA,
+                    pd.NA,
+                    pd.NA,
+                    "Photo-z,LRG",
+                    "QSO_faint",
+                ],
+            }
+        ),
+        npartitions=2,
+        sort=False,
+    )
+
+    result, *_ = _homogenize(frame, config, "demo", LOGGER, type_cast_ok=False)
+
+    assert result.compute()["object_type_homogenized"].fillna("missing").tolist() == [
+        "missing",
+        "qso",
+        "missing",
+        "qso",
+        "qso",
+        "galaxy",
+        "star",
+    ]
+
+
+def test_3dhst_and_mosdef_object_type_rules_keep_unknowns_null():
+    config_path = Path(__file__).resolve().parents[1] / "flags_translation.yaml"
+    config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    config["tiebreaking_priority"] = []
+    frame = dd.from_pandas(
+        pd.DataFrame(
+            {
+                "survey": ["3D-HST", "3D-HST", "MOSDEF", "MOSDEF", "GAMA_DR4"],
+                "object_type": [pd.NA] * 5,
+                "z_best_s": [0.0, 1.0, float("nan"), float("nan"), float("nan")],
+                "TARGET": [float("nan"), float("nan"), 1.0, 0.0, float("nan")],
+            }
+        ),
+        npartitions=1,
+        sort=False,
+    )
+
+    result, *_ = _homogenize(frame, config, "demo", LOGGER, type_cast_ok=False)
+
+    assert result.compute()["object_type_homogenized"].fillna("missing").tolist() == [
+        "star",
+        "missing",
+        "missing",
+        "missing",
+        "missing",
+    ]
+
+
+def test_swire_j2_qso_range_stops_at_15():
+    config_path = Path(__file__).resolve().parents[1] / "flags_translation.yaml"
+    config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    config["tiebreaking_priority"] = []
+    frame = dd.from_pandas(
+        pd.DataFrame(
+            {
+                "survey": ["SWIRE-REVISED"] * 7,
+                "object_type": [pd.NA] * 7,
+                "mst": [0, 0, -1, 1, -5, 5, -5],
+                "J1": [1, 1, 1, 1, 1, 1, 13],
+                "J2": [15, 16, 16, 16, 16, 16, 16],
+            }
+        ),
+        npartitions=1,
+        sort=False,
+    )
+
+    result, *_ = _homogenize(frame, config, "demo", LOGGER, type_cast_ok=False)
+
+    assert result.compute()["object_type_homogenized"].fillna("missing").tolist() == [
+        "qso",
+        "missing",
+        "star",
+        "galaxy",
+        "star",
+        "galaxy",
+        "qso",
+    ]
+
+
+def test_2df_6df_and_2mrs_use_only_documented_object_classes():
+    config_path = Path(__file__).resolve().parents[1] / "flags_translation.yaml"
+    config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    config["tiebreaking_priority"] = []
+    frame = dd.from_pandas(
+        pd.DataFrame(
+            {
+                "survey": ["2DFLENS", "2DFLENS", "6DFGS", "2MRS", "2MRS"],
+                "object_type": [pd.NA] * 5,
+                "z_flag": [6, 4, 6, 4, 4],
+                "TYPE": [pd.NA, pd.NA, pd.NA, "-5A", "-9"],
+            }
+        ),
+        npartitions=1,
+        sort=False,
+    )
+
+    result, *_ = _homogenize(frame, config, "demo", LOGGER, type_cast_ok=False)
+
+    assert result.compute()["object_type_homogenized"].fillna("missing").tolist() == [
+        "star",
+        "missing",
+        "star",
+        "galaxy",
+        "missing",
+    ]
+
+
+def test_vimos_uses_only_unambiguous_comm_classifications():
+    config_path = Path(__file__).resolve().parents[1] / "flags_translation.yaml"
+    config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    config["tiebreaking_priority"] = []
+    frame = dd.from_pandas(
+        pd.DataFrame(
+            {
+                "survey": ["VIMOS"] * 5,
+                "object_type": [pd.NA] * 5,
+                "COMM": [
+                    "star",
+                    "Star",
+                    "Star?",
+                    "CIV_[CIII]_(BLAGN)",
+                    "Lya(em)_CIV_(BLAGN?)",
+                ],
+            }
+        ),
+        npartitions=1,
+        sort=False,
+    )
+
+    result, *_ = _homogenize(frame, config, "demo", LOGGER, type_cast_ok=False)
+
+    assert result.compute()["object_type_homogenized"].fillna("missing").tolist() == [
+        "star",
+        "star",
+        "missing",
+        "qso",
+        "missing",
+    ]
+
+
+def test_deimos_remarks_use_only_unambiguous_classifications():
+    config_path = Path(__file__).resolve().parents[1] / "flags_translation.yaml"
+    config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    config["tiebreaking_priority"] = []
+    frame = dd.from_pandas(
+        pd.DataFrame(
+            {
+                "survey": ["DEIMOS_10K"] * 8,
+                "object_type": [pd.NA] * 8,
+                "z_flag": [4] * 8,
+                "Remarks": [
+                    "star",
+                    "M star",
+                    "Star?",
+                    "in halo of bright star",
+                    "NaI,TiO,Ha,star",
+                    "MgII,QSO?",
+                    "CIII],NeIV?(br),QSO",
+                    "MgII(br),MgII(abs),[NeV]br,[OII]br(QSO)",
+                ],
+            }
+        ),
+        npartitions=1,
+        sort=False,
+    )
+
+    result, *_ = _homogenize(frame, config, "demo", LOGGER, type_cast_ok=False)
+
+    assert result.compute()["object_type_homogenized"].fillna("missing").tolist() == [
+        "star",
+        "star",
+        "missing",
+        "missing",
+        "star",
+        "missing",
+        "qso",
+        "qso",
+    ]
+
+
+def test_vipers_blagn_takes_precedence_over_photometric_star_like_flag():
+    config_path = Path(__file__).resolve().parents[1] / "flags_translation.yaml"
+    config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    config["tiebreaking_priority"] = []
+    frame = dd.from_pandas(
+        pd.DataFrame(
+            {
+                "survey": ["VIPERS_PDR2"] * 3,
+                "object_type": [pd.NA] * 3,
+                "z_flag": [4.2, 13.2, 213.2],
+                "classFlag": [-1, -1, -1],
+            }
+        ),
+        npartitions=1,
+        sort=False,
+    )
+
+    result, *_ = _homogenize(frame, config, "demo", LOGGER, type_cast_ok=False)
+
+    assert result.compute()["object_type_homogenized"].fillna("missing").tolist() == [
+        "star",
+        "qso",
+        "qso",
+    ]
+
+
+def test_ozdes_explicit_stellar_targets_are_stellar():
+    config_path = Path(__file__).resolve().parents[1] / "flags_translation.yaml"
+    config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    config["tiebreaking_priority"] = []
+    frame = dd.from_pandas(
+        pd.DataFrame(
+            {
+                "survey": ["OZDES"] * 3,
+                "object_type": [pd.NA] * 3,
+                "Object_types": ["RNDstars", "BrightStar", "WhiteDwarf"],
+                "z_flag": [4] * 3,
+            }
+        ),
+        npartitions=1,
+        sort=False,
+    )
+
+    result, *_ = _homogenize(frame, config, "demo", LOGGER, type_cast_ok=False)
+
+    assert result.compute()["object_type_homogenized"].tolist() == [
+        "star",
+        "star",
+        "star",
+    ]
+
+
+def test_euclid_optional_source_is_safe_before_column_arrives():
+    config_path = Path(__file__).resolve().parents[1] / "flags_translation.yaml"
+    config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    config["tiebreaking_priority"] = []
+    frame_without_source = dd.from_pandas(
+        pd.DataFrame(
+            {
+                "survey": ["EUCLID_Q1"],
+                "object_type": [pd.NA],
+            }
+        ),
+        npartitions=1,
+        sort=False,
+    )
+    missing_result, *_ = _homogenize(
+        frame_without_source, config, "demo", LOGGER, type_cast_ok=False
+    )
+    assert missing_result.compute()["object_type_homogenized"].isna().all()
+
+    frame_with_source = dd.from_pandas(
+        pd.DataFrame(
+            {
+                "survey": ["EUCLID_Q1"] * 5,
+                "object_type": [pd.NA] * 5,
+                "spe_class": [pd.NA, "STAR", "GALAXY", "QSO", "UNDEF"],
+            }
+        ),
+        npartitions=1,
+        sort=False,
+    )
+
+    result, *_ = _homogenize(
+        frame_with_source, config, "demo", LOGGER, type_cast_ok=False
+    )
+
+    assert result.compute()["object_type_homogenized"].fillna("missing").tolist() == [
+        "missing",
+        "star",
+        "galaxy",
+        "qso",
+        "missing",
+    ]
 
 
 def test_homogenization_requires_translation_for_every_survey():
