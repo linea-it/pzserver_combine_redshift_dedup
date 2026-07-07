@@ -104,14 +104,21 @@ def test_object_type_translation_uses_canonical_renamed_z_flag():
 
 
 def test_object_type_rejects_values_outside_domain():
-    frame = dd.from_pandas(
+    valid = dd.from_pandas(
         pd.DataFrame({"object_type_homogenized": ["STAR", "agn"]}),
         npartitions=1,
         sort=False,
     )
+    result, *_ = _homogenize(valid, {}, "demo", LOGGER, type_cast_ok=False)
+    assert result.compute()["object_type_homogenized"].tolist() == ["star", "agn"]
 
+    invalid = dd.from_pandas(
+        pd.DataFrame({"object_type_homogenized": ["unknown"]}),
+        npartitions=1,
+        sort=False,
+    )
     with pytest.raises(ValueError, match="Invalid values"):
-        _homogenize(frame, {}, "demo", LOGGER, type_cast_ok=False)
+        _homogenize(invalid, {}, "demo", LOGGER, type_cast_ok=False)
 
 
 def test_catalog_object_type_rules_use_renamed_flags_and_conservative_defaults():
@@ -152,11 +159,11 @@ def test_catalog_object_type_rules_use_renamed_flags_and_conservative_defaults()
     result, *_ = _homogenize(frame, config, "demo", LOGGER, type_cast_ok=False)
 
     assert result.compute()["object_type_homogenized"].fillna("missing").tolist() == [
+        "agn",
+        "agn",
         "missing",
-        "qso",
-        "missing",
-        "qso",
-        "qso",
+        "agn",
+        "agn",
         "galaxy",
         "star",
     ]
@@ -245,7 +252,7 @@ def test_2df_6df_and_2mrs_use_only_documented_object_classes():
         "missing",
         "star",
         "galaxy",
-        "missing",
+        "agn",
     ]
 
 
@@ -277,7 +284,7 @@ def test_vimos_uses_only_unambiguous_comm_classifications():
         "star",
         "star",
         "missing",
-        "qso",
+        "agn",
         "missing",
     ]
 
@@ -289,9 +296,9 @@ def test_deimos_remarks_use_only_unambiguous_classifications():
     frame = dd.from_pandas(
         pd.DataFrame(
             {
-                "survey": ["DEIMOS_10K"] * 8,
-                "object_type": [pd.NA] * 8,
-                "z_flag": [4] * 8,
+                "survey": ["DEIMOS_10K"] * 10,
+                "object_type": [pd.NA] * 10,
+                "z_flag": [4] * 8 + [14, 14],
                 "Remarks": [
                     "star",
                     "M star",
@@ -301,6 +308,8 @@ def test_deimos_remarks_use_only_unambiguous_classifications():
                     "MgII,QSO?",
                     "CIII],NeIV?(br),QSO",
                     "MgII(br),MgII(abs),[NeV]br,[OII]br(QSO)",
+                    "-",
+                    "CIV,QSO",
                 ],
             }
         ),
@@ -319,6 +328,57 @@ def test_deimos_remarks_use_only_unambiguous_classifications():
         "missing",
         "qso",
         "qso",
+        "agn",
+        "qso",
+    ]
+
+
+def test_generic_agn_labels_are_not_promoted_to_qso():
+    config_path = Path(__file__).resolve().parents[1] / "flags_translation.yaml"
+    config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    config["tiebreaking_priority"] = []
+    frame = dd.from_pandas(
+        pd.DataFrame(
+            {
+                "survey": [
+                    "HELP-DMU23",
+                    "OZDES",
+                    "OZDES",
+                    "ELAISS1OID",
+                    "ELAISS1OID",
+                    "ELAISFBMC",
+                    "ELAISFBMC",
+                ],
+                "object_type": [pd.NA] * 7,
+                "agn_flag": [1.0] + [float("nan")] * 6,
+                "Object_types": [
+                    pd.NA,
+                    "AGN_reverberation",
+                    "AGN_reverberation,XXL_QSO",
+                    pd.NA,
+                    pd.NA,
+                    pd.NA,
+                    pd.NA,
+                ],
+                "z_flag": [4.0] * 7,
+                "Class": [float("nan")] * 3 + [1.0, 5.0] + [float("nan")] * 2,
+                "tSp": [float("nan")] * 5 + [4.0, 5.0],
+            }
+        ),
+        npartitions=1,
+        sort=False,
+    )
+
+    result, *_ = _homogenize(frame, config, "demo", LOGGER, type_cast_ok=False)
+
+    assert result.compute()["object_type_homogenized"].tolist() == [
+        "agn",
+        "agn",
+        "qso",
+        "agn",
+        "agn",
+        "agn",
+        "agn",
     ]
 
 
@@ -343,8 +403,8 @@ def test_vipers_blagn_takes_precedence_over_photometric_star_like_flag():
 
     assert result.compute()["object_type_homogenized"].fillna("missing").tolist() == [
         "star",
-        "qso",
-        "qso",
+        "agn",
+        "agn",
     ]
 
 

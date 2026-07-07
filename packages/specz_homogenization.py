@@ -609,7 +609,7 @@ def _homogenize(
         _normalize_string_series_to_na,
         meta=pd.Series(pd.array([], dtype=DTYPE_STR)),
     ).str.lower()
-    allowed_object_types = {"star", "qso", "galaxy"}
+    allowed_object_types = {"star", "qso", "agn", "galaxy"}
     invalid_object_mask = (~dd.isna(object_types)) & ~object_types.isin(
         list(allowed_object_types)
     )

@@ -55,7 +55,9 @@ instrument_type_priority:
 # Each block corresponds to a survey name and includes:
 # - z_flag_translation: how to map original quality flags or based on conditions into a standardized quality scale (0-6)
 # - instrument_type_translation: how to map original types into a standard label (s, g, p)
-# - object_type_translation: how to map classifications into star, qso, or galaxy.
+# - object_type_translation: how to map classifications into star, qso, agn,
+#   or galaxy. `qso` requires an explicit QSO/quasar classification; `agn` is
+#   used for generic AGN and BLAGN classifications without an explicit QSO label.
 #   Its default is null; catalogs without object classifications are valid.
 #   A rule may declare `source: <raw_column>` and `optional_source: true` to
 #   discover a non-standard input column without a frontend columns mapping.
@@ -105,9 +107,10 @@ translation_rules:
   2MRS:
     object_type_translation:
       conditions:
-        # ZCAT type -9 combines QSO and generic AGN, so it is intentionally unknown.
+        # ZCAT type -9 combines QSO and generic AGN; both belong to the broader
+        # AGN class, but the information is insufficient for the QSO subtype.
         - expr: "str(TYPE)[:2] == '-9'"
-          value: null
+          value: "agn"
       default: "galaxy"
     z_flag_translation:
       conditions:
@@ -231,7 +234,7 @@ translation_rules:
     object_type_translation:
       conditions:
         - expr: "10 <= z_flag < 20"
-          value: "qso"
+          value: "agn"
       default: null
     z_flag_translation:
       conditions:
@@ -280,13 +283,13 @@ translation_rules:
   DEIMOS_10K:
     object_type_translation:
       conditions:
+        - expr: "10 <= z_flag < 20"
+          value: "agn"
         - expr: "Remarks.str.strip().str.lower().isin(['star', 'm star'])"
           value: "star"
         - expr: "Remarks.str.contains(',star$', case=False, na=False, regex=True)"
           value: "star"
         - expr: "Remarks.str.contains('[(]QSO[)]|,QSO$', case=False, na=False, regex=True)"
-          value: "qso"
-        - expr: "10 <= z_flag < 20"
           value: "qso"
       default: null
     z_flag_translation:
@@ -389,7 +392,9 @@ translation_rules:
     object_type_translation:
       conditions:
         - expr: "Class == 1"
-          value: "qso"
+          value: "agn"
+        - expr: "Class == 5"
+          value: "agn"
         - expr: "Class == 2 or Class == 3 or Class == 6"
           value: "galaxy"
         - expr: "Class == 4"
@@ -415,8 +420,8 @@ translation_rules:
       conditions:
         - expr: "tSp == 1 or tSp == 2 or tSp == 3"
           value: "galaxy"
-        - expr: "tSp == 5"
-          value: "qso"
+        - expr: "tSp == 4 or tSp == 5 or tSp == 6 or tSp == 8"
+          value: "agn"
         - expr: "tSp == 7"
           value: "star"
       default: null
@@ -499,6 +504,12 @@ translation_rules:
       default: "s"
 
   HELP-DMU23:
+    object_type_translation:
+      conditions:
+        # The HELP flag combines QSO and AGN, so only the broader class is safe.
+        - expr: "agn_flag == 1"
+          value: "agn"
+      default: null
     z_flag_translation:
       1: 0
       2: 1
@@ -566,6 +577,8 @@ translation_rules:
       conditions:
         - expr: "Object_types.str.contains('Galaxy|LRG|ELG|SN_host|SN_free_host|RedMaGiC', case=False, na=False)"
           value: "galaxy"
+        - expr: "Object_types.str.contains('AGN_reverberation|AGN_monitoring', case=False, na=False)"
+          value: "agn"
         - expr: "Object_types.str.contains('QSO', case=False, na=False)"
           value: "qso"
         - expr: "Object_types.str.contains('BBstar|FStar|RNDstars|BrightStar|WhiteDwarf', case=False, na=False)"
@@ -589,6 +602,8 @@ translation_rules:
           value: "galaxy"
         - expr: "CLASS == 'STAR'"
           value: "star"
+        - expr: "CLASS == 'AGN'"
+          value: "agn"
       default: null
     z_flag_translation:
       -1: 0
@@ -680,7 +695,7 @@ translation_rules:
     object_type_translation:
       conditions:
         - expr: "np.trunc(float(z_flag)) == 13 or np.trunc(float(z_flag)) == 14 or np.trunc(float(z_flag)) == 19 or np.trunc(float(z_flag)) == 213 or np.trunc(float(z_flag)) == 214 or np.trunc(float(z_flag)) == 219"
-          value: "qso"
+          value: "agn"
       default: null
     z_flag_translation:
       conditions:
@@ -706,7 +721,7 @@ translation_rules:
         - expr: "COMM.str.strip().str.lower() == 'star'"
           value: "star"
         - expr: "COMM.str.contains('[(]BLAGN[)]', case=False, na=False, regex=True)"
-          value: "qso"
+          value: "agn"
       default: null
     z_flag_translation:
       4: 4
@@ -725,7 +740,7 @@ translation_rules:
         # Spectroscopic BLAGN classification takes precedence over the
         # photometric stellar-like classification.
         - expr: "np.trunc(float(z_flag)) == 13 or np.trunc(float(z_flag)) == 14 or np.trunc(float(z_flag)) == 19 or np.trunc(float(z_flag)) == 213 or np.trunc(float(z_flag)) == 214 or np.trunc(float(z_flag)) == 219"
-          value: "qso"
+          value: "agn"
       default: null
     z_flag_translation:
       conditions:
@@ -746,6 +761,11 @@ translation_rules:
       default: "s"
 
   VUDS:
+    object_type_translation:
+      conditions:
+        - expr: "10 <= z_flag < 20"
+          value: "agn"
+      default: null
     z_flag_translation:
       conditions:
         - expr: "np.trunc(float(z_flag)) - 10*np.trunc(np.trunc(float(z_flag))/10) == 1"
@@ -766,7 +786,7 @@ translation_rules:
     object_type_translation:
       conditions:
         - expr: "10 <= z_flag < 20"
-          value: "qso"
+          value: "agn"
       default: null
     z_flag_translation:
       conditions:
@@ -814,7 +834,7 @@ translation_rules:
     object_type_translation:
       conditions:
         - expr: "10 <= z_flag < 20"
-          value: "qso"
+          value: "agn"
       default: null
     z_flag_translation:
       conditions:
