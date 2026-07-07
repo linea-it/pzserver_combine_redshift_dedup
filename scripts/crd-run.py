@@ -52,11 +52,8 @@ from deduplication import (
 from executor import get_executor
 from product_handle import save_dataframe
 from resource_usage import ResourceUsageMonitor
-from specz import (
-    prepare_catalog,
-    validate_combine_configuration,
-    validate_translation_config,
-)
+from specz import prepare_catalog, validate_combine_configuration
+from specz_homogenization import validate_translation_config
 from utils import (
     configure_exception_hook,
     configure_warning_handler,
