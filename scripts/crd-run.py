@@ -52,7 +52,11 @@ from deduplication import (
 from executor import get_executor
 from product_handle import save_dataframe
 from resource_usage import ResourceUsageMonitor
-from specz import prepare_catalog, validate_combine_configuration
+from specz import (
+    prepare_catalog,
+    validate_combine_configuration,
+    validate_translation_config,
+)
 from utils import (
     configure_exception_hook,
     configure_warning_handler,
@@ -725,6 +729,7 @@ def main(
 
     try:
         translation_config = load_yml(path_to_translation_file)
+        validate_translation_config(translation_config)
     except Exception as e:
         log_init.error("Failed to parse flags_translation_file: %s", e, exc_info=True)
         raise

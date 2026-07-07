@@ -21,6 +21,7 @@ Public API:
 # -----------------------
 import ast as _ast
 import builtins
+import difflib
 import logging
 import math
 
@@ -66,6 +67,186 @@ VIMOS_FLAG_TO_SCORE = {
     "MR_B": 3.0,
     "LRB_A": 4.0, "MR_A": 4.0,
 }
+
+_TRANSLATION_KEYS = {
+    "z_flag_translation": ("float", {0.0, 1.0, 2.0, 3.0, 4.0, 6.0}),
+    "instrument_type_translation": ("str", {"s", "g", "p"}),
+    "object_type_translation": ("str", {"star", "qso", "agn", "galaxy"}),
+}
+_RULE_OPTIONS = {
+    "conditions", "default", "source", "optional_source",
+    "allow_condition_overlap", "fast_path",
+}
+_TOP_LEVEL_KEYS = {
+    "tiebreaking_priority", "delta_z_threshold", "crossmatch_radius_arcsec",
+    "margin_threshold_arcsec", "margin_warning_fraction",
+    "validate_global_graph_edges", "validate_global_tie_invariants",
+    "validate_crd_id_uniqueness", "repartition_prepared_catalogs",
+    "prepared_partition_size", "crossmatch_n_neighbors",
+    "crossmatch_saturation_enabled", "crossmatch_saturation_warn_fraction",
+    "crossmatch_saturation_fail_fraction",
+    "crossmatch_geometry_diagnostics_enabled",
+    "representative_radius_diagnostics_enabled", "dedup_edge_diagnostics_enabled",
+    "instrument_type_priority", "save_expr_columns", "expr_column_schema",
+    "translation_rules",
+}
+_SAFE_FUNCTIONS = {"len", "int", "float", "str"}
+_SAFE_NUMPY_FUNCTIONS = {"isfinite", "abs", "trunc"}
+_SAFE_SERIES_METHODS = {"isin", "contains", "strip", "lower"}
+_SAFE_AST_NODES = (
+    _ast.Expression, _ast.BoolOp, _ast.BinOp, _ast.UnaryOp, _ast.Compare,
+    _ast.Name, _ast.Load, _ast.Constant, _ast.Call, _ast.Attribute,
+    _ast.Subscript, _ast.Slice, _ast.List, _ast.Tuple, _ast.keyword,
+    _ast.And, _ast.Or, _ast.Not, _ast.Invert, _ast.UAdd, _ast.USub,
+    _ast.Add, _ast.Sub, _ast.Mult, _ast.Div, _ast.FloorDiv, _ast.Mod,
+    _ast.Pow, _ast.BitAnd, _ast.BitOr, _ast.Eq, _ast.NotEq, _ast.Lt,
+    _ast.LtE, _ast.Gt, _ast.GtE, _ast.In, _ast.NotIn,
+)
+
+
+class _SafeExpressionValidator(_ast.NodeVisitor):
+    """Reject expression syntax outside the small vectorized-rule DSL."""
+
+    def __init__(self, path: str):
+        self.path = path
+
+    def fail(self, node: _ast.AST, detail: str) -> None:
+        raise ValueError(
+            f"{self.path}: forbidden expression element {type(node).__name__}: {detail}"
+        )
+
+    def generic_visit(self, node: _ast.AST) -> None:
+        if not isinstance(node, _SAFE_AST_NODES):
+            self.fail(node, "not allowed by the translation expression DSL")
+        super().generic_visit(node)
+
+    def visit_Name(self, node: _ast.Name) -> None:
+        if node.id.startswith("_"):
+            self.fail(node, f"private name {node.id!r} is not allowed")
+
+    def visit_Attribute(self, node: _ast.Attribute) -> None:
+        if node.attr.startswith("_"):
+            self.fail(node, f"private attribute {node.attr!r} is not allowed")
+        if isinstance(node.value, _ast.Name) and node.value.id == "np":
+            if node.attr not in _SAFE_NUMPY_FUNCTIONS:
+                self.fail(node, f"np.{node.attr} is not allowed")
+        elif node.attr not in _SAFE_SERIES_METHODS and node.attr != "str":
+            self.fail(node, f"attribute or method {node.attr!r} is not allowed")
+        self.generic_visit(node)
+
+    def visit_Call(self, node: _ast.Call) -> None:
+        if isinstance(node.func, _ast.Name):
+            if node.func.id not in _SAFE_FUNCTIONS:
+                self.fail(node, f"function {node.func.id!r} is not allowed")
+        elif isinstance(node.func, _ast.Attribute):
+            self.visit_Attribute(node.func)
+        else:
+            self.fail(node, "only whitelisted named functions and methods are allowed")
+        for arg in node.args:
+            self.visit(arg)
+        for keyword in node.keywords:
+            if keyword.arg is None or keyword.arg.startswith("_"):
+                self.fail(keyword, "keyword expansion/private keywords are not allowed")
+            self.visit(keyword.value)
+
+
+def _validate_expression(expr: str, path: str) -> None:
+    try:
+        tree = _ast.parse(expr, mode="eval")
+    except SyntaxError as exc:
+        raise ValueError(f"{path}: invalid expression syntax: {exc.msg}") from exc
+    _SafeExpressionValidator(path).visit(tree)
+
+
+def validate_translation_config(config: dict) -> None:
+    """Validate user-editable translation rules before catalog processing."""
+    if not isinstance(config, dict):
+        raise TypeError("flags translation root must be a mapping")
+    unknown_top = set(config) - _TOP_LEVEL_KEYS
+    if unknown_top:
+        raise ValueError(f"flags translation root: unknown option(s): {sorted(unknown_top)}")
+    rules = config.get("translation_rules", {})
+    if not isinstance(rules, dict):
+        raise TypeError("translation_rules must be a mapping")
+    for survey, ruleset in rules.items():
+        base = f"translation_rules.{survey}"
+        if not isinstance(survey, str) or not survey.strip():
+            raise ValueError("translation_rules survey names must be non-empty strings")
+        if not isinstance(ruleset, dict):
+            raise TypeError(f"{base} must be a mapping")
+        unknown_blocks = set(ruleset) - set(_TRANSLATION_KEYS)
+        if unknown_blocks:
+            raise ValueError(f"{base}: unknown option(s): {sorted(unknown_blocks)}")
+        for block, (kind, allowed) in _TRANSLATION_KEYS.items():
+            if block not in ruleset:
+                continue
+            path = f"{base}.{block}"
+            rule = ruleset[block]
+            if not isinstance(rule, dict):
+                raise TypeError(f"{path} must be a mapping")
+            for option in ("optional_source", "allow_condition_overlap"):
+                if option in rule and not isinstance(rule[option], bool):
+                    raise TypeError(f"{path}.{option} must be a boolean")
+            if "source" in rule and (
+                not isinstance(rule["source"], str) or not rule["source"].strip()
+            ):
+                raise ValueError(f"{path}.source must be a non-empty string")
+            policy = rule.get("fast_path", "auto")
+            if policy not in {"auto", "disabled", "required"}:
+                raise ValueError(
+                    f"{path}.fast_path must be one of ['auto', 'disabled', 'required']"
+                )
+            conditions = rule.get("conditions", [])
+            if not isinstance(conditions, list):
+                raise TypeError(f"{path}.conditions must be a list")
+            for index, condition in enumerate(conditions):
+                cpath = f"{path}.conditions[{index}]"
+                if not isinstance(condition, dict):
+                    raise TypeError(f"{cpath} must be a mapping")
+                unknown = set(condition) - {"expr", "value"}
+                if unknown:
+                    raise ValueError(f"{cpath}: unknown option(s): {sorted(unknown)}")
+                if not isinstance(condition.get("expr"), str) or not condition["expr"].strip():
+                    raise ValueError(f"{cpath}.expr must be a non-empty string")
+                if "value" not in condition:
+                    raise ValueError(f"{cpath}.value is required")
+                _validate_expression(condition["expr"], f"{cpath}.expr")
+            values = []
+            if "default" in rule:
+                values.append((f"{path}.default", rule["default"]))
+            values.extend(
+                (f"{path}.conditions[{i}].value", c["value"])
+                for i, c in enumerate(conditions)
+            )
+            for key, value in rule.items():
+                if key not in _RULE_OPTIONS:
+                    close = difflib.get_close_matches(str(key), _RULE_OPTIONS, n=1, cutoff=0.8)
+                    if close:
+                        raise ValueError(
+                            f"{path}.{key}: unknown option; did you mean {close[0]!r}?"
+                        )
+                    values.append((f"{path}.{key}", value))
+                    if block == "z_flag_translation":
+                        try:
+                            float(key)
+                        except (TypeError, ValueError) as exc:
+                            raise ValueError(
+                                f"{path}.{key}: z_flag direct mapping keys must be numeric"
+                            ) from exc
+            for value_path, value in values:
+                if value is None:
+                    continue
+                normalized = str(value).strip().lower() if kind == "str" else value
+                if kind == "float":
+                    try:
+                        normalized = float(value)
+                    except (TypeError, ValueError) as exc:
+                        raise ValueError(f"{value_path} must be numeric or null") from exc
+                if normalized not in allowed:
+                    raise ValueError(
+                        f"{value_path}={value!r} is invalid; allowed values are "
+                        f"{sorted(allowed)} or null"
+                    )
 
 # -----------------------
 # Local helper (duplicated to avoid circular dep)
@@ -223,12 +404,59 @@ def _homogenize(
     Returns:
         Tuple: (df, used_type_fastpath, tiebreaking_priority, instrument_type_priority, translation_rules_uc)
     """
+    validate_translation_config(translation_config)
     tiebreaking_priority = translation_config.get("tiebreaking_priority", [])
     instrument_type_priority = translation_config.get("instrument_type_priority", {})
     translation_rules_uc = {k.upper(): v for k, v in translation_config.get("translation_rules", {}).items()}
     validated_non_null_counts: dict[str, int] = {}
     z_flag_is_priority = "z_flag_homogenized" in tiebreaking_priority
     needs_z_flag = z_flag_is_priority or require_z_flag_homogenized
+
+    def _fast_path_policy(key: str) -> str:
+        if "survey" not in df.columns:
+            return "auto"
+        surveys = (
+            df["survey"].dropna().astype(str).str.upper().unique().compute().tolist()
+        )
+        policies = {
+            str(
+                translation_rules_uc.get(survey, {})
+                .get(f"{key}_translation", {})
+                .get("fast_path", "auto")
+            )
+            for survey in surveys
+        }
+        if "disabled" in policies and "required" in policies:
+            raise ValueError(
+                f"[{product_name}] Conflicting {key} fast_path policies for surveys "
+                f"{sorted(surveys)}: cannot mix 'disabled' and 'required' in one catalog"
+            )
+        if "disabled" in policies:
+            return "disabled"
+        if "required" in policies:
+            return "required"
+        return "auto"
+
+    def _validate_result_domain(
+        column: str, allowed: set, *, normalize_string: bool = False
+    ) -> None:
+        values = df[column]
+        if normalize_string:
+            values = values.map_partitions(
+                _normalize_string_series_to_na,
+                meta=pd.Series(pd.array([], dtype=DTYPE_STR)),
+            ).str.lower()
+        else:
+            values = dd.to_numeric(values, errors="coerce")
+        invalid = (~dd.isna(values)) & ~values.isin(list(allowed))
+        invalid_count, non_null_count = dask.compute(invalid.sum(), values.count())
+        validated_non_null_counts[column] = int(non_null_count)
+        if int(invalid_count):
+            examples = df[column].loc[invalid].head(5, compute=True).tolist()
+            raise ValueError(
+                f"[{product_name}] Translation produced invalid values in '{column}'. "
+                f"Allowed set is {sorted(allowed)} (NaN allowed). Examples: {examples}"
+            )
 
     # -----------------------
     # Vectorized translator
@@ -338,6 +566,9 @@ def _homogenize(
 
                 source_col = str(rule.get("source", key))
                 optional_source = bool(rule.get("optional_source", False))
+                allow_condition_overlap = bool(
+                    rule.get("allow_condition_overlap", False)
+                )
                 direct = {
                     k: v
                     for k, v in rule.items()
@@ -346,43 +577,45 @@ def _homogenize(
                         "default",
                         "source",
                         "optional_source",
+                        "allow_condition_overlap",
+                        "fast_path",
                     }
                 }
                 if direct:
                     if source_col not in s.columns:
-                        if optional_source:
-                            continue
-                        raise ValueError(
-                            f"Missing source column '{source_col}' for survey "
-                            f"'{sname}' and translation '{out_col}'."
-                        )
-                    col = s.loc[mask_s, source_col]
-                    is_num = pd.api.types.is_numeric_dtype(col)
-                    if key == "z_flag":
-                        is_num = True
-                    if is_num:
-                        col_num = pd.to_numeric(col, errors="coerce")
-                        num_map = {}
-                        for rk, rv in direct.items():
-                            try:
-                                num_map[float(rk)] = rv
-                            except Exception:
-                                pass
-                        mapped = col_num.map(num_map)
+                        if not optional_source:
+                            raise ValueError(
+                                f"Missing source column '{source_col}' for survey "
+                                f"'{sname}' and translation '{out_col}'."
+                            )
                     else:
-                        col_str = col.astype(str).str.strip().str.lower()
-                        str_map = {str(k).strip().lower(): v for k, v in direct.items()}
-                        mapped = col_str.map(str_map)
+                        col = s.loc[mask_s, source_col]
+                        is_num = pd.api.types.is_numeric_dtype(col)
+                        if key == "z_flag":
+                            is_num = True
+                        if is_num:
+                            col_num = pd.to_numeric(col, errors="coerce")
+                            num_map = {float(rk): rv for rk, rv in direct.items()}
+                            mapped = col_num.map(num_map)
+                        else:
+                            col_str = col.astype(str).str.strip().str.lower()
+                            str_map = {str(k).strip().lower(): v for k, v in direct.items()}
+                            mapped = col_str.map(str_map)
 
-                    if out_kind == "float":
-                        out.loc[mask_s] = mapped.fillna(out.loc[mask_s]).astype(DTYPE_FLOAT)
-                    else:
-                        mapped = mapped.astype("object")
-                        mapped_str = pd.Series(pd.array(mapped.where(mapped.notna(), None), dtype=DTYPE_STR), index=mapped.index)
-                        take = mapped_str.notna()
-                        out.loc[take.index] = out.loc[take.index].where(~take, mapped_str)
+                        if out_kind == "float":
+                            out.loc[mask_s] = mapped.fillna(out.loc[mask_s]).astype(DTYPE_FLOAT)
+                        else:
+                            mapped = mapped.astype("object")
+                            mapped_str = pd.Series(pd.array(mapped.where(mapped.notna(), None), dtype=DTYPE_STR), index=mapped.index)
+                            take = mapped_str.notna()
+                            out.loc[take.index] = out.loc[take.index].where(~take, mapped_str)
 
-                for cond in (rule.get("conditions") or []):
+                condition_values = pd.Series(
+                    pd.array([pd.NA] * len(s), dtype="object"), index=s.index
+                )
+                for condition_index, cond in enumerate(
+                    rule.get("conditions") or []
+                ):
                     expr = cond.get("expr")
                     if not expr:
                         continue
@@ -423,6 +656,26 @@ def _homogenize(
                     mlocal = mlocal & mask_s_aligned
 
                     val = cond.get("value", default_val)
+                    normalized_val = pd.NA if pd.isna(val) else val
+                    conflicting = (
+                        mlocal
+                        & condition_values.notna()
+                        & condition_values.ne(normalized_val).fillna(False)
+                    )
+                    conflict_count = int(conflicting.sum())
+                    if conflict_count and not allow_condition_overlap:
+                        logger.warning(
+                            "[%s] %s.%s condition %d overwrites a different "
+                            "condition value for %d row(s); later conditions "
+                            "take precedence. Set allow_condition_overlap: true "
+                            "when this is intentional.",
+                            product_name,
+                            sname,
+                            f"{key}_translation",
+                            condition_index + 1,
+                            conflict_count,
+                        )
+                    condition_values.loc[mlocal] = normalized_val
                     if out_kind == "float":
                         out.loc[mlocal] = pd.to_numeric(val, errors="coerce")
                     else:
@@ -478,8 +731,20 @@ def _homogenize(
 
     if needs_z_flag:
         if "z_flag_homogenized" not in df.columns:
-            if can_use_zflag_as_quality():
-                logger.info(f"{product_name} Using 'z_flag' fast path for z_flag_homogenized.")
+            z_fast_path = _fast_path_policy("z_flag")
+            z_fast_path_compatible = can_use_zflag_as_quality()
+            if z_fast_path == "required" and not z_fast_path_compatible:
+                raise ValueError(
+                    f"[{product_name}] z_flag fast_path is 'required', but z_flag "
+                    "is not a non-empty probability-like column in [0, 1]"
+                )
+            if z_fast_path != "disabled" and z_fast_path_compatible:
+                logger.info(
+                    "%s Using 'z_flag' fast path for z_flag_homogenized "
+                    "(policy=%s); YAML z_flag rules are bypassed.",
+                    product_name,
+                    z_fast_path,
+                )
                 df["z_flag_homogenized"] = df["z_flag"].map_partitions(
                     lambda s: s.apply(quality_like_to_flag).astype(DTYPE_FLOAT),
                     meta=pd.Series(pd.array([], dtype=DTYPE_FLOAT)),
@@ -497,6 +762,9 @@ def _homogenize(
                 df = _translate_column_vectorized(df, key="z_flag",
                                                   out_col="z_flag_homogenized",
                                                   out_kind="float")
+                _validate_result_domain(
+                    "z_flag_homogenized", {0.0, 1.0, 2.0, 3.0, 4.0, 6.0}
+                )
         else:
             # User-provided 'z_flag_homogenized' is present. Validate allowed domain {0,1,2,3,4} (NaN allowed).
             logger.info(f"{product_name} 'z_flag_homogenized' already exists; validating user-provided values.")
@@ -504,7 +772,10 @@ def _homogenize(
 
             vals = dd.to_numeric(df["z_flag_homogenized"], errors="coerce")
             # NaN is allowed; only non-NaN values outside the allowed set are invalid
-            invalid_mask = (~dd.isna(vals)) & ~vals.isin(list(allowed))
+            invalid_mask = (
+                ((~dd.isna(df["z_flag_homogenized"])) & dd.isna(vals))
+                | ((~dd.isna(vals)) & ~vals.isin(list(allowed)))
+            )
             invalid_count, non_null_count = dask.compute(
                 invalid_mask.sum(), vals.count()
             )
@@ -543,8 +814,20 @@ def _homogenize(
 
     if "instrument_type_homogenized" in tiebreaking_priority:
         if "instrument_type_homogenized" not in df.columns:
-            if can_use_type_for_instrument():
-                logger.info(f"{product_name} Using 'type' fast path for instrument_type_homogenized.")
+            instrument_fast_path = _fast_path_policy("instrument_type")
+            instrument_fast_path_compatible = can_use_type_for_instrument()
+            if instrument_fast_path == "required" and not instrument_fast_path_compatible:
+                raise ValueError(
+                    f"[{product_name}] instrument_type fast_path is 'required', "
+                    "but type is not a non-empty column containing only s/g/p"
+                )
+            if instrument_fast_path != "disabled" and instrument_fast_path_compatible:
+                logger.info(
+                    "%s Using 'type' fast path for instrument_type_homogenized "
+                    "(policy=%s); YAML instrument rules are bypassed.",
+                    product_name,
+                    instrument_fast_path,
+                )
                 df["instrument_type_homogenized"] = df["type"].map_partitions(
                     _normalize_string_series_to_na,
                     meta=pd.Series(pd.array([], dtype=DTYPE_STR)),
@@ -567,6 +850,11 @@ def _homogenize(
                     _normalize_string_series_to_na,
                     meta=pd.Series(pd.array([], dtype=DTYPE_STR)),
                 ).str.lower()
+                _validate_result_domain(
+                    "instrument_type_homogenized",
+                    {"s", "g", "p"},
+                    normalize_string=True,
+                )
         else:
             # User-provided 'instrument_type_homogenized' is present. Validate allowed domain {"s","p","g"}.
             logger.info(f"{product_name} 'instrument_type_homogenized' already exists; validating user-provided values.")

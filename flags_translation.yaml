@@ -62,6 +62,12 @@ instrument_type_priority:
 #   A rule may declare `source: <raw_column>` and `optional_source: true` to
 #   discover a non-standard input column without a frontend columns mapping.
 # You can mix value-based mappings and conditional rules (using Python expressions)
+# Conditions are evaluated in YAML order. When multiple conditions match a row,
+# the later condition takes precedence ("last match wins"). Conflicting matches
+# emit a warning unless that translation declares `allow_condition_overlap: true`.
+# z_flag and instrument translations accept `fast_path: auto|disabled|required`.
+# `auto` is the default, `disabled` forces YAML rules, and `required` fails when
+# the input is not compatible with the corresponding probability/s-g-p fast path.
 
 save_expr_columns: false
 
@@ -215,6 +221,7 @@ translation_rules:
           value: "star"
       default: null
     z_flag_translation:
+      allow_condition_overlap: true
       conditions:
         - expr: "lp_type == -9 or not np.isfinite(z)"
           value: 0
@@ -266,15 +273,15 @@ translation_rules:
       default: null
     z_flag_translation:
       conditions:
-        - expr: "type != 1 and z_flag != 0"
+        - expr: "type != '1' and z_flag != 0"
           value: 0
-        - expr: "type != 1 and z_flag == 0 and np.abs(zpdf_med - zchi2) > 0.001"
+        - expr: "type != '1' and z_flag == 0 and np.abs(zpdf_med - zchi2) > 0.001"
           value: 1
-        - expr: "type != 1 and z_flag == 0 and np.abs(zpdf_med - zchi2) <= 0.001 and nbfilt < 30"
+        - expr: "type != '1' and z_flag == 0 and np.abs(zpdf_med - zchi2) <= 0.001 and nbfilt < 30"
           value: 2
-        - expr: "type != 1 and z_flag == 0 and np.abs(zpdf_med - zchi2) <= 0.001 and nbfilt > 30"
+        - expr: "type != '1' and z_flag == 0 and np.abs(zpdf_med - zchi2) <= 0.001 and nbfilt >= 30"
           value: 3
-        - expr: "type == 1"
+        - expr: "type == '1'"
           value: 6
       default: 0
     instrument_type_translation:
@@ -282,6 +289,7 @@ translation_rules:
 
   DEIMOS_10K:
     object_type_translation:
+      allow_condition_overlap: true
       conditions:
         - expr: "10 <= z_flag < 20"
           value: "agn"
@@ -531,6 +539,7 @@ translation_rules:
 
   JADES_DR5_PHOTOZ:
     z_flag_translation:
+      allow_condition_overlap: true
       conditions:
         - expr: "not np.isfinite(z) or not np.isfinite(z_ml) or not np.isfinite(chi_a) or not np.isfinite(nfilt) or nfilt <= 0"
           value: 0
@@ -546,6 +555,7 @@ translation_rules:
 
   JADES_DR5_PHOTOZ_KRON:
     z_flag_translation:
+      allow_condition_overlap: true
       conditions:
         - expr: "not np.isfinite(z) or not np.isfinite(z_ml) or not np.isfinite(chi_a) or not np.isfinite(nfilt) or nfilt <= 0"
           value: 0
@@ -574,6 +584,7 @@ translation_rules:
 
   OZDES:
     object_type_translation:
+      allow_condition_overlap: true
       conditions:
         - expr: "Object_types.str.contains('Galaxy|LRG|ELG|SN_host|SN_free_host|RedMaGiC', case=False, na=False)"
           value: "galaxy"
@@ -667,6 +678,7 @@ translation_rules:
 
   SWIRE-REVISED:
     object_type_translation:
+      allow_condition_overlap: true
       conditions:
         - expr: "mst < 0"
           value: "star"
@@ -734,6 +746,7 @@ translation_rules:
 
   VIPERS_PDR2:
     object_type_translation:
+      allow_condition_overlap: true
       conditions:
         - expr: "classFlag == -1"
           value: "star"

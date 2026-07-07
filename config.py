@@ -105,7 +105,7 @@ class Param(BaseModel):
     z_flag_homogenized_value_to_cut: float = 3.0
     flags_translation_file: str = str(Path(MAINDIR, "flags_translation.yaml"))
     insert_DP1_footprint_flag: bool = False
-    insert_rubin_footprint_flag: bool = True
+    insert_rubin_footprint_flag: bool = False
 
 
 class Config(BaseModel):

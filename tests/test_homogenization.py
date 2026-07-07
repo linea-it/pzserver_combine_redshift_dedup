@@ -20,9 +20,81 @@ from specz import (  # noqa: E402
     _requires_z_flag_homogenization,
     validate_combine_configuration,
 )
-from specz_homogenization import _homogenize  # noqa: E402
+from specz_homogenization import (
+    _homogenize,  # noqa: E402
+    validate_translation_config,  # noqa: E402
+)
 
 LOGGER = logging.getLogger("test.homogenization")
+
+
+def test_translation_schema_rejects_unsafe_expression_with_exact_path():
+    config = {
+        "translation_rules": {
+            "DEMO": {
+                "object_type_translation": {
+                    "conditions": [
+                        {"expr": "__import__('os').system('id')", "value": "star"}
+                    ]
+                }
+            }
+        }
+    }
+
+    with pytest.raises(
+        ValueError,
+        match=r"translation_rules\.DEMO\.object_type_translation\.conditions\[0\]\.expr",
+    ):
+        validate_translation_config(config)
+
+
+def test_translation_schema_rejects_private_attributes_and_typos():
+    private = {
+        "translation_rules": {
+            "DEMO": {
+                "object_type_translation": {
+                    "conditions": [{"expr": "value.__class__", "value": "star"}]
+                }
+            }
+        }
+    }
+    with pytest.raises(ValueError, match="private attribute"):
+        validate_translation_config(private)
+
+    typo = {
+        "translation_rules": {
+            "DEMO": {
+                "object_type_translation": {
+                    "allow_condition_overlaps": True,
+                    "default": None,
+                }
+            }
+        }
+    }
+    with pytest.raises(ValueError, match="did you mean 'allow_condition_overlap'"):
+        validate_translation_config(typo)
+
+
+def test_translation_schema_validates_output_domains_and_condition_shape():
+    invalid_value = {
+        "translation_rules": {
+            "DEMO": {"z_flag_translation": {"default": 9}}
+        }
+    }
+    with pytest.raises(ValueError, match=r"z_flag_translation\.default=9"):
+        validate_translation_config(invalid_value)
+
+    invalid_condition = {
+        "translation_rules": {
+            "DEMO": {
+                "object_type_translation": {
+                    "conditions": [{"expr": "value == 1", "vale": "star"}]
+                }
+            }
+        }
+    }
+    with pytest.raises(ValueError, match=r"conditions\[0\].*unknown option"):
+        validate_translation_config(invalid_condition)
 
 
 def test_yaml_flag_translation_applies_direct_default_and_condition():
@@ -53,6 +125,191 @@ def test_yaml_flag_translation_applies_direct_default_and_condition():
     result, *_ = _homogenize(frame, config, "demo", LOGGER, type_cast_ok=False)
 
     assert result.compute()["z_flag_homogenized"].astype(float).tolist() == [2, 0, 4]
+
+
+def test_z_flag_fast_path_policy_can_be_disabled_or_required():
+    frame = dd.from_pandas(
+        pd.DataFrame({"survey": ["demo", "demo"], "z_flag": [0.2, 0.95]}),
+        npartitions=1,
+        sort=False,
+    )
+    disabled = {
+        "tiebreaking_priority": ["z_flag_homogenized"],
+        "translation_rules": {
+            "DEMO": {
+                "z_flag_translation": {"fast_path": "disabled", "default": 3}
+            }
+        },
+    }
+    result, *_ = _homogenize(
+        frame, disabled, "demo", LOGGER, type_cast_ok=False
+    )
+    assert result.compute()["z_flag_homogenized"].tolist() == [3.0, 3.0]
+
+    incompatible = dd.from_pandas(
+        pd.DataFrame({"survey": ["demo"], "z_flag": [4]}),
+        npartitions=1,
+        sort=False,
+    )
+    required = {
+        "tiebreaking_priority": ["z_flag_homogenized"],
+        "translation_rules": {
+            "DEMO": {
+                "z_flag_translation": {"fast_path": "required", "default": 3}
+            }
+        },
+    }
+    with pytest.raises(ValueError, match="fast_path is 'required'"):
+        _homogenize(incompatible, required, "demo", LOGGER, type_cast_ok=False)
+
+
+def test_instrument_fast_path_can_be_disabled():
+    frame = dd.from_pandas(
+        pd.DataFrame(
+            {"survey": ["demo", "demo"], "instrument_type": [pd.NA] * 2, "type": ["s", "g"]}
+        ),
+        npartitions=1,
+        sort=False,
+    )
+    config = {
+        "tiebreaking_priority": ["instrument_type_homogenized"],
+        "translation_rules": {
+            "DEMO": {
+                "instrument_type_translation": {
+                    "fast_path": "disabled",
+                    "default": "p",
+                }
+            }
+        },
+    }
+    result, *_ = _homogenize(frame, config, "demo", LOGGER, type_cast_ok=True)
+    assert result.compute()["instrument_type_homogenized"].tolist() == ["p", "p"]
+
+
+def test_optional_source_absence_keeps_condition_fallback():
+    frame = dd.from_pandas(
+        pd.DataFrame(
+            {"survey": ["demo", "demo"], "object_type": [pd.NA] * 2, "fallback": [1, 0]}
+        ),
+        npartitions=1,
+        sort=False,
+    )
+    config = {
+        "translation_rules": {
+            "DEMO": {
+                "object_type_translation": {
+                    "source": "missing_optional_column",
+                    "optional_source": True,
+                    "STAR": "star",
+                    "conditions": [{"expr": "fallback == 1", "value": "galaxy"}],
+                    "default": None,
+                }
+            }
+        }
+    }
+    result, *_ = _homogenize(frame, config, "demo", LOGGER, type_cast_ok=False)
+    assert result.compute()["object_type_homogenized"].fillna("missing").tolist() == [
+        "galaxy",
+        "missing",
+    ]
+
+
+def test_later_condition_wins_and_conflicting_overlap_warns(caplog):
+    frame = dd.from_pandas(
+        pd.DataFrame(
+            {
+                "survey": ["demo"],
+                "object_type": [pd.NA],
+                "score": [2],
+            }
+        ),
+        npartitions=1,
+        sort=False,
+    )
+    config = {
+        "translation_rules": {
+            "DEMO": {
+                "object_type_translation": {
+                    "conditions": [
+                        {"expr": "score > 0", "value": "star"},
+                        {"expr": "score > 1", "value": "galaxy"},
+                    ],
+                    "default": None,
+                }
+            }
+        }
+    }
+
+    with caplog.at_level(logging.WARNING, logger=LOGGER.name):
+        result, *_ = _homogenize(
+            frame, config, "demo", LOGGER, type_cast_ok=False
+        )
+
+    assert result.compute()["object_type_homogenized"].tolist() == ["galaxy"]
+    assert "later conditions take precedence" in caplog.text
+
+
+def test_declared_condition_overlap_does_not_warn(caplog):
+    frame = dd.from_pandas(
+        pd.DataFrame(
+            {"survey": ["demo"], "object_type": [pd.NA], "score": [2]}
+        ),
+        npartitions=1,
+        sort=False,
+    )
+    config = {
+        "translation_rules": {
+            "DEMO": {
+                "object_type_translation": {
+                    "allow_condition_overlap": True,
+                    "conditions": [
+                        {"expr": "score > 0", "value": "star"},
+                        {"expr": "score > 1", "value": "galaxy"},
+                    ],
+                    "default": None,
+                }
+            }
+        }
+    }
+
+    with caplog.at_level(logging.WARNING, logger=LOGGER.name):
+        result, *_ = _homogenize(
+            frame, config, "demo", LOGGER, type_cast_ok=False
+        )
+
+    assert result.compute()["object_type_homogenized"].tolist() == ["galaxy"]
+    assert "later conditions take precedence" not in caplog.text
+
+
+def test_cosmos_web_flag_translation_compares_normalized_string_type():
+    config_path = Path(__file__).resolve().parents[1] / "flags_translation.yaml"
+    config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    config["tiebreaking_priority"] = ["z_flag_homogenized"]
+    frame = dd.from_pandas(
+        pd.DataFrame(
+            {
+                "survey": ["COSMOS_Web"] * 5,
+                "object_type": [pd.NA] * 5,
+                "type": ["1", "0", "0", "0", "0"],
+                "z_flag": [0, 1, 0, 0, 0],
+                "zpdf_med": [1.0, 1.0, 1.01, 1.0, 1.0],
+                "zchi2": [1.0, 1.0, 1.0, 1.0, 1.0],
+                "nbfilt": [40, 40, 40, 20, 30],
+            }
+        ),
+        npartitions=1,
+        sort=False,
+    )
+
+    result, *_ = _homogenize(frame, config, "demo", LOGGER, type_cast_ok=False)
+
+    assert result.compute()["z_flag_homogenized"].tolist() == [
+        6.0,
+        0.0,
+        1.0,
+        2.0,
+        3.0,
+    ]
 
 
 def test_object_type_is_always_present_and_may_be_entirely_null():

@@ -2650,7 +2650,7 @@ def prepare_catalog(
         param_config.get("insert_DP1_footprint_flag", False), default=False
     )
     insert_rubin = _as_bool_config(
-        param_config.get("insert_rubin_footprint_flag", True), default=True
+        param_config.get("insert_rubin_footprint_flag", False), default=False
     )
 
     if insert_dp1:
