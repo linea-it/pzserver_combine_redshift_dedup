@@ -709,19 +709,17 @@ def build_global_tie_invariant_diagnostics(
 ) -> tuple[dd.DataFrame, object]:
     """Build lazy per-group invariant diagnostics and missing-group count."""
     tie = dd.to_numeric(df[tie_col], errors="coerce")
-    if z_flag_col is None:
-        nonstar_mask = ~tie.eq(3)
-    else:
-        zf = dd.to_numeric(df[z_flag_col], errors="coerce")
-        nonstar_mask = ~zf.eq(6.0)
-    nonstars = df.loc[nonstar_mask, [group_col]].assign(
+    # tie_result=3 is the public, type-agnostic marker for rows excluded from
+    # the graph. z_flag_col is retained only for API compatibility.
+    participating_mask = ~tie.eq(3)
+    participants = df.loc[participating_mask, [group_col]].assign(
         n=1,
         n0=tie.eq(0).astype("int8"),
         n1=tie.eq(1).astype("int8"),
         n2=tie.eq(2).astype("int8"),
         n_invalid=(~tie.isin([0, 1, 2])).astype("int8"),
     )
-    stats = nonstars.groupby(group_col).agg(
+    stats = participants.groupby(group_col).agg(
         {"n": "sum", "n0": "sum", "n1": "sum", "n2": "sum", "n_invalid": "sum"}
     )
     valid_single = (
@@ -731,7 +729,7 @@ def build_global_tie_invariant_diagnostics(
         stats["n1"].eq(0) & stats["n2"].ge(2) & stats["n0"].eq(stats["n"] - stats["n2"])
     )
     invalid = stats["n_invalid"].gt(0) | ~(valid_single | valid_hard)
-    missing_group_rows = nonstars[group_col].isna().sum()
+    missing_group_rows = participants[group_col].isna().sum()
     diagnostics = stats.assign(
         multiple_winners=stats["n1"].gt(1),
         no_survivor=stats["n1"].eq(0) & stats["n2"].eq(0),
@@ -747,10 +745,10 @@ def _build_edges_fast(
     *,
     crd_col: str,
     compared_col: str,
-    zf_series: pd.Series | None = None,
+    excluded_mask: pd.Series | None = None,
     edge_log: bool = False,
 ):
-    """Build undirected edges among NON-STAR rows (vectorized path).
+    """Build undirected edges among rows participating in the graph.
 
     Returns:
         (nodes_index, edges_uv, diag) where:
@@ -759,17 +757,16 @@ def _build_edges_fast(
           - diag: dict with basic diagnostics (counts). If `edge_log` is False,
                   only cheap counts are filled; expensive ones are set to None.
     """
-    # --- filter A-side (rows) to non-stars
-    non_star_mask = pd.Series(True, index=df.index)
-    if zf_series is not None:
-        non_star_mask &= ~pd.to_numeric(zf_series, errors="coerce").eq(6)
+    participating_mask = pd.Series(True, index=df.index, dtype="boolean")
+    if excluded_mask is not None:
+        participating_mask &= ~excluded_mask.reindex(df.index).fillna(False)
 
-    A_df = df.loc[non_star_mask, [crd_col, compared_col]].copy().reset_index(drop=True)
+    A_df = df.loc[participating_mask, [crd_col, compared_col]].copy().reset_index(drop=True)
     if A_df.empty:
         diag = {
             "edge_log_enabled": bool(edge_log),
-            "n_rows_nonstar": int(non_star_mask.sum()),
-            "n_rows_star_excluded": int((~non_star_mask).sum()),
+            "n_rows_nonstar": int(participating_mask.sum()),
+            "n_rows_star_excluded": int((~participating_mask).sum()),
             "n_edges_raw": 0,
             "n_edges_kept": 0,
             "n_edges_starB_excluded": None if not edge_log else 0,
@@ -778,15 +775,13 @@ def _build_edges_fast(
 
     # Non-star IDs present on A-side
     present_nonstar = set(
-        _canon_id_series(df.loc[non_star_mask, crd_col]).dropna().unique()
+        _canon_id_series(df.loc[participating_mask, crd_col]).dropna().unique()
     )
 
     # If diagnostics are enabled, precompute star IDs (for B-side exclusion count)
-    if edge_log and (zf_series is not None):
+    if edge_log and (excluded_mask is not None):
         star_ids = set(
-            _canon_id_series(
-                df.loc[pd.to_numeric(zf_series, errors="coerce").eq(6), crd_col]
-            )
+            _canon_id_series(df.loc[~participating_mask, crd_col])
             .dropna()
             .unique()
         )
@@ -822,8 +817,8 @@ def _build_edges_fast(
     if edges_raw.empty:
         diag = {
             "edge_log_enabled": bool(edge_log),
-            "n_rows_nonstar": int(non_star_mask.sum()),
-            "n_rows_star_excluded": int((~non_star_mask).sum()),
+            "n_rows_nonstar": int(participating_mask.sum()),
+            "n_rows_star_excluded": int((~participating_mask).sum()),
             "n_edges_raw": n_edges_raw,
             "n_edges_kept": 0,
             "n_edges_starB_excluded": n_edges_starB_excluded,
@@ -836,11 +831,9 @@ def _build_edges_fast(
     )
 
     # --- EXTRA LOG (edge_log): sanity-check that no star IDs leaked into edge nodes
-    if edge_log and (zf_series is not None) and len(nodes_edge):
+    if edge_log and (excluded_mask is not None) and len(nodes_edge):
         star_ids_fast = set(
-            _canon_id_series(
-                df.loc[pd.to_numeric(zf_series, errors="coerce").eq(6), crd_col]
-            )
+            _canon_id_series(df.loc[~participating_mask, crd_col])
             .dropna()
             .unique()
         )
@@ -865,8 +858,8 @@ def _build_edges_fast(
     if lo.size == 0:
         diag = {
             "edge_log_enabled": bool(edge_log),
-            "n_rows_nonstar": int(non_star_mask.sum()),
-            "n_rows_star_excluded": int((~non_star_mask).sum()),
+            "n_rows_nonstar": int(participating_mask.sum()),
+            "n_rows_star_excluded": int((~participating_mask).sum()),
             "n_edges_raw": n_edges_raw,
             "n_edges_kept": 0,
             "n_edges_starB_excluded": n_edges_starB_excluded,
@@ -879,8 +872,8 @@ def _build_edges_fast(
 
     diag = {
         "edge_log_enabled": bool(edge_log),
-        "n_rows_nonstar": int(non_star_mask.sum()),
-        "n_rows_star_excluded": int((~non_star_mask).sum()),
+        "n_rows_nonstar": int(participating_mask.sum()),
+        "n_rows_star_excluded": int((~participating_mask).sum()),
         "n_edges_raw": n_edges_raw,
         "n_edges_kept": int(uv.shape[0]),
         # None when edge_log=False to indicate we skipped the costly check
@@ -1095,14 +1088,16 @@ def _to_numeric(series_like) -> pd.Series:
 # -----------------------
 # Guard restore
 # -----------------------
-def _only_star_neighbors_series(col: pd.Series, star_ids: set[str]) -> pd.Series:
-    """True when compared_to is non-empty AND all neighbors are star IDs."""
+def _only_excluded_neighbors_series(
+    col: pd.Series, excluded_ids: set[str]
+) -> pd.Series:
+    """True when compared_to is non-empty and all neighbors are excluded."""
     s = col.astype("string").fillna("")
     lst = s.str.split(",")
     out = []
     for tokens in lst:
         toks = [t.strip() for t in tokens if t and t.strip()]
-        out.append(bool(toks) and all((tok in star_ids) for tok in toks))
+        out.append(bool(toks) and all((tok in excluded_ids) for tok in toks))
     return pd.Series(out, index=col.index, dtype="boolean")
 
 
@@ -1111,17 +1106,17 @@ def _apply_guard_restore_local(
     *,
     crd_col: str,
     compared_col: str,
-    zf_series: pd.Series | None,
+    excluded_mask: pd.Series,
     tie_col: str,
     tie_col_orig: str,
 ) -> pd.DataFrame:
-    """Restore original tie_result for non-stars with empty/only-star neighbors.
+    """Restore original labels for participants with no participating neighbors.
 
     Args:
         df: Partition dataframe.
         crd_col: Name of the CRD_ID column.
         compared_col: Name of the compared_to column.
-        zf_series: Optional z_flag series.
+        excluded_mask: Boolean mask for rows excluded from the graph.
         tie_col: Name of the tie_result column.
         tie_col_orig: Name of the original tie_result column.
 
@@ -1131,25 +1126,21 @@ def _apply_guard_restore_local(
     if tie_col_orig not in df.columns:
         return df  # nothing to restore
 
-    # Stars (fixed as 3) and empty compared_to mask.
-    is_star = pd.Series(False, index=df.index)
-    if zf_series is not None:
-        is_star = pd.to_numeric(zf_series, errors="coerce").eq(6.0)
+    excluded = excluded_mask.reindex(df.index).fillna(False).astype(bool)
 
     cmp_str = df[compared_col].astype("string")
     cmp_empty = cmp_str.isna() | cmp_str.str.strip().eq("")
 
-    # Local set of star IDs for this partition/view.
-    star_ids = set(df.loc[is_star, crd_col].astype("string"))
+    excluded_ids = set(df.loc[excluded, crd_col].astype("string"))
 
-    only_star_neighbors = (~cmp_empty) & _only_star_neighbors_series(
-        df[compared_col], star_ids
+    only_excluded_neighbors = (~cmp_empty) & _only_excluded_neighbors_series(
+        df[compared_col], excluded_ids
     )
 
     # Rule:
-    # - if star -> keep tie=3 (do not restore)
-    # - if non-star and (empty compared_to OR only star neighbors) -> restore
-    restore_mask = (~is_star) & (cmp_empty | only_star_neighbors)
+    # Excluded rows remain tie_result=3. Participating rows with no usable
+    # neighbors recover their original label.
+    restore_mask = (~excluded) & (cmp_empty | only_excluded_neighbors)
 
     # Apply restoration.
     df.loc[restore_mask, tie_col] = df.loc[restore_mask, tie_col_orig]
@@ -1167,19 +1158,21 @@ def _resolve_group(
     tiebreaking_priority: Sequence[str],
     instrument_type_priority: Mapping[str, int] | None,
     delta_z_threshold: float,
+    excluded_mask: pd.Series | None = None,
 ) -> pd.DataFrame:
     """Resolve ties within a single connected component."""
     crd = crd_col
     out = g[[crd]].copy()
     out["tie_result_new"] = 0
 
-    star_mask = pd.Series(False, index=g.index)
-    if "z_flag_homogenized" in g.columns:
-        zf_series = _to_numeric(g["z_flag_homogenized"])
-        star_mask = zf_series.eq(6)
-        out.loc[star_mask.index[star_mask], "tie_result_new"] = 3
+    excluded = (
+        pd.Series(False, index=g.index)
+        if excluded_mask is None
+        else excluded_mask.reindex(g.index).fillna(False).astype(bool)
+    )
+    out.loc[excluded.index[excluded], "tie_result_new"] = 3
 
-    cand = g[~star_mask].copy()
+    cand = g[~excluded].copy()
     if cand.empty:
         return out[[crd, "tie_result_new"]]
 
@@ -1299,18 +1292,12 @@ def deduplicate_pandas(
     crd_norm = out[crd_col].astype("string").str.strip()
     priority_set = set(tiebreaking_priority)
 
-    # Reuse the mature isolated-node graph path internally. Value 6 is never
-    # persisted; it is only an implementation marker for configuration-excluded
-    # rows while the legacy graph code is being generalized.
-    zf_series = _to_numeric(out["z_flag_homogenized"]).copy()
-    zf_series.loc[excluded_mask] = 6.0
-
     # Pass edge_log down so diagnostics are computed only when requested.
     nodes_edge, edges_uv, diag = _build_edges_fast(
         out,
         crd_col=crd_col,
         compared_col=compared_col,
-        zf_series=zf_series,
+        excluded_mask=excluded_mask,
         edge_log=edge_log,
     )
 
@@ -1366,13 +1353,11 @@ def deduplicate_pandas(
     # Try to bridge NA rows via neighbor groups from the fast path label map
     if na_mask.any() and labels_edge.size:
         pos_na = np.flatnonzero(na_mask)
-        # Stars never participate in non-star components, even when they point
-        # to an already-labelled neighbor. Leave them for the singleton path.
-        if zf_series is not None:
-            bridge_is_star = np.asarray(
-                zf_series.iloc[pos_na].eq(6).fillna(False), dtype=bool
-            )
-            pos_na = pos_na[~bridge_is_star]
+        # Excluded rows never bridge into participating components.
+        bridge_is_excluded = excluded_mask.iloc[pos_na].fillna(False).to_numpy(
+            dtype=bool
+        )
+        pos_na = pos_na[~bridge_is_excluded]
         cmp_str_all = out[compared_col].astype("string").str.strip()
         cmp_lists = cmp_str_all.iloc[pos_na].str.split(",")
         sub = pd.DataFrame({"pos": pos_na, "nbr": cmp_lists}).explode(
@@ -1396,26 +1381,20 @@ def deduplicate_pandas(
     if na_mask.any():
         pos_na = np.flatnonzero(na_mask)
 
-        # Stars within NA.
-        if zf_series is not None:
-            is_star_na = np.asarray(
-                zf_series.iloc[pos_na].eq(6).fillna(False), dtype=bool
-            )
-        else:
-            is_star_na = np.zeros(pos_na.size, dtype=bool)
+        is_excluded_na = excluded_mask.iloc[pos_na].fillna(False).to_numpy(dtype=bool)
 
-        pos_na_nonstar = pos_na[~is_star_na]
+        pos_na_participating = pos_na[~is_excluded_na]
 
         # Next free ID, compatible with fast-path labels.
         next_gid = int(labels_edge.max()) + 1 if labels_edge.size else 0
 
-        # NA non-star rows.
-        if pos_na_nonstar.size:
+        # Participating rows without a fast-path group.
+        if pos_na_participating.size:
             crd_arr_all = crd_norm.to_numpy()
             cmp_arr_all = out[compared_col].astype("string").str.strip().to_numpy()
 
-            crd_arr = crd_arr_all[pos_na_nonstar]
-            cmp_arr = cmp_arr_all[pos_na_nonstar]
+            crd_arr = crd_arr_all[pos_na_participating]
+            cmp_arr = cmp_arr_all[pos_na_participating]
 
             sub_df = pd.DataFrame({crd_col: crd_arr, compared_col: cmp_arr})
             edges_na = _build_edges_pdf(
@@ -1426,14 +1405,14 @@ def deduplicate_pandas(
             if nodes_na:
                 if edges_na.empty:
                     # No edges: each row becomes a singleton.
-                    gids[pos_na_nonstar] = np.arange(
-                        next_gid, next_gid + len(pos_na_nonstar), dtype=np.int64
+                    gids[pos_na_participating] = np.arange(
+                        next_gid, next_gid + len(pos_na_participating), dtype=np.int64
                     )
-                    next_gid += len(pos_na_nonstar)
+                    next_gid += len(pos_na_participating)
                 else:
                     # With edges: real components.
                     comp_map = _connected_components(nodes_na, edges_na)
-                    gids[pos_na_nonstar] = next_gid + np.fromiter(
+                    gids[pos_na_participating] = next_gid + np.fromiter(
                         (comp_map.get(str(cid), -1) for cid in crd_arr),
                         dtype=np.int64,
                         count=len(crd_arr),
@@ -1441,22 +1420,22 @@ def deduplicate_pandas(
                     next_gid += max(comp_map.values()) + 1 if comp_map else 0
             else:
                 # No nodes: singleton per row.
-                gids[pos_na_nonstar] = np.arange(
-                    next_gid, next_gid + len(pos_na_nonstar), dtype=np.int64
+                gids[pos_na_participating] = np.arange(
+                    next_gid, next_gid + len(pos_na_participating), dtype=np.int64
                 )
-                next_gid += len(pos_na_nonstar)
+                next_gid += len(pos_na_participating)
 
             # Mark as mapped to avoid later collisions.
-            na_mask[pos_na_nonstar] = False
+            na_mask[pos_na_participating] = False
 
-        # Stars (each is a singleton).
-        if is_star_na.any():
-            n_star = int(is_star_na.sum())
-            gids[pos_na[is_star_na]] = np.arange(
-                next_gid, next_gid + n_star, dtype=np.int64
+        # Excluded objects are isolated singletons.
+        if is_excluded_na.any():
+            n_excluded = int(is_excluded_na.sum())
+            gids[pos_na[is_excluded_na]] = np.arange(
+                next_gid, next_gid + n_excluded, dtype=np.int64
             )
-            na_mask[pos_na[is_star_na]] = False
-            next_gid += n_star
+            na_mask[pos_na[is_excluded_na]] = False
+            next_gid += n_excluded
 
     out["__group__"], out[SPLIT_REFERENCE_COLUMN] = _split_groups_by_reference_radius(
         out,
@@ -1473,21 +1452,16 @@ def deduplicate_pandas(
     group_sizes = pd.Series(1, index=out.index).groupby(gid).transform("sum")
     is_singleton = group_sizes.eq(1)
 
-    if zf_series is None:
-        is_star = pd.Series(False, index=out.index)
-    else:
-        is_star = zf_series.eq(6)
-
     is_singleton_np = is_singleton.to_numpy(dtype=bool, na_value=False)
-    is_star_np = is_star.to_numpy(dtype=bool, na_value=False)
+    is_excluded_np = excluded_mask.to_numpy(dtype=bool, na_value=False)
 
     tr = np.zeros(len(out), dtype=np.int8)
-    tr[is_star_np] = 3
-    tr[is_singleton_np & ~is_star_np] = 1
+    tr[is_excluded_np] = 3
+    tr[is_singleton_np & ~is_excluded_np] = 1
 
     is_multi = ~is_singleton
-    non_star = ~is_star
-    survivors = (is_multi & non_star).copy()
+    participating = ~excluded_mask
+    survivors = (is_multi & participating).copy()
 
     zf_num = _effective_z_flag_score(out)
 
@@ -1677,7 +1651,7 @@ def deduplicate_pandas(
         out,
         crd_col=crd_col,
         compared_col=compared_col,
-        zf_series=zf_series,
+        excluded_mask=excluded_mask,
         tie_col=tie_col,
         tie_col_orig=tie_col_orig,
     )
@@ -1908,17 +1882,14 @@ def _dedup_local_with_margin(
         if max_representative_radius_arcsec is None:
             # Without radius truncation, every participating edge must remain
             # inside one canonical component.
-            semantic_exclusion = pd.Series(
-                np.nan, index=solved.index, dtype="float64"
-            )
-            semantic_exclusion.loc[
-                pd.to_numeric(solved[tie_col], errors="coerce").eq(3.0)
-            ] = 6.0
+            semantic_exclusion = pd.to_numeric(
+                solved[tie_col], errors="coerce"
+            ).eq(3.0)
             edge_nodes, edge_uv, _ = _build_edges_fast(
                 solved,
                 crd_col=crd_col,
                 compared_col=compared_col,
-                zf_series=semantic_exclusion,
+                excluded_mask=semantic_exclusion,
                 edge_log=False,
             )
             if edge_uv.size:
