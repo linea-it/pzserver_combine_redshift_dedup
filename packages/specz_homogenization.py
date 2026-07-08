@@ -71,7 +71,10 @@ VIMOS_FLAG_TO_SCORE = {
 _TRANSLATION_KEYS = {
     "z_flag_translation": ("float", {0.0, 1.0, 2.0, 3.0, 4.0, 6.0}),
     "instrument_type_translation": ("str", {"s", "g", "p"}),
-    "object_type_translation": ("str", {"star", "qso", "agn", "galaxy"}),
+    "object_type_translation": (
+        "str",
+        {"star", "galactic", "qso", "agn", "galaxy"},
+    ),
 }
 _RULE_OPTIONS = {
     "conditions", "default", "source", "optional_source",
@@ -908,7 +911,7 @@ def _homogenize(
         _normalize_string_series_to_na,
         meta=pd.Series(pd.array([], dtype=DTYPE_STR)),
     ).str.lower()
-    allowed_object_types = {"star", "qso", "agn", "galaxy"}
+    allowed_object_types = {"star", "galactic", "qso", "agn", "galaxy"}
     invalid_object_mask = (~dd.isna(object_types)) & ~object_types.isin(
         list(allowed_object_types)
     )

@@ -50,14 +50,16 @@ instrument_type_priority:
 # - 2: 70% < Confidence < 90%
 # - 3: 90% < Confidence < 99%
 # - 4: Confidence > 99%
-# - 6: Object identified as non-extragalactic (e.g., stars)
+# - 6: Object explicitly identified as a star
 
 # Each block corresponds to a survey name and includes:
 # - z_flag_translation: how to map original quality flags or based on conditions into a standardized quality scale (0-6)
 # - instrument_type_translation: how to map original types into a standard label (s, g, p)
-# - object_type_translation: how to map classifications into star, qso, agn,
-#   or galaxy. `qso` requires an explicit QSO/quasar classification; `agn` is
-#   used for generic AGN and BLAGN classifications without an explicit QSO label.
+# - object_type_translation: how to map classifications into star, galactic,
+#   qso, agn, or galaxy. `galactic` means a confirmed Galactic/non-extragalactic
+#   source without a secure stellar subtype. `qso` requires an explicit
+#   QSO/quasar classification; `agn` is used for generic AGN and BLAGN
+#   classifications without an explicit QSO label.
 #   Its default is null; catalogs without object classifications are valid.
 #   A rule may declare `source: <raw_column>` and `optional_source: true` to
 #   discover a non-standard input column without a frontend columns mapping.
@@ -99,14 +101,13 @@ translation_rules:
     object_type_translation:
       conditions:
         - expr: "z_flag == 6"
-          value: "star"
+          value: "galactic"
       default: null
     z_flag_translation:
       1: 0
       2: 1
       3: 3
       4: 4
-      6: 6
     instrument_type_translation:
       default: "s"
 
@@ -117,7 +118,11 @@ translation_rules:
         # AGN class, but the information is insufficient for the QSO subtype.
         - expr: "str(TYPE)[:2] == '-9'"
           value: "agn"
-      default: "galaxy"
+        # Use only documented ZCAT galaxy morphology codes. Type 98 means that
+        # the source was never visually examined and is intentionally omitted.
+        - expr: "TYPE.str.contains(r'^(?:-[1-7]|20|19|16|15|11|10|[0-9])(?:[^0-9]|$)', regex=True, na=False)"
+          value: "galaxy"
+      default: null
     z_flag_translation:
       conditions:
         - expr: "z_err == 0"
@@ -161,14 +166,13 @@ translation_rules:
     object_type_translation:
       conditions:
         - expr: "z_flag == 6"
-          value: "star"
+          value: "galactic"
       default: null
     z_flag_translation:
       1: 0
       2: 1
       3: 3
       4: 4
-      6: 6
     instrument_type_translation:
       default: "s"
 
@@ -414,7 +418,9 @@ translation_rules:
       2: 2
       3: 3
       4: 4
-      6: 6
+      conditions:
+        - expr: "Class == 4"
+          value: 6
     instrument_type_translation:
       conditions:
         - expr: "zfinal_type == 's'"
@@ -439,7 +445,9 @@ translation_rules:
       2: 2
       3: 3
       4: 4
-      6: 6
+      conditions:
+        - expr: "tSp == 7"
+          value: 6
     instrument_type_translation:
       conditions:
         - expr: "zbest_type == 's'"
@@ -584,16 +592,9 @@ translation_rules:
 
   OZDES:
     object_type_translation:
-      allow_condition_overlap: true
       conditions:
-        - expr: "Object_types.str.contains('Galaxy|LRG|ELG|SN_host|SN_free_host|RedMaGiC', case=False, na=False)"
-          value: "galaxy"
-        - expr: "Object_types.str.contains('AGN_reverberation|AGN_monitoring', case=False, na=False)"
-          value: "agn"
-        - expr: "Object_types.str.contains('QSO', case=False, na=False)"
-          value: "qso"
-        - expr: "Object_types.str.contains('BBstar|FStar|RNDstars|BrightStar|WhiteDwarf', case=False, na=False)"
-          value: "star"
+        # Object_types contains targeting categories, not confirmed object
+        # classifications. qop=6 is explicitly a securely classified star.
         - expr: "z_flag == 6"
           value: "star"
       default: null
@@ -680,9 +681,9 @@ translation_rules:
     object_type_translation:
       allow_condition_overlap: true
       conditions:
-        - expr: "mst < 0"
+        - expr: "mst == -1"
           value: "star"
-        - expr: "mst > 0"
+        - expr: "mst == 1"
           value: "galaxy"
         # Explicit QSO templates take precedence over the morphology scale.
         - expr: "(13 <= J1 <= 30) or (13 <= J2 <= 15)"
@@ -694,7 +695,9 @@ translation_rules:
       2: 2
       3: 3
       4: 4
-      6: 6
+      conditions:
+        - expr: "mst == -1 and not ((13 <= J1 <= 30) or (13 <= J2 <= 15))"
+          value: 6
     instrument_type_translation:
       conditions:
         - expr: "zfinal_type == 's'"
@@ -746,19 +749,14 @@ translation_rules:
 
   VIPERS_PDR2:
     object_type_translation:
-      allow_condition_overlap: true
       conditions:
-        - expr: "classFlag == -1"
-          value: "star"
-        # Spectroscopic BLAGN classification takes precedence over the
-        # photometric stellar-like classification.
+        # classFlag=-1 is only a photometric "stellar-like" classification and
+        # is intentionally left null. Only spectroscopic BLAGN is retained.
         - expr: "np.trunc(float(z_flag)) == 13 or np.trunc(float(z_flag)) == 14 or np.trunc(float(z_flag)) == 19 or np.trunc(float(z_flag)) == 213 or np.trunc(float(z_flag)) == 214 or np.trunc(float(z_flag)) == 219"
           value: "agn"
       default: null
     z_flag_translation:
       conditions:
-        - expr: "classFlag == -1"
-          value: 6
         - expr: "classFlag != -1 and np.trunc(float(z_flag)) - 10*np.trunc(np.trunc(float(z_flag))/10) == 1"
           value: 1
         - expr: "classFlag != -1 and np.trunc(float(z_flag)) - 10*np.trunc(np.trunc(float(z_flag))/10) == 2"

@@ -362,12 +362,16 @@ def test_object_type_translation_uses_canonical_renamed_z_flag():
 
 def test_object_type_rejects_values_outside_domain():
     valid = dd.from_pandas(
-        pd.DataFrame({"object_type_homogenized": ["STAR", "agn"]}),
+        pd.DataFrame({"object_type_homogenized": ["STAR", "agn", "GALACTIC"]}),
         npartitions=1,
         sort=False,
     )
     result, *_ = _homogenize(valid, {}, "demo", LOGGER, type_cast_ok=False)
-    assert result.compute()["object_type_homogenized"].tolist() == ["star", "agn"]
+    assert result.compute()["object_type_homogenized"].tolist() == [
+        "star",
+        "agn",
+        "galactic",
+    ]
 
     invalid = dd.from_pandas(
         pd.DataFrame({"object_type_homogenized": ["unknown"]}),
@@ -421,7 +425,7 @@ def test_catalog_object_type_rules_use_renamed_flags_and_conservative_defaults()
         "missing",
         "agn",
         "agn",
-        "galaxy",
+        "missing",
         "star",
     ]
 
@@ -479,8 +483,8 @@ def test_swire_j2_qso_range_stops_at_15():
         "missing",
         "star",
         "galaxy",
-        "star",
-        "galaxy",
+        "missing",
+        "missing",
         "qso",
     ]
 
@@ -492,10 +496,17 @@ def test_2df_6df_and_2mrs_use_only_documented_object_classes():
     frame = dd.from_pandas(
         pd.DataFrame(
             {
-                "survey": ["2DFLENS", "2DFLENS", "6DFGS", "2MRS", "2MRS"],
-                "object_type": [pd.NA] * 5,
-                "z_flag": [6, 4, 6, 4, 4],
-                "TYPE": [pd.NA, pd.NA, pd.NA, "-5A", "-9"],
+                "survey": [
+                    "2DFLENS",
+                    "2DFLENS",
+                    "6DFGS",
+                    "2MRS",
+                    "2MRS",
+                    "2MRS",
+                ],
+                "object_type": [pd.NA] * 6,
+                "z_flag": [6, 4, 6, 4, 4, 4],
+                "TYPE": [pd.NA, pd.NA, pd.NA, "-5A", "-9", "98"],
             }
         ),
         npartitions=1,
@@ -505,11 +516,62 @@ def test_2df_6df_and_2mrs_use_only_documented_object_classes():
     result, *_ = _homogenize(frame, config, "demo", LOGGER, type_cast_ok=False)
 
     assert result.compute()["object_type_homogenized"].fillna("missing").tolist() == [
-        "star",
+        "galactic",
         "missing",
-        "star",
+        "galactic",
         "galaxy",
         "agn",
+        "missing",
+    ]
+
+
+def test_z_flag_6_requires_an_explicit_stellar_classification():
+    config_path = Path(__file__).resolve().parents[1] / "flags_translation.yaml"
+    config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    config["tiebreaking_priority"] = ["z_flag_homogenized"]
+    frame = dd.from_pandas(
+        pd.DataFrame(
+            {
+                "survey": [
+                    "2DFLENS",
+                    "6DFGS",
+                    "VIPERS_PDR2",
+                    "ELAISS1OID",
+                    "ELAISS1OID",
+                    "ELAISFBMC",
+                    "ELAISFBMC",
+                    "SWIRE-REVISED",
+                    "SWIRE-REVISED",
+                    "SWIRE-REVISED",
+                    "OZDES",
+                ],
+                "z_flag": [6, 6, 4.2, 6, 4, 6, 4, 6, 4, 4, 6],
+                "classFlag": [0, 0, -1, 0, 0, 0, 0, 0, 0, 0, 0],
+                "Class": [0, 0, 0, 2, 4, 0, 0, 0, 0, 0, 0],
+                "tSp": [0, 0, 0, 0, 0, 1, 7, 0, 0, 0, 0],
+                "mst": [0, 0, 0, 0, 0, 0, 0, 1, -1, -1, 0],
+                "J1": [1, 1, 1, 1, 1, 1, 1, 1, 1, 13, 1],
+                "J2": [1] * 11,
+            }
+        ),
+        npartitions=2,
+        sort=False,
+    )
+
+    result, *_ = _homogenize(frame, config, "demo", LOGGER, type_cast_ok=False)
+
+    assert result.compute()["z_flag_homogenized"].fillna(-1).tolist() == [
+        -1,
+        -1,
+        0,
+        -1,
+        6,
+        -1,
+        6,
+        -1,
+        6,
+        4,
+        6,
     ]
 
 
@@ -630,8 +692,8 @@ def test_generic_agn_labels_are_not_promoted_to_qso():
 
     assert result.compute()["object_type_homogenized"].tolist() == [
         "agn",
-        "agn",
-        "qso",
+        pd.NA,
+        pd.NA,
         "agn",
         "agn",
         "agn",
@@ -639,7 +701,7 @@ def test_generic_agn_labels_are_not_promoted_to_qso():
     ]
 
 
-def test_vipers_blagn_takes_precedence_over_photometric_star_like_flag():
+def test_vipers_keeps_photometric_star_like_null_but_retains_spectroscopic_blagn():
     config_path = Path(__file__).resolve().parents[1] / "flags_translation.yaml"
     config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
     config["tiebreaking_priority"] = []
@@ -659,13 +721,13 @@ def test_vipers_blagn_takes_precedence_over_photometric_star_like_flag():
     result, *_ = _homogenize(frame, config, "demo", LOGGER, type_cast_ok=False)
 
     assert result.compute()["object_type_homogenized"].fillna("missing").tolist() == [
-        "star",
+        "missing",
         "agn",
         "agn",
     ]
 
 
-def test_ozdes_explicit_stellar_targets_are_stellar():
+def test_ozdes_targeting_labels_are_not_treated_as_object_classifications():
     config_path = Path(__file__).resolve().parents[1] / "flags_translation.yaml"
     config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
     config["tiebreaking_priority"] = []
@@ -684,11 +746,7 @@ def test_ozdes_explicit_stellar_targets_are_stellar():
 
     result, *_ = _homogenize(frame, config, "demo", LOGGER, type_cast_ok=False)
 
-    assert result.compute()["object_type_homogenized"].tolist() == [
-        "star",
-        "star",
-        "star",
-    ]
+    assert result.compute()["object_type_homogenized"].isna().all()
 
 
 def test_euclid_optional_source_is_safe_before_column_arrives():
