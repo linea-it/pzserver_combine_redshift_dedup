@@ -88,7 +88,7 @@ _TOP_LEVEL_KEYS = {
     "crossmatch_geometry_diagnostics_enabled",
     "representative_radius_diagnostics_enabled", "dedup_edge_diagnostics_enabled",
     "instrument_type_priority", "save_expr_columns", "expr_column_schema",
-    "translation_rules",
+    "runtime_schema_hints", "translation_rules",
 }
 _SAFE_FUNCTIONS = {"len", "int", "float", "str"}
 _SAFE_NUMPY_FUNCTIONS = {"isfinite", "abs", "trunc"}
@@ -166,6 +166,17 @@ def validate_translation_config(config: dict) -> None:
     if unknown_top:
         raise ValueError(f"flags translation root: unknown option(s): {sorted(unknown_top)}")
     rules = config.get("translation_rules", {})
+    runtime_hints = config.get("runtime_schema_hints", {})
+    if not isinstance(runtime_hints, dict):
+        raise TypeError("runtime_schema_hints must be a mapping")
+    for column, kind in runtime_hints.items():
+        if not isinstance(column, str) or not column.strip():
+            raise ValueError("runtime_schema_hints column names must be non-empty strings")
+        if kind not in {"str", "float", "int", "bool"}:
+            raise ValueError(
+                f"runtime_schema_hints.{column}={kind!r} is invalid; "
+                "expected str, float, int or bool"
+            )
     if not isinstance(rules, dict):
         raise TypeError("translation_rules must be a mapping")
     for survey, ruleset in rules.items():

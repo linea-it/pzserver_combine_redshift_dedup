@@ -52,7 +52,11 @@ from deduplication import (
 from executor import get_executor
 from product_handle import save_dataframe
 from resource_usage import ResourceUsageMonitor
-from specz import prepare_catalog, validate_combine_configuration
+from specz import (
+    build_runtime_schema_hints,
+    prepare_catalog,
+    validate_combine_configuration,
+)
 from specz_homogenization import validate_translation_config
 from utils import (
     configure_exception_hook,
@@ -782,6 +786,9 @@ def main(
         log_init,
     )
     translation_config["tiebreaking_priority"] = validated_priorities
+    translation_config["runtime_schema_hints"] = build_runtime_schema_hints(
+        param_config, translation_config
+    )
     completed = read_completed_steps(os.path.join(temp_dir, "process_resume.log"))
 
     # --- Dask cluster/client ---

@@ -1627,6 +1627,7 @@ def _normalize_extra_columns_config(value: Any) -> dict[str, dict[str, str]]:
         "group_id",
         "z_flag_homogenized",
         "instrument_type_homogenized",
+        "object_type_homogenized",
         "is_in_DP1_fields",
         "is_in_rubin_footprint",
     }
@@ -1636,6 +1637,45 @@ def _normalize_extra_columns_config(value: Any) -> dict[str, dict[str, str]]:
             f"param.extra_columns cannot redefine pipeline columns: {conflicts}"
         )
     return normalized
+
+
+def build_runtime_schema_hints(
+    param_config: dict, translation_config: dict
+) -> dict[str, str]:
+    """Build schema hints that must survive every crossmatch round.
+
+    Args:
+        param_config: Pipeline ``param`` configuration.
+        translation_config: Validated flags translation configuration.
+
+    Returns:
+        Mapping of output column names to ``str``, ``float``, ``int`` or ``bool``.
+    """
+    hints: dict[str, str] = {}
+    if bool(translation_config.get("save_expr_columns", False)):
+        hints.update(
+            _normalize_schema_hints(translation_config.get("expr_column_schema"))
+        )
+
+    extra_columns = _normalize_extra_columns_config(param_config.get("extra_columns"))
+    hints.update({output: spec["type"] for output, spec in extra_columns.items()})
+
+    if _as_bool_config(param_config.get("insert_DP1_footprint_flag"), default=False):
+        hints["is_in_DP1_fields"] = "int"
+    if _as_bool_config(
+        param_config.get("insert_rubin_footprint_flag"), default=False
+    ):
+        hints["is_in_rubin_footprint"] = "int"
+
+    standard_priorities = {
+        "z_flag_homogenized",
+        "instrument_type_homogenized",
+    }
+    for column in translation_config.get("tiebreaking_priority", []) or []:
+        name = str(column).strip()
+        if name and name not in standard_priorities:
+            hints[name] = "float"
+    return hints
 
 
 def _copy_extra_columns_from_sources(

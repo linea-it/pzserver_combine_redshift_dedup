@@ -511,9 +511,11 @@ def _get_expr_schema_hints(translation_config: dict | None) -> dict:
         dict: Expr column schema hints or empty dict.
     """
     cfg = translation_config or {}
-    if cfg.get("save_expr_columns") is False:
-        return {}
-    return cfg.get("expr_column_schema", {}) or {}
+    hints = {}
+    if cfg.get("save_expr_columns") is not False:
+        hints.update(cfg.get("expr_column_schema", {}) or {})
+    hints.update(cfg.get("runtime_schema_hints", {}) or {})
+    return hints
 
 
 def _ensure_compared_to(cat):
@@ -546,6 +548,7 @@ _EXPECTED_TYPES = {
     "tie_result": DTYPE_INT8,
     "z_flag_homogenized": DTYPE_FLOAT,
     "instrument_type_homogenized": DTYPE_STR,
+    "object_type_homogenized": DTYPE_STR,
     "compared_to": DTYPE_STR,
 }
 
