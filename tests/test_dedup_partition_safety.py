@@ -57,6 +57,37 @@ def test_boundary_component_has_same_canonical_group_from_both_pixels():
     assert from_b_pixel["tie_result"] == 0
 
 
+def test_reference_radius_split_is_stable_across_main_margin_views():
+    rows = [
+        _row("A", "B", 10.0, 4.0),
+        _row("B", "A, C", 10.0 + 0.5 / 3600.0, 3.0),
+        _row("C", "B, D", 10.0 + 1.0 / 3600.0, 2.0),
+        _row("D", "C", 10.0 + 1.5 / 3600.0, 1.0),
+    ]
+    first = _dedup_local_with_margin(
+        pd.DataFrame(rows[:2]),
+        pd.DataFrame(rows[2:]),
+        pixel=None,
+        tiebreaking_priority=["z_flag_homogenized"],
+        instrument_type_priority=None,
+        group_col="group_id",
+        max_representative_radius_arcsec=1.0,
+    ).set_index("CRD_ID")
+    second = _dedup_local_with_margin(
+        pd.DataFrame(rows[2:]),
+        pd.DataFrame(rows[:2]),
+        pixel=None,
+        tiebreaking_priority=["z_flag_homogenized"],
+        instrument_type_priority=None,
+        group_col="group_id",
+        max_representative_radius_arcsec=1.0,
+    ).set_index("CRD_ID")
+
+    assert first.loc["A", "group_id"] == first.loc["B", "group_id"]
+    assert second.loc["C", "group_id"] == first.loc["A", "group_id"]
+    assert second.loc["D", "group_id"] != first.loc["A", "group_id"]
+
+
 def test_custom_priority_keeps_excluded_star_outside_graph():
     rows = [
         {

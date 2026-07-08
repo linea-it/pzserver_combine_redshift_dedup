@@ -744,15 +744,28 @@ def main(
     margin_warning_fraction = float(
         translation_config.get("margin_warning_fraction", 0.8)
     )
+    configured_max_radius = translation_config.get(
+        "max_representative_radius_arcsec", None
+    )
+    max_representative_radius_arcsec = (
+        None if configured_max_radius is None else float(configured_max_radius)
+    )
     validate_spatial_safety(
         crossmatch_radius_arcsec,
         margin_threshold_arcsec,
         margin_warning_fraction,
+        max_representative_radius_arcsec,
     )
     log_init.info(
-        'Spatial safety: crossmatch_radius=%.3f" margin_threshold=%.3f" ratio=%.3f',
+        'Spatial safety: crossmatch_radius=%.3f" margin_threshold=%.3f" '
+        "max_representative_radius=%s ratio=%.3f",
         crossmatch_radius_arcsec,
         margin_threshold_arcsec,
+        (
+            "disabled"
+            if max_representative_radius_arcsec is None
+            else f'{max_representative_radius_arcsec:.3f}"'
+        ),
         crossmatch_radius_arcsec / margin_threshold_arcsec,
     )
     # Minimal summary of loaded translation (no heavy dumping)
@@ -1729,6 +1742,7 @@ def main(
                         margin_warning_fraction=margin_warning_fraction,
                         representative_radius_diagnostics_enabled=representative_radius_diagnostics_enabled,
                         object_type_inclusion=object_type_inclusion,
+                        max_representative_radius_arcsec=max_representative_radius_arcsec,
                     )
                     log_dedup.info(
                         "Labels graph built (lazy). Persisting compact labels for "
@@ -1855,6 +1869,11 @@ def main(
                     )
                     invalid_stats_lazy = None
                     validation_tasks = []
+                    representative_limit_arcsec = (
+                        max_representative_radius_arcsec
+                        if max_representative_radius_arcsec is not None
+                        else crossmatch_radius_arcsec
+                    )
                     if representative_radius_diagnostics_enabled:
                         representative_radius = labels_dd[
                             REPRESENTATIVE_RADIUS_DIAGNOSTIC_COLUMN
@@ -1864,10 +1883,10 @@ def main(
                             [
                                 representative_radius_valid.count(),
                                 representative_radius_valid.gt(
-                                    crossmatch_radius_arcsec
+                                    representative_limit_arcsec
                                 ).sum(),
                                 representative_radius_valid.gt(
-                                    2.0 * crossmatch_radius_arcsec
+                                    2.0 * representative_limit_arcsec
                                 ).sum(),
                                 representative_radius_valid.gt(
                                     margin_threshold_arcsec
@@ -1926,7 +1945,7 @@ def main(
                             "fraction_exceeding=%.6f exceeding_twice_radius=%d "
                             "exceeding_margin=%d max_radius=%.4farcsec",
                             representative_components,
-                            crossmatch_radius_arcsec,
+                            representative_limit_arcsec,
                             representative_exceed_radius,
                             representative_fraction,
                             representative_exceed_twice_radius,
@@ -1943,11 +1962,18 @@ def main(
                             dangling_count,
                         )
                         if mismatch_count:
-                            raise RuntimeError(
-                                "Partition-local deduplication produced "
-                                f"{mismatch_count} non-star edges whose endpoints "
-                                "have different canonical group_id values. Increase "
-                                "margin_threshold_arcsec or inspect long components."
+                            if max_representative_radius_arcsec is None:
+                                raise RuntimeError(
+                                    "Partition-local deduplication produced "
+                                    f"{mismatch_count} participating edges whose "
+                                    "endpoints have different canonical group_id "
+                                    "values. Increase margin_threshold_arcsec or "
+                                    "inspect long components."
+                                )
+                            log_dedup.info(
+                                "Cross-group edges are expected with representative-"
+                                "radius truncation enabled (radius=%.3f arcsec).",
+                                max_representative_radius_arcsec,
                             )
                         if dangling_count:
                             raise RuntimeError(

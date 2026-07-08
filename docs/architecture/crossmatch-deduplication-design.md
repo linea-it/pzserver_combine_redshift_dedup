@@ -253,6 +253,13 @@ Crossmatching records graph edges in `compared_to`. Deduplication then solves
 the connected components and assigns `tie_result` and canonical `group_id`
 values.
 
+When `max_representative_radius_arcsec` is configured, each connected component
+is deterministically split before tie resolution. The highest-ranked remaining
+row becomes a reference, rows within the configured angular radius join its
+subgroup, and the procedure repeats for rows left outside the radius. Ranking
+uses `tiebreaking_priority` with `CRD_ID` as the stable final ordering key. This
+limits transitive chains without discarding their more distant members.
+
 This stage returns to LSDB/HATS because partition boundaries and margins are
 spatially meaningful.
 

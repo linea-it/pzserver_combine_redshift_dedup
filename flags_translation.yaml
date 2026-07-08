@@ -19,6 +19,7 @@ delta_z_threshold: 0.001    # Maximum allowed redshift difference (|z1 - z2|) to
                              # Applied only when initial tiebreaking via columns results in a tie (tie_result == 2)
 
 crossmatch_radius_arcsec: 0.5  # Angular radius (in arcseconds) used to perform spatial crossmatching.
+max_representative_radius_arcsec: 1.0  # Split transitive components so every member stays within this radius of its ranked reference; null disables.
 margin_threshold_arcsec: 5.0   # HATS margin used by independent partition-local deduplication.
 margin_warning_fraction: 0.8   # Warn when a boundary component spans this fraction of the margin.
 validate_global_graph_edges: false  # Distributed edge/group consistency check (costs two joins).

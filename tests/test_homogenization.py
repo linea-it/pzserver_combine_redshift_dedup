@@ -102,6 +102,8 @@ def test_translation_schema_validates_diagnostic_controls():
         validate_translation_config({"tie_invariant_diagnostics_enabled": "yes"})
     with pytest.raises(ValueError, match="tie_invariant_diagnostics_sample_size"):
         validate_translation_config({"tie_invariant_diagnostics_sample_size": 0})
+    with pytest.raises(ValueError, match="max_representative_radius_arcsec"):
+        validate_translation_config({"max_representative_radius_arcsec": 0})
 
     validate_translation_config(
         {
@@ -110,6 +112,7 @@ def test_translation_schema_validates_diagnostic_controls():
             "tie_invariant_diagnostics_sample_size": 10,
             "tie_invariant_diagnostics_max_rows": 100,
             "label_merge_diagnostics_enabled": True,
+            "max_representative_radius_arcsec": 1.0,
         }
     )
 

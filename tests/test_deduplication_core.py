@@ -233,6 +233,72 @@ def test_unclassified_rows_can_be_excluded_explicitly():
     assert result.loc["G", "tie_result"] == 1
 
 
+def _chain_rows():
+    return [
+        {
+            **_row("A", "B", flag=4, z=0.1),
+            "ra": 10.0,
+            "dec": 0.0,
+        },
+        {
+            **_row("B", "A, C", flag=3, z=0.1),
+            "ra": 10.0 + 0.5 / 3600.0,
+            "dec": 0.0,
+        },
+        {
+            **_row("C", "B, D", flag=2, z=0.1),
+            "ra": 10.0 + 1.0 / 3600.0,
+            "dec": 0.0,
+        },
+        {
+            **_row("D", "C", flag=1, z=0.1),
+            "ra": 10.0 + 1.5 / 3600.0,
+            "dec": 0.0,
+        },
+    ]
+
+
+def test_reference_radius_splits_long_transitive_chain():
+    result = deduplicate_pandas(
+        pd.DataFrame(_chain_rows()),
+        tiebreaking_priority=["z_flag_homogenized"],
+        max_representative_radius_arcsec=1.0,
+        delta_z_threshold=0,
+        group_col="group_id",
+    ).set_index("CRD_ID")
+
+    assert result.loc[["A", "B", "C"], "group_id"].nunique() == 1
+    assert result.loc["D", "group_id"] != result.loc["A", "group_id"]
+    assert result["tie_result"].astype(int).to_dict() == {
+        "A": 1,
+        "B": 0,
+        "C": 0,
+        "D": 1,
+    }
+
+
+def test_reference_radius_split_is_independent_of_row_order():
+    forward = deduplicate_pandas(
+        pd.DataFrame(_chain_rows()),
+        tiebreaking_priority=["z_flag_homogenized"],
+        max_representative_radius_arcsec=1.0,
+        delta_z_threshold=0,
+        group_col="group_id",
+    ).set_index("CRD_ID")
+    reverse = deduplicate_pandas(
+        pd.DataFrame(list(reversed(_chain_rows()))),
+        tiebreaking_priority=["z_flag_homogenized"],
+        max_representative_radius_arcsec=1.0,
+        delta_z_threshold=0,
+        group_col="group_id",
+    ).set_index("CRD_ID")
+
+    assert forward["group_id"].to_dict() == reverse["group_id"].to_dict()
+    assert forward["tie_result"].astype(int).to_dict() == reverse[
+        "tie_result"
+    ].astype(int).to_dict()
+
+
 def test_missing_priority_column_fails_clearly():
     with pytest.raises(KeyError, match="unknown_priority"):
         deduplicate_pandas(

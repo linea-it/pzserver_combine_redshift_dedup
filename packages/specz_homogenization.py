@@ -82,6 +82,7 @@ _RULE_OPTIONS = {
 }
 _TOP_LEVEL_KEYS = {
     "tiebreaking_priority", "delta_z_threshold", "crossmatch_radius_arcsec",
+    "max_representative_radius_arcsec",
     "margin_threshold_arcsec", "margin_warning_fraction",
     "validate_global_graph_edges", "validate_global_tie_invariants",
     "validate_crd_id_uniqueness", "repartition_prepared_catalogs",
@@ -190,6 +191,15 @@ def validate_translation_config(config: dict) -> None:
             or config[key] < 1
         ):
             raise ValueError(f"{key} must be a positive integer")
+    max_radius = config.get("max_representative_radius_arcsec")
+    if max_radius is not None and (
+        isinstance(max_radius, bool)
+        or not isinstance(max_radius, (int, float))
+        or float(max_radius) <= 0.0
+    ):
+        raise ValueError(
+            "max_representative_radius_arcsec must be a positive number or null"
+        )
     rules = config.get("translation_rules", {})
     runtime_hints = config.get("runtime_schema_hints", {})
     if not isinstance(runtime_hints, dict):
