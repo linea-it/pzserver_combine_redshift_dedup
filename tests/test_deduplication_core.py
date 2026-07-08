@@ -6,18 +6,30 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "packages"))
 
-from deduplication import deduplicate_pandas  # noqa: E402
+from deduplication import (  # noqa: E402
+    deduplicate_pandas,
+    validate_object_type_inclusion,
+)
 
 INSTRUMENT_PRIORITY = {"s": 3, "g": 2, "p": 1}
 
 
-def _row(crd_id, compared_to, *, flag=4.0, instrument="s", z=0.1):
+def _row(
+    crd_id,
+    compared_to,
+    *,
+    flag=4.0,
+    instrument="s",
+    z=0.1,
+    object_type=pd.NA,
+):
     return {
         "CRD_ID": crd_id,
         "compared_to": compared_to,
         "z": z,
         "z_flag_homogenized": flag,
         "instrument_type_homogenized": instrument,
+        "object_type_homogenized": object_type,
     }
 
 
@@ -68,11 +80,11 @@ def test_full_dedup_emits_two_and_three_way_hard_ties():
     assert three_way["group_id"].nunique() == 1
 
 
-def test_stars_are_isolated_from_nonstar_deduplication():
+def test_excluded_stars_are_isolated_from_deduplication():
     result = _deduplicate(
         [
             _row("A", "S", flag=4),
-            _row("S", "A, B", flag=6),
+            _row("S", "A, B", flag=None, object_type="star"),
             _row("B", "S", flag=3),
         ]
     )
@@ -132,13 +144,93 @@ def test_singleton_and_dangling_neighbor_remain_winners():
 def test_catalog_containing_only_stars_keeps_each_star_isolated():
     result = _deduplicate(
         [
-            _row("S1", "S2", flag=6),
-            _row("S2", "S1", flag=6),
+            _row("S1", "S2", flag=None, object_type="star"),
+            _row("S2", "S1", flag=None, object_type="star"),
         ]
     )
 
     assert result["tie_result"].astype(int).to_dict() == {"S1": 3, "S2": 3}
     assert result["group_id"].nunique() == 2
+
+
+def test_included_star_without_quality_uses_internal_half_point_score():
+    result = deduplicate_pandas(
+        pd.DataFrame(
+            [
+                _row("S", "G", flag=None, object_type="star"),
+                _row("G", "S", flag=0, object_type="galaxy"),
+            ]
+        ),
+        tiebreaking_priority=["z_flag_homogenized"],
+        object_type_inclusion={"include_star": True},
+        delta_z_threshold=0,
+    ).set_index("CRD_ID")
+
+    assert result["tie_result"].astype(int).to_dict() == {"S": 1, "G": 0}
+    assert pd.isna(result.loc["S", "z_flag_homogenized"])
+
+
+def test_internal_half_point_loses_to_real_quality_one():
+    result = deduplicate_pandas(
+        pd.DataFrame(
+            [
+                _row("S", "G", flag=None, object_type="star"),
+                _row("G", "S", flag=1, object_type="galaxy"),
+            ]
+        ),
+        tiebreaking_priority=["z_flag_homogenized"],
+        object_type_inclusion={"include_star": True},
+        delta_z_threshold=0,
+    ).set_index("CRD_ID")
+
+    assert result["tie_result"].astype(int).to_dict() == {"S": 0, "G": 1}
+
+
+def test_object_type_inclusion_requires_booleans_and_one_enabled_type():
+    with pytest.raises(TypeError, match=r"param\.include_star must be a boolean"):
+        validate_object_type_inclusion({"include_star": "yes"})
+    with pytest.raises(ValueError, match="At least one"):
+        validate_object_type_inclusion(
+            {
+                "include_unclassified": False,
+                "include_galaxy": False,
+                "include_star": False,
+                "include_agn": False,
+                "include_qso": False,
+                "include_galactic": False,
+            }
+        )
+
+
+@pytest.mark.parametrize("object_type", ["star", "galactic"])
+def test_default_object_type_policy_excludes_stellar_and_galactic(object_type):
+    result = _deduplicate(
+        [
+            _row("X", "G", flag=None, object_type=object_type),
+            _row("G", "X", flag=4, object_type="galaxy"),
+        ]
+    )
+
+    assert result.loc["X", "tie_result"] == 3
+    assert result.loc["G", "tie_result"] == 1
+    assert result["group_id"].nunique() == 2
+
+
+def test_unclassified_rows_can_be_excluded_explicitly():
+    result = deduplicate_pandas(
+        pd.DataFrame(
+            [
+                _row("U", "G", flag=4, object_type=pd.NA),
+                _row("G", "U", flag=4, object_type="galaxy"),
+            ]
+        ),
+        tiebreaking_priority=["z_flag_homogenized"],
+        object_type_inclusion={"include_unclassified": False},
+        group_col="group_id",
+    ).set_index("CRD_ID")
+
+    assert result.loc["U", "tie_result"] == 3
+    assert result.loc["G", "tie_result"] == 1
 
 
 def test_missing_priority_column_fails_clearly():
@@ -149,7 +241,7 @@ def test_missing_priority_column_fails_clearly():
         )
 
 
-def test_missing_semantic_star_flag_fails_clearly():
+def test_missing_quality_column_fails_clearly():
     frame = pd.DataFrame(
         {
             "CRD_ID": ["A"],

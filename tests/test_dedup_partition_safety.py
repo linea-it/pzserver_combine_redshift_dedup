@@ -14,12 +14,13 @@ from deduplication import (  # noqa: E402
     _dedup_local_with_margin,
     _log_representative_radius_diagnostics,
     _validate_local_tie_invariants,
+    build_global_tie_invariant_diagnostics,
     count_global_edge_group_mismatches,
     count_global_tie_invariant_violations,
 )
 
 
-def _row(crd_id, neighbor, ra, flag):
+def _row(crd_id, neighbor, ra, flag, object_type=pd.NA):
     return {
         "CRD_ID": crd_id,
         "compared_to": neighbor,
@@ -28,6 +29,7 @@ def _row(crd_id, neighbor, ra, flag):
         "z": 0.1,
         "z_flag_homogenized": flag,
         "tie_result": 1,
+        "object_type_homogenized": object_type,
     }
 
 
@@ -55,7 +57,7 @@ def test_boundary_component_has_same_canonical_group_from_both_pixels():
     assert from_b_pixel["tie_result"] == 0
 
 
-def test_custom_priority_keeps_star_semantics_without_flag_ranking():
+def test_custom_priority_keeps_excluded_star_outside_graph():
     rows = [
         {
             **_row("A", "B, S", 10.0, 4.0),
@@ -66,7 +68,7 @@ def test_custom_priority_keeps_star_semantics_without_flag_ranking():
             "custom_score": 10.0,
         },
         {
-            **_row("S", "A, B", 10.0 + 0.2 / 3600.0, 6.0),
+            **_row("S", "A, B", 10.0 + 0.2 / 3600.0, None, "star"),
             "custom_score": 100.0,
         },
     ]
@@ -89,7 +91,7 @@ def test_local_invariant_accepts_single_winner_and_hard_tie():
     frame = pd.DataFrame(
         {
             "group_id": [1, 1, 2, 2, 3],
-            "z_flag_homogenized": [4, 3, 4, 4, 6],
+            "z_flag_homogenized": [4, 3, 4, 4, pd.NA],
             "tie_result": [1, 0, 2, 2, 3],
         }
     )
@@ -170,7 +172,7 @@ def test_global_tie_validation_detects_invalid_patterns():
         pd.DataFrame(
             {
                 "group_id": [1, 1, 2, 2, 3, 3, 4],
-                "z_flag_homogenized": [4, 3, 4, 4, 4, 4, 6],
+                "z_flag_homogenized": [4, 3, 4, 4, 4, 4, pd.NA],
                 "tie_result": [1, 0, 2, 2, 1, 1, 3],
             }
         ),
@@ -179,6 +181,12 @@ def test_global_tie_validation_detects_invalid_patterns():
     )
 
     assert count_global_tie_invariant_violations(frame).compute() == 1
+
+    diagnostics, missing_group_rows = build_global_tie_invariant_diagnostics(frame)
+    computed = diagnostics.compute()
+    assert missing_group_rows.compute() == 0
+    assert len(computed) == 1
+    assert bool(computed.iloc[0]["multiple_winners"])
 
 
 def test_global_tie_validation_accepts_compact_labels_without_z_flag():

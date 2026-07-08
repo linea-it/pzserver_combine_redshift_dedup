@@ -101,11 +101,31 @@ class Inputs(BaseModel):
 class Param(BaseModel):
     combine_type: str = "concatenate"
     extra_columns: dict[str, Any] = Field(default_factory=dict)
-    # Zero disables the cut; valid active cuts are 1, 2, 3, 4, 5, 6.
+    # Zero disables the cut; valid active cuts are 1, 2, 3, 4.
     z_flag_homogenized_value_to_cut: float = 3.0
+    include_unclassified: bool = True
+    include_galaxy: bool = True
+    include_star: bool = False
+    include_agn: bool = True
+    include_qso: bool = True
+    include_galactic: bool = False
     flags_translation_file: str = str(Path(MAINDIR, "flags_translation.yaml"))
     insert_DP1_footprint_flag: bool = False
     insert_rubin_footprint_flag: bool = False
+
+    @model_validator(mode="after")
+    def validate_object_type_inclusion(self):
+        inclusion = (
+            self.include_unclassified,
+            self.include_galaxy,
+            self.include_star,
+            self.include_agn,
+            self.include_qso,
+            self.include_galactic,
+        )
+        if not any(inclusion):
+            raise ValueError("at least one include_* object-type option must be true")
+        return self
 
 
 class Config(BaseModel):

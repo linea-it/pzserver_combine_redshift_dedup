@@ -87,7 +87,15 @@ param:
   #   ORIGINAL_ID:
   #     source: id
   #     type: str
-  z_flag_homogenized_value_to_cut: 0.0 # 0 disables the cut; valid active cuts are 1, 2, 3, 4, 5, 6.
+  z_flag_homogenized_value_to_cut: 0.0 # 0 disables the cut; valid active cuts are 1, 2, 3, 4.
+  # Object types allowed to participate in the deduplication graph. Disabled
+  # types remain in marked outputs as isolated rows with tie_result=3.
+  include_unclassified: true
+  include_galaxy: true
+  include_star: false
+  include_agn: true
+  include_qso: true
+  include_galactic: false
   insert_DP1_footprint_flag: false # Adds is_in_DP1_fields (1/0)
   insert_rubin_footprint_flag: false # Adds is_in_rubin_footprint (1/0)
   flags_translation_file: flags_translation.yaml # File with homogenization rules for z_flag and type

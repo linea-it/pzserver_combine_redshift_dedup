@@ -69,7 +69,7 @@ VIMOS_FLAG_TO_SCORE = {
 }
 
 _TRANSLATION_KEYS = {
-    "z_flag_translation": ("float", {0.0, 1.0, 2.0, 3.0, 4.0, 6.0}),
+    "z_flag_translation": ("float", {0.0, 1.0, 2.0, 3.0, 4.0}),
     "instrument_type_translation": ("str", {"s", "g", "p"}),
     "object_type_translation": (
         "str",
@@ -90,6 +90,11 @@ _TOP_LEVEL_KEYS = {
     "crossmatch_saturation_fail_fraction",
     "crossmatch_geometry_diagnostics_enabled",
     "representative_radius_diagnostics_enabled", "dedup_edge_diagnostics_enabled",
+    "tie_invariant_diagnostics_enabled",
+    "tie_invariant_diagnostics_detailed_enabled",
+    "tie_invariant_diagnostics_sample_size",
+    "tie_invariant_diagnostics_max_rows",
+    "label_merge_diagnostics_enabled",
     "instrument_type_priority", "save_expr_columns", "expr_column_schema",
     "runtime_schema_hints", "translation_rules",
 }
@@ -168,6 +173,23 @@ def validate_translation_config(config: dict) -> None:
     unknown_top = set(config) - _TOP_LEVEL_KEYS
     if unknown_top:
         raise ValueError(f"flags translation root: unknown option(s): {sorted(unknown_top)}")
+    for key in (
+        "tie_invariant_diagnostics_enabled",
+        "tie_invariant_diagnostics_detailed_enabled",
+        "label_merge_diagnostics_enabled",
+    ):
+        if key in config and not isinstance(config[key], bool):
+            raise TypeError(f"{key} must be a boolean")
+    for key in (
+        "tie_invariant_diagnostics_sample_size",
+        "tie_invariant_diagnostics_max_rows",
+    ):
+        if key in config and (
+            not isinstance(config[key], int)
+            or isinstance(config[key], bool)
+            or config[key] < 1
+        ):
+            raise ValueError(f"{key} must be a positive integer")
     rules = config.get("translation_rules", {})
     runtime_hints = config.get("runtime_schema_hints", {})
     if not isinstance(runtime_hints, dict):
@@ -412,8 +434,8 @@ def _homogenize(
         product_name: Catalog identifier.
         logger: Logger.
         type_cast_ok: Whether `type` was normalized.
-        require_z_flag_homogenized: Create and validate the flag for semantic
-            star classification even when it is not a ranking priority.
+        require_z_flag_homogenized: Create and validate the quality flag even
+            when it is not a ranking priority.
 
     Returns:
         Tuple: (df, used_type_fastpath, tiebreaking_priority, instrument_type_priority, translation_rules_uc)
@@ -777,12 +799,12 @@ def _homogenize(
                                                   out_col="z_flag_homogenized",
                                                   out_kind="float")
                 _validate_result_domain(
-                    "z_flag_homogenized", {0.0, 1.0, 2.0, 3.0, 4.0, 6.0}
+                    "z_flag_homogenized", {0.0, 1.0, 2.0, 3.0, 4.0}
                 )
         else:
             # User-provided 'z_flag_homogenized' is present. Validate allowed domain {0,1,2,3,4} (NaN allowed).
             logger.info(f"{product_name} 'z_flag_homogenized' already exists; validating user-provided values.")
-            allowed = {0.0, 1.0, 2.0, 3.0, 4.0, 6.0}
+            allowed = {0.0, 1.0, 2.0, 3.0, 4.0}
 
             vals = dd.to_numeric(df["z_flag_homogenized"], errors="coerce")
             # NaN is allowed; only non-NaN values outside the allowed set are invalid
@@ -935,18 +957,10 @@ def _homogenize(
         if "z_flag_homogenized" not in df.columns:
             raise ValueError(
                 f"[{product_name}] 'z_flag_homogenized' is required for "
-                "star classification but is missing after homogenization."
+                "quality ranking or filtering but is missing after homogenization."
             )
-        if z_flag_is_priority:
-            non_null = validated_non_null_counts.get("z_flag_homogenized")
-            if non_null is None:
-                non_null = dask.compute(df["z_flag_homogenized"].count())[0]
-            if int(non_null) == 0:
-                raise ValueError(
-                    f"[{product_name}] All values in 'z_flag_homogenized' are NaN. "
-                    "This column is required (in tiebreaking_priority) and must contain at least one non-NaN value. "
-                    "Verify YAML translations / fast-path logic and input columns."
-                )
+        # An all-null quality column is valid: this priority simply cannot
+        # distinguish candidates. Later priorities or hard-tie handling apply.
 
     if "instrument_type_homogenized" in tiebreaking_priority:
         if "instrument_type_homogenized" not in df.columns:

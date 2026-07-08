@@ -280,7 +280,7 @@ Only columns required by the graph solver are retained, including:
 - `compared_to`;
 - redshift;
 - configured tie-breaking priorities;
-- star classification;
+- homogenized object type and graph-inclusion policy;
 - coordinates required by optional geometry diagnostics.
 
 The local partitions are converted to pandas because the graph algorithm is a
@@ -303,6 +303,23 @@ CRD_ID, tie_result, group_id
 These labels are merged back into the complete distributed dataframe. The
 complete dataframe remains lazy for HATS, Parquet, and CSV output paths.
 
+The default diagnostics count rows missing a newly computed label and classify
+invalid tie groups by aggregate reason. Optional detailed diagnostics collect a
+bounded sample of offending `group_id` and member `CRD_ID` values; this mode is
+disabled by default because it requires an additional distributed scan.
+
+`tie_result` has the following stable meanings:
+
+- `0`: participating row that lost within its graph component;
+- `1`: selected winner;
+- `2`: unresolved hard-tie candidate;
+- `3`: row deliberately excluded from the graph by object-type configuration.
+
+Rows with `tie_result=3` remain visible as isolated records in marked outputs.
+`concatenate_and_remove_duplicates` filters them out because that mode retains
+only `tie_result=1` (plus hard ties according to `tie_treatment_option`). They
+neither create nor receive graph edges.
+
 ## Scientific semantics preserved by this design
 
 These representation changes do not alter the intended scientific decisions:
@@ -311,7 +328,7 @@ These representation changes do not alter the intended scientific decisions:
   radius;
 - HATS margins still provide cross-partition spatial context;
 - graph components are still formed from `compared_to` edges;
-- stars remain outside ordinary winner selection;
+- object types disabled by configuration remain isolated from the graph;
 - configured priority columns still determine winners and hard ties;
 - redshift disambiguation and missing-redshift policy remain unchanged;
 - canonical groups and tie-result invariants are applied after the same edge

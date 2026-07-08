@@ -97,6 +97,23 @@ def test_translation_schema_validates_output_domains_and_condition_shape():
         validate_translation_config(invalid_condition)
 
 
+def test_translation_schema_validates_diagnostic_controls():
+    with pytest.raises(TypeError, match="tie_invariant_diagnostics_enabled"):
+        validate_translation_config({"tie_invariant_diagnostics_enabled": "yes"})
+    with pytest.raises(ValueError, match="tie_invariant_diagnostics_sample_size"):
+        validate_translation_config({"tie_invariant_diagnostics_sample_size": 0})
+
+    validate_translation_config(
+        {
+            "tie_invariant_diagnostics_enabled": True,
+            "tie_invariant_diagnostics_detailed_enabled": False,
+            "tie_invariant_diagnostics_sample_size": 10,
+            "tie_invariant_diagnostics_max_rows": 100,
+            "label_merge_diagnostics_enabled": True,
+        }
+    )
+
+
 def test_yaml_flag_translation_applies_direct_default_and_condition():
     frame = dd.from_pandas(
         pd.DataFrame(
@@ -303,8 +320,8 @@ def test_cosmos_web_flag_translation_compares_normalized_string_type():
 
     result, *_ = _homogenize(frame, config, "demo", LOGGER, type_cast_ok=False)
 
-    assert result.compute()["z_flag_homogenized"].tolist() == [
-        6.0,
+    assert result.compute()["z_flag_homogenized"].fillna(-1).tolist() == [
+        -1.0,
         0.0,
         1.0,
         2.0,
@@ -525,7 +542,7 @@ def test_2df_6df_and_2mrs_use_only_documented_object_classes():
     ]
 
 
-def test_z_flag_6_requires_an_explicit_stellar_classification():
+def test_stellar_classification_does_not_overwrite_independent_quality():
     config_path = Path(__file__).resolve().parents[1] / "flags_translation.yaml"
     config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
     config["tiebreaking_priority"] = ["z_flag_homogenized"]
@@ -565,13 +582,13 @@ def test_z_flag_6_requires_an_explicit_stellar_classification():
         -1,
         0,
         -1,
-        6,
-        -1,
-        6,
-        -1,
-        6,
         4,
-        6,
+        -1,
+        4,
+        -1,
+        4,
+        4,
+        -1,
     ]
 
 
@@ -842,7 +859,7 @@ def test_user_homogenized_flag_rejects_values_outside_domain():
         _homogenize(frame, config, "demo", LOGGER, type_cast_ok=False)
 
 
-def test_semantic_star_flag_is_preserved_without_being_a_priority():
+def test_quality_flag_rejects_legacy_six_and_accepts_all_null():
     frame = dd.from_pandas(
         pd.DataFrame(
             {
@@ -855,18 +872,29 @@ def test_semantic_star_flag_is_preserved_without_being_a_priority():
     )
     config = {"tiebreaking_priority": ["custom_score"]}
 
+    with pytest.raises(ValueError, match="Invalid values"):
+        _homogenize(
+            frame,
+            config,
+            "demo",
+            LOGGER,
+            type_cast_ok=False,
+            require_z_flag_homogenized=True,
+        )
+
+    all_null = dd.from_pandas(
+        pd.DataFrame({"z_flag_homogenized": [pd.NA, pd.NA]}),
+        npartitions=1,
+        sort=False,
+    )
     result, *_ = _homogenize(
-        frame,
-        config,
+        all_null,
+        {"tiebreaking_priority": ["z_flag_homogenized"]},
         "demo",
         LOGGER,
         type_cast_ok=False,
-        require_z_flag_homogenized=True,
     )
-
-    computed = result.compute()
-    assert computed["z_flag_homogenized"].tolist() == [4.0, 6.0]
-    assert "instrument_type_homogenized" not in computed.columns
+    assert result.compute()["z_flag_homogenized"].isna().all()
 
 
 @pytest.mark.parametrize(
@@ -875,7 +903,7 @@ def test_semantic_star_flag_is_preserved_without_being_a_priority():
         ("concatenate", 0, False),
         ("concatenate", None, False),
         ("concatenate", 3, True),
-        ("concatenate", "6", True),
+        ("concatenate", "6", False),
         ("concatenate", 1.5, False),
         ("concatenate", 7, False),
         ("concatenate_and_mark_duplicates", 0, True),
@@ -938,7 +966,7 @@ def test_combine_configuration_rejects_invalid_mode_and_empty_dedup_priorities()
     assert priorities == []
 
 
-def test_cut_six_warns_early_for_remove_duplicates():
+def test_cut_six_has_no_legacy_star_semantics():
     logger = Mock()
 
     validate_combine_configuration(
@@ -948,5 +976,4 @@ def test_cut_six_warns_early_for_remove_duplicates():
         logger,
     )
 
-    logger.warning.assert_called_once()
-    assert "final catalog will normally be empty" in logger.warning.call_args.args[0]
+    logger.warning.assert_not_called()

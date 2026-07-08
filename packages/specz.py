@@ -2388,7 +2388,7 @@ def _requires_z_flag_homogenization(combine_mode: str, cut_value: object) -> boo
         numeric_cut = float(cut_value)
     except (TypeError, ValueError):
         return False
-    return numeric_cut in {1.0, 2.0, 3.0, 4.0, 5.0, 6.0}
+    return numeric_cut in {1.0, 2.0, 3.0, 4.0}
 
 
 def validate_combine_configuration(
@@ -2425,20 +2425,6 @@ def validate_combine_configuration(
             f"tiebreaking_priority must be non-empty for {normalized_mode}"
         )
 
-    try:
-        numeric_cut = float(cut_value) if cut_value is not None else None
-    except (TypeError, ValueError):
-        numeric_cut = None
-    if (
-        normalized_mode == "concatenate_and_remove_duplicates"
-        and numeric_cut == 6.0
-        and logger is not None
-    ):
-        logger.warning(
-            "z_flag_homogenized_value_to_cut=6 retains only stars, while "
-            "concatenate_and_remove_duplicates excludes tie_result=3; the final "
-            "catalog will normally be empty."
-        )
     return normalized_mode, priorities
 
 
@@ -2605,10 +2591,10 @@ def prepare_catalog(
                 # Zero is the explicit no-cut sentinel. It is summarized once
                 # by the driver instead of repeated for every input catalog.
                 pass
-            elif cut_val not in {1.0, 2.0, 3.0, 4.0, 5.0, 6.0}:
+            elif cut_val not in {1.0, 2.0, 3.0, 4.0}:
                 lg.warning(
                     "Invalid z_flag_homogenized_value_to_cut=%s; use 0 to disable "
-                    "the cut or one of 1, 2, 3, 4, 5, 6. Skipping cut.",
+                    "the cut or one of 1, 2, 3, 4. Skipping cut.",
                     z_flag_homogenized_value_to_cut,
                 )
             else:
