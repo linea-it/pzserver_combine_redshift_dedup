@@ -30,6 +30,7 @@ import numpy as np
 import pandas as pd
 
 REPRESENTATIVE_RADIUS_DIAGNOSTIC_COLUMN = "_diag_representative_max_radius_arcsec"
+SPLIT_REFERENCE_COLUMN = "__split_reference_crd"
 
 # -----------------------
 # Project
@@ -225,10 +226,13 @@ def _split_groups_by_reference_radius(
     instrument_type_priority: Mapping[str, int] | None,
     excluded_mask: pd.Series,
     crd_col: str,
-) -> pd.Series:
+) -> tuple[pd.Series, pd.Series]:
     """Greedily split components around deterministic best-ranked references."""
     if max_radius_arcsec is None or df.empty:
-        return initial_groups.astype("int64")
+        return (
+            initial_groups.astype("int64"),
+            pd.Series(pd.NA, index=df.index, dtype="string"),
+        )
 
     ranking = pd.DataFrame(index=df.index)
     for order, column in enumerate(tiebreaking_priority):
@@ -264,6 +268,7 @@ def _split_groups_by_reference_radius(
     group_values = initial_groups.to_numpy(dtype="int64", copy=True)
     excluded = excluded_mask.to_numpy(dtype=bool, na_value=False)
     result = np.full(len(df), -1, dtype="int64")
+    references = np.full(len(df), None, dtype=object)
     next_group = 0
 
     for group_value in pd.unique(group_values):
@@ -288,13 +293,18 @@ def _split_groups_by_reference_radius(
             else:
                 selected = np.asarray([reference], dtype="int64")
             result[selected] = next_group
+            references[selected] = str(df.iloc[reference][crd_col]).strip()
             remaining.difference_update(int(position) for position in selected)
             next_group += 1
 
     for position in np.flatnonzero(excluded):
         result[position] = next_group
+        references[position] = str(df.iloc[position][crd_col]).strip()
         next_group += 1
-    return pd.Series(result, index=df.index, dtype="int64")
+    return (
+        pd.Series(result, index=df.index, dtype="int64"),
+        pd.Series(references, index=df.index, dtype="string"),
+    )
 
 
 def _assign_canonical_group_ids(
@@ -355,14 +365,31 @@ def _log_representative_radius_diagnostics(
     if work.empty:
         return diagnostic
 
-    tie = pd.to_numeric(work[tie_col], errors="coerce")
-    work["_representative_rank"] = np.select([tie.eq(1), tie.eq(2)], [0, 1], default=2)
-    representatives = (
-        work.sort_values([group_col, "_representative_rank", crd_col], kind="stable")
-        .drop_duplicates(group_col)
-        .set_index(group_col)[["ra", "dec"]]
-        .rename(columns={"ra": "_rep_ra", "dec": "_rep_dec"})
-    )
+    if SPLIT_REFERENCE_COLUMN in frame.columns:
+        work[SPLIT_REFERENCE_COLUMN] = frame.loc[
+            work.index, SPLIT_REFERENCE_COLUMN
+        ].astype("string")
+        reference_rows = work[work[crd_col].astype("string").eq(
+            work[SPLIT_REFERENCE_COLUMN]
+        )]
+        representatives = (
+            reference_rows.drop_duplicates(group_col)
+            .set_index(group_col)[["ra", "dec"]]
+            .rename(columns={"ra": "_rep_ra", "dec": "_rep_dec"})
+        )
+    else:
+        tie = pd.to_numeric(work[tie_col], errors="coerce")
+        work["_representative_rank"] = np.select(
+            [tie.eq(1), tie.eq(2)], [0, 1], default=2
+        )
+        representatives = (
+            work.sort_values(
+                [group_col, "_representative_rank", crd_col], kind="stable"
+            )
+            .drop_duplicates(group_col)
+            .set_index(group_col)[["ra", "dec"]]
+            .rename(columns={"ra": "_rep_ra", "dec": "_rep_dec"})
+        )
     work = work.join(representatives, on=group_col)
 
     ra = np.radians(work["ra"].to_numpy(dtype="float64"))
@@ -1220,6 +1247,7 @@ def deduplicate_pandas(
     group_col: str | None = None,  # new
     object_type_inclusion: Mapping[str, object] | None = None,
     max_representative_radius_arcsec: float | None = None,
+    preserve_split_reference: bool = False,
 ) -> pd.DataFrame:
     """Graph-based deduplication with vectorized per-group resolution and Dz collapse.
 
@@ -1416,7 +1444,7 @@ def deduplicate_pandas(
             na_mask[pos_na[is_star_na]] = False
             next_gid += n_star
 
-    out["__group__"] = _split_groups_by_reference_radius(
+    out["__group__"], out[SPLIT_REFERENCE_COLUMN] = _split_groups_by_reference_radius(
         out,
         pd.Series(gids, index=out.index),
         max_radius_arcsec=max_representative_radius_arcsec,
@@ -1649,6 +1677,9 @@ def deduplicate_pandas(
     else:
         drop_cols.append("__group__")
 
+    if not preserve_split_reference:
+        drop_cols.append(SPLIT_REFERENCE_COLUMN)
+
     out.drop(columns=drop_cols, inplace=True, errors="ignore")
 
     out.loc[excluded_mask, tie_col] = np.int8(3)
@@ -1841,6 +1872,7 @@ def _dedup_local_with_margin(
         group_col=group_col,
         object_type_inclusion=object_type_inclusion,
         max_representative_radius_arcsec=max_representative_radius_arcsec,
+        preserve_split_reference=representative_radius_diagnostics_enabled,
     )
     if representative_radius_diagnostics_enabled:
         solved[REPRESENTATIVE_RADIUS_DIAGNOSTIC_COLUMN] = (
@@ -2099,6 +2131,7 @@ def _dedup_local_no_margin(
         group_col=group_col,
         object_type_inclusion=object_type_inclusion,
         max_representative_radius_arcsec=max_representative_radius_arcsec,
+        preserve_split_reference=representative_radius_diagnostics_enabled,
     )
     if representative_radius_diagnostics_enabled:
         solved[REPRESENTATIVE_RADIUS_DIAGNOSTIC_COLUMN] = (

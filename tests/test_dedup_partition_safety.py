@@ -10,6 +10,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "packages"))
 
 from deduplication import (  # noqa: E402
+    SPLIT_REFERENCE_COLUMN,
     _collapse_within_dz,
     _dedup_local_with_margin,
     _log_representative_radius_diagnostics,
@@ -265,5 +266,33 @@ def test_representative_radius_diagnostic_warns_for_transitive_chain():
 
     logger.warning.assert_called_once()
     assert "Representative-radius diagnostics" in logger.warning.call_args.args[0]
+    assert diagnostic.notna().sum() == 1
+    assert diagnostic.max() == pytest.approx(0.8, abs=1e-6)
+
+
+def test_representative_radius_diagnostic_uses_split_reference_not_winner():
+    frame = pd.DataFrame(
+        {
+            "group_id": [1, 1, 1],
+            "tie_result": [0, 1, 0],
+            "CRD_ID": ["reference", "winner", "edge"],
+            SPLIT_REFERENCE_COLUMN: ["reference"] * 3,
+            "ra": [10.0, 10.0 + 0.8 / 3600.0, 10.0 - 0.8 / 3600.0],
+            "dec": [0.0, 0.0, 0.0],
+        }
+    )
+    logger = Mock()
+
+    with patch("deduplication._phase_logger", return_value=logger):
+        diagnostic = _log_representative_radius_diagnostics(
+            frame,
+            group_col="group_id",
+            tie_col="tie_result",
+            crd_col="CRD_ID",
+            radius_arcsec=1.0,
+            partition_tag="test",
+        )
+
+    logger.warning.assert_not_called()
     assert diagnostic.notna().sum() == 1
     assert diagnostic.max() == pytest.approx(0.8, abs=1e-6)
