@@ -66,7 +66,7 @@ In practical terms, a stellar row and a non-stellar row could be treated as if t
 
 ## Most plausible software cause
 
-The most plausible source of the duplicated `CRD_ID` values was the distributed ID generator in [packages/specz.py](/home/luigi/linea/pzserver_combine_redshift_dedup/packages/specz.py:1893).
+The most plausible source of the duplicated `CRD_ID` values was the distributed ID generator in [packages/specz.py](../../packages/specz.py#L1893).
 
 The generator works by:
 
@@ -107,8 +107,8 @@ The fix was applied directly in the `CRD_ID` generation path:
 
 Relevant code:
 
-- [packages/specz.py](/home/luigi/linea/pzserver_combine_redshift_dedup/packages/specz.py:1893)
-- [packages/specz.py](/home/luigi/linea/pzserver_combine_redshift_dedup/packages/specz.py:1950)
+- [packages/specz.py](../../packages/specz.py#L1893)
+- [packages/specz.py](../../packages/specz.py#L1950)
 
 In addition, later work in the deduplication path strengthened:
 
@@ -248,4 +248,4 @@ If a short technical statement is needed:
 
 This report is stored under:
 
-- [docs/incidents/2026-07-01-crd-id-duplication.md](/home/luigi/linea/pzserver_combine_redshift_dedup/docs/incidents/2026-07-01-crd-id-duplication.md)
+- [docs/incidents/2026-07-01-crd-id-duplication.md](./2026-07-01-crd-id-duplication.md)
