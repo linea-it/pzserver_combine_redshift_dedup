@@ -624,7 +624,7 @@ def count_global_edge_group_mismatches(
     tie_col: str = "tie_result",
     group_col: str = "group_id",
 ):
-    """Return lazy counts of cross-group edges and dangling non-star edges."""
+    """Return lazy counts of cross-group edges and dangling participating edges."""
     meta = pd.DataFrame(
         {
             "u": pd.Series(dtype="string[pyarrow]"),
@@ -847,7 +847,8 @@ def _build_edges_fast(
         leaked = [cid for cid in nodes_edge.astype("string") if cid in star_ids_fast]
         if leaked:
             _phase_logger().error(
-                "Star IDs leaked into fast-path edge nodes (logic violation): "
+                "Excluded object-type IDs leaked into fast-path edge nodes "
+                "(logic violation): "
                 "count=%d sample=%s",
                 len(leaked),
                 leaked[:5],
@@ -1275,6 +1276,13 @@ def deduplicate_pandas(
 
     out = df.copy()
     inclusion = validate_object_type_inclusion(object_type_inclusion)
+    excluded_object_types = sorted(
+        object_type
+        for object_type, option in _OBJECT_TYPE_TO_INCLUDE_KEY.items()
+        if not inclusion[option]
+    )
+    if not inclusion["include_unclassified"]:
+        excluded_object_types.append("unclassified")
     object_types = out.get(
         "object_type_homogenized",
         pd.Series(pd.NA, index=out.index, dtype="string"),
@@ -1310,23 +1318,29 @@ def deduplicate_pandas(
     if edge_log:
         lg = logger or _phase_logger()
         tag = f"[{partition_tag}]" if partition_tag else "[global]"
-        starB = diag.get("n_edges_starB_excluded")
-        if isinstance(starB, int) and starB > 0:
+        excluded_neighbor_edges = diag.get("n_edges_starB_excluded")
+        if isinstance(excluded_neighbor_edges, int) and excluded_neighbor_edges > 0:
             lg.warning(
-                "%s Star neighbors excluded during edge build: star_rows_excl=%d, edges_raw=%d, starB_excl=%d, edges_kept=%d",
+                "%s Object types excluded from deduplication graph: "
+                "types=%s, rows_excluded=%d, edges_raw=%d, "
+                "excluded_neighbor_edges=%d, edges_kept=%d",
                 tag,
+                excluded_object_types,
                 diag.get("n_rows_star_excluded", 0),
                 diag.get("n_edges_raw", 0),
-                starB,
+                excluded_neighbor_edges,
                 diag.get("n_edges_kept", 0),
             )
         elif partition_tag is None:
             lg.info(
-                "%s Edge build summary: star_rows_excl=%d, edges_raw=%d, starB_excl=%s, edges_kept=%d",
+                "%s Edge build summary: excluded_object_types=%s, "
+                "rows_excluded=%d, edges_raw=%d, "
+                "excluded_neighbor_edges=%s, edges_kept=%d",
                 tag,
+                excluded_object_types,
                 diag.get("n_rows_star_excluded", 0),
                 diag.get("n_edges_raw", 0),
-                str(starB),
+                str(excluded_neighbor_edges),
                 diag.get("n_edges_kept", 0),
             )
 

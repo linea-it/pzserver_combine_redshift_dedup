@@ -39,7 +39,7 @@ crossmatch_saturation_warn_fraction: 0.01  # Warn when >=1% of all source object
 crossmatch_saturation_fail_fraction: 0.10  # Fail at >=10%; set null to disable failure.
 crossmatch_geometry_diagnostics_enabled: false  # Separation/component-shape diagnostics over materialized matches.
 representative_radius_diagnostics_enabled: false  # Component radius/extent diagnostics during and after deduplication.
-dedup_edge_diagnostics_enabled: false  # Additional star-edge diagnostics while building the deduplication graph.
+dedup_edge_diagnostics_enabled: false  # Additional diagnostics for object types excluded while building the deduplication graph.
 
 instrument_type_priority:
   s: 3     # Spectroscopic (most reliable type)

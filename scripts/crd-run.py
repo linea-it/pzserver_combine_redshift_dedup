@@ -1684,7 +1684,7 @@ def main(
 
             #######################################################################
             # Diagnostics / outputs
-            # - edge_log: enable edge diagnostics (warn on star-neighbor exclusions)
+            # - edge_log: enable diagnostics for object types excluded from the graph
             # - group_col: set to None to disable exporting group labels
             edge_log = bool(
                 translation_config.get("dedup_edge_diagnostics_enabled", False)
@@ -1957,7 +1957,7 @@ def main(
                         dangling_count = int(next(validation_results))
                         log_dedup.info(
                             "Global graph validation: cross_group_edges=%d "
-                            "dangling_nonstar_edges=%d",
+                            "dangling_participating_edges=%d",
                             mismatch_count,
                             dangling_count,
                         )
