@@ -24,27 +24,66 @@ margin_threshold_arcsec: 5.0   # HATS margin used by independent partition-local
 margin_warning_fraction: 0.8   # Warn when a boundary component spans this fraction of the margin.
 validate_global_graph_edges: false  # Distributed edge/group consistency check (costs two joins).
 validate_global_tie_invariants: true  # Fail on invalid winner/hard-tie patterns after label merge.
-tie_invariant_diagnostics_enabled: true  # Cheap aggregate reason counts for invalid tie groups.
-tie_invariant_diagnostics_detailed_enabled: false  # Expensive sample of group IDs and member CRD_IDs.
-tie_invariant_diagnostics_sample_size: 10  # Maximum invalid groups in the detailed sample.
-tie_invariant_diagnostics_max_rows: 100  # Maximum member rows collected across sampled groups.
-label_merge_diagnostics_enabled: true  # Cheap count of rows without a newly computed dedup label.
 validate_crd_id_uniqueness: true  # Global nunique validation for every prepared input catalog.
-repartition_prepared_catalogs: false  # Extra full-data pass to resize prepared partitions.
-prepared_partition_size: "256MB"  # Used only when repartition_prepared_catalogs is enabled.
 
 crossmatch_n_neighbors: 160     # Number of nearest neighbors to consider during crossmatching.
 crossmatch_saturation_enabled: true  # Compute per-source saturation metrics and thresholds.
 crossmatch_saturation_warn_fraction: 0.01  # Warn when >=1% of all source objects reach n_neighbors.
 crossmatch_saturation_fail_fraction: 0.10  # Fail at >=10%; set null to disable failure.
-crossmatch_geometry_diagnostics_enabled: false  # Separation/component-shape diagnostics over materialized matches.
-representative_radius_diagnostics_enabled: false  # Component radius/extent diagnostics during and after deduplication.
-dedup_edge_diagnostics_enabled: false  # Additional diagnostics for object types excluded while building the deduplication graph.
 
 instrument_type_priority:
   s: 3     # Spectroscopic (most reliable type)
   g: 2     # Grism
   p: 1     # Photometric (least reliable)
+
+# Column type hints for variables referenced by translation expressions.
+# Protected pipeline columns (id, ra, dec, z, z_flag, z_err, survey,
+# instrument_type, object_type) are typed internally and omitted here.
+expr_column_schema:
+  CLASS: str
+  COMM: str
+  Class: float
+  J1: float
+  J2: float
+  Remarks: str
+  SPECPRIMARY: float
+  SPECTYPE: str
+  TYPE: str
+  ZCAT_PRIMARY: bool
+  agn_flag: float
+  chi_a: float
+  classFlag: float
+  flag1: float
+  flag2: float
+  l68: float
+  l95: float
+  lp_NbFilt: float
+  lp_type: float
+  lp_zMinChi2: float
+  lp_zPDF: float
+  lp_zPDF_l68: float
+  lp_zPDF_u68: float
+  mst: float
+  nbfilt: float
+  nfilt: float
+  spe_class: str
+  tSp: float
+  type: str
+  u68: float
+  u95: float
+  use_phot: float
+  use_zgrism: float
+  z500: float
+  z_best_s: float
+  z_ml: float
+  z_peak: float
+  z_spec: float
+  zbest_type: str
+  zchi2: float
+  zfinal_type: str
+  zpdf_med: float
+  zspec: float
+  zspec_survey: str
 
 # === Survey-specific translation rules for z_flag, instrument, and object type ===
 # These are our internal definitions used to harmonize redshift quality and instrument types across surveys.
@@ -77,20 +116,6 @@ instrument_type_priority:
 # z_flag and instrument translations accept `fast_path: auto|disabled|required`.
 # `auto` is the default, `disabled` forces YAML rules, and `required` fails when
 # the input is not compatible with the corresponding probability/s-g-p fast path.
-
-save_expr_columns: false
-
-expr_column_schema:
-  z_best_s: float
-  z_spec: float
-  use_zgrism: float
-  flag1: float
-  flag2: float
-  use_phot: float
-  zspec_survey: str
-  zspec: float
-  z_flag: float
-  ZCAT_PRIMARY: bool
 
 translation_rules:
 

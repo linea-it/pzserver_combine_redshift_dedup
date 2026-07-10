@@ -15,6 +15,7 @@ Public API:
 # -----------------------
 import ast as _ast
 import difflib
+import json
 import logging
 import os
 import re
@@ -37,6 +38,12 @@ os.environ.setdefault("DASK_DISTRIBUTED__SHUFFLE__METHOD", "tasks")
 # Project (lsdb/hats/CRC)
 # -----------------------
 import hats  # noqa: F401
+from deduplication import (
+    _INSTRUMENT_TYPE_TO_INCLUDE_KEY,
+    _OBJECT_TYPE_TO_INCLUDE_KEY,
+    validate_instrument_type_inclusion,
+    validate_object_type_inclusion,
+)
 from product_handle import (
     ProductHandle,
 )
@@ -73,6 +80,12 @@ else:
     DTYPE_INT = "Int64"
     DTYPE_BOOL = "boolean"
     DTYPE_INT8 = "Int8"
+
+HOMOGENIZED_COLUMNS = (
+    "z_flag_homogenized",
+    "instrument_type_homogenized",
+    "object_type_homogenized",
+)
 
 # -----------------------
 # Module exports & constants
@@ -1678,6 +1691,73 @@ def build_runtime_schema_hints(
     return hints
 
 
+def _normalize_output_homogenized_columns_config(config: object) -> dict[str, str]:
+    """Return output policy for homogenized columns."""
+    valid = {"auto", "always", "never"}
+    if config is None:
+        supplied = {}
+    elif isinstance(config, dict):
+        supplied = dict(config)
+    else:
+        raise TypeError("param.output_homogenized_columns must be a mapping")
+
+    unknown = sorted(set(supplied) - set(HOMOGENIZED_COLUMNS))
+    if unknown:
+        raise ValueError(f"Unknown output_homogenized_columns option(s): {unknown}")
+
+    result = {column: "always" for column in HOMOGENIZED_COLUMNS}
+    for column, value in supplied.items():
+        normalized = str(value).strip().lower()
+        if normalized not in valid:
+            raise ValueError(
+                f"param.output_homogenized_columns.{column} must be one of "
+                f"{sorted(valid)}"
+            )
+        result[column] = normalized
+    return result
+
+
+def _active_z_flag_filter(param_config: dict) -> bool:
+    try:
+        cut_value = float(param_config.get("z_flag_homogenized_value_to_cut"))
+    except (TypeError, ValueError):
+        return False
+    return cut_value in {1.0, 2.0, 3.0, 4.0}
+
+
+def _active_object_type_filter(param_config: dict) -> bool:
+    inclusion = validate_object_type_inclusion(
+        {
+            key: param_config[key]
+            for key in (
+                "include_unclassified_oth",
+                "include_galaxy_oth",
+                "include_star_oth",
+                "include_agn_oth",
+                "include_qso_oth",
+                "include_galactic_oth",
+            )
+            if key in param_config
+        }
+    )
+    return not all(inclusion.values())
+
+
+def _homogenized_columns_used_by_runtime(
+    *,
+    param_config: dict,
+    tiebreaking_priority: list,
+) -> set[str]:
+    used = set(tiebreaking_priority or []) & set(HOMOGENIZED_COLUMNS)
+    if _active_z_flag_filter(param_config):
+        used.add("z_flag_homogenized")
+    if _active_instrument_type_filter(param_config):
+        used.add("instrument_type_homogenized")
+    if _active_object_type_filter(param_config):
+        used.add("object_type_homogenized")
+    return used
+
+
 def _copy_extra_columns_from_sources(
     df: dd.DataFrame,
     columns: dict[str, dict[str, str]],
@@ -2183,6 +2263,7 @@ def _select_output_columns(
     translation_rules_uc: dict,
     tiebreaking_priority: list,
     used_type_fastpath: bool,
+    param_config: dict | None = None,
     save_expr_columns: bool = False,
     schema_hints: dict | None = None,
     extra_columns: dict[str, dict[str, str]] | None = None,
@@ -2194,6 +2275,7 @@ def _select_output_columns(
       translation_rules_uc: Upper-cased translation rules.
       tiebreaking_priority: Priority columns to append if present.
       used_type_fastpath: Whether `type` was reused for instrument_type.
+      param_config: Pipeline ``param`` configuration.
       save_expr_columns: Keep variables used in YAML expressions.
       schema_hints: Normalized hints {'int','float','str','bool'}.
       extra_columns: Configured columns to preserve or create as typed nulls.
@@ -2221,14 +2303,19 @@ def _select_output_columns(
         "group_id",
     ]
 
-    # Homogenized object type is part of every output, including all-null catalogs.
-    final_cols.append("object_type_homogenized")
-
-    # Optional homogenized fields used by the legacy quality/ranking logic.
-    if "z_flag_homogenized" in df.columns:
-        final_cols.append("z_flag_homogenized")
-    if "instrument_type_homogenized" in df.columns:
-        final_cols.append("instrument_type_homogenized")
+    param_config = param_config or {}
+    homogenized_output = _normalize_output_homogenized_columns_config(
+        param_config.get("output_homogenized_columns")
+    )
+    runtime_used_homogenized = _homogenized_columns_used_by_runtime(
+        param_config=param_config,
+        tiebreaking_priority=tiebreaking_priority,
+    )
+    for column in HOMOGENIZED_COLUMNS:
+        policy = homogenized_output[column]
+        keep_auto = policy == "auto" and column in runtime_used_homogenized
+        if column in df.columns and (policy == "always" or keep_auto):
+            final_cols.append(column)
 
     # Normalize compared_to to nullable string if present.
     if "compared_to" in df.columns:
@@ -2242,7 +2329,11 @@ def _select_output_columns(
         df["instrument_type"] = df["type"].astype(DTYPE_STR)
 
     # Add tiebreaking columns if present and not already included.
-    extra = [c for c in tiebreaking_priority if c not in final_cols and c in df.columns]
+    extra = [
+        c
+        for c in tiebreaking_priority
+        if c not in final_cols and c in df.columns and c not in HOMOGENIZED_COLUMNS
+    ]
     final_cols += extra
 
     # Collect variables referenced in YAML expressions (if requested).
@@ -2391,6 +2482,219 @@ def _requires_z_flag_homogenization(combine_mode: str, cut_value: object) -> boo
     return numeric_cut in {1.0, 2.0, 3.0, 4.0}
 
 
+def _active_instrument_type_filter(param_config: dict) -> bool:
+    inclusion = validate_instrument_type_inclusion(
+        {
+            key: param_config[key]
+            for key in (
+                "include_spectroscopic_ith",
+                "include_grism_ith",
+                "include_photometric_ith",
+                "include_unclassified_ith",
+            )
+            if key in param_config
+        }
+    )
+    return not all(inclusion.values())
+
+
+def _filter_empty_result(
+    df: dd.DataFrame,
+    *,
+    product_name: str,
+    temp_dir: str,
+    reason: str,
+    detail_lines: list[str],
+    logger: logging.LoggerAdapter | logging.Logger,
+) -> tuple[dd.DataFrame, bool]:
+    final_count = int(df.map_partitions(len).sum().compute())
+    if final_count > 0:
+        return df, False
+
+    marker_path = os.path.join(temp_dir, f"prepared_{product_name}.empty")
+    try:
+        with open(marker_path, "w", encoding="utf-8") as fp:
+            fp.write(f"{reason}\n")
+            fp.write(f"product={product_name}\n")
+            for line in detail_lines:
+                fp.write(f"{line}\n")
+            fp.write("rows_after=0\n")
+    except Exception as e:
+        logger.warning("Could not write empty-catalog marker %s: %s", marker_path, e)
+
+    logger.warning(
+        "[%s] Catalog is empty after preparation filters (%s); excluding it from "
+        "subsequent HATS, crossmatch, and deduplication steps.",
+        product_name,
+        reason,
+    )
+    return df, True
+
+
+def _apply_object_type_filter(
+    df: dd.DataFrame,
+    *,
+    param_config: dict,
+    product_name: str,
+    temp_dir: str,
+    logger: logging.LoggerAdapter | logging.Logger,
+) -> tuple[dd.DataFrame, bool]:
+    inclusion = validate_object_type_inclusion(
+        {
+            key: param_config[key]
+            for key in (
+                "include_unclassified_oth",
+                "include_galaxy_oth",
+                "include_star_oth",
+                "include_agn_oth",
+                "include_qso_oth",
+                "include_galactic_oth",
+            )
+            if key in param_config
+        }
+    )
+    if all(inclusion.values()):
+        return df, False
+
+    normalized = df["object_type_homogenized"].astype("string").str.strip().str.lower()
+    keep = normalized.map_partitions(
+        lambda series: pd.Series(False, index=series.index),
+        meta=pd.Series(dtype=bool),
+    )
+    if inclusion["include_unclassified_oth"]:
+        keep = keep | normalized.isna()
+    for object_type, key in _OBJECT_TYPE_TO_INCLUDE_KEY.items():
+        if inclusion[key]:
+            keep = keep | normalized.eq(object_type).fillna(False)
+
+    out = df[keep]
+    retained = int(out.map_partitions(len).sum().compute())
+    logger.info(
+        "[%s] Applied object_type_homogenized filter: %s rows retained; inclusion=%s",
+        product_name,
+        retained,
+        inclusion,
+    )
+    return _filter_empty_result(
+        out,
+        product_name=product_name,
+        temp_dir=temp_dir,
+        reason="empty_after_object_type_homogenized_filter",
+        detail_lines=[f"object_type_inclusion={inclusion}"],
+        logger=logger,
+    )
+
+
+def _apply_instrument_type_filter(
+    df: dd.DataFrame,
+    *,
+    param_config: dict,
+    product_name: str,
+    temp_dir: str,
+    logger: logging.LoggerAdapter | logging.Logger,
+) -> tuple[dd.DataFrame, bool]:
+    inclusion = validate_instrument_type_inclusion(
+        {
+            key: param_config[key]
+            for key in (
+                "include_spectroscopic_ith",
+                "include_grism_ith",
+                "include_photometric_ith",
+                "include_unclassified_ith",
+            )
+            if key in param_config
+        }
+    )
+    if all(inclusion.values()):
+        return df, False
+
+    normalized = (
+        df["instrument_type_homogenized"].astype("string").str.strip().str.lower()
+    )
+    keep = normalized.map_partitions(
+        lambda series: pd.Series(False, index=series.index),
+        meta=pd.Series(dtype=bool),
+    )
+    if inclusion["include_unclassified_ith"]:
+        keep = keep | normalized.isna()
+    for instrument_type, key in _INSTRUMENT_TYPE_TO_INCLUDE_KEY.items():
+        if inclusion[key]:
+            keep = keep | normalized.eq(instrument_type).fillna(False)
+
+    out = df[keep]
+    retained = int(out.map_partitions(len).sum().compute())
+    logger.info(
+        "[%s] Applied instrument_type_homogenized filter: %s rows retained; inclusion=%s",
+        product_name,
+        retained,
+        inclusion,
+    )
+    return _filter_empty_result(
+        out,
+        product_name=product_name,
+        temp_dir=temp_dir,
+        reason="empty_after_instrument_type_homogenized_filter",
+        detail_lines=[f"instrument_type_inclusion={inclusion}"],
+        logger=logger,
+    )
+
+
+def _required_homogenized_columns(
+    *,
+    param_config: dict,
+    tiebreaking_priority: list,
+) -> dict[str, list[str]]:
+    required: dict[str, list[str]] = {column: [] for column in HOMOGENIZED_COLUMNS}
+    priority_set = set(tiebreaking_priority or [])
+    for column in HOMOGENIZED_COLUMNS:
+        if column in priority_set:
+            required[column].append("tiebreaking_priority")
+    if _active_z_flag_filter(param_config):
+        required["z_flag_homogenized"].append("z_flag_homogenized_value_to_cut")
+    if _active_instrument_type_filter(param_config):
+        required["instrument_type_homogenized"].append("instrument_type_filter")
+    if _active_object_type_filter(param_config):
+        required["object_type_homogenized"].append("object_type_filter")
+    return {column: reasons for column, reasons in required.items() if reasons}
+
+
+def _write_homogenized_metadata(
+    df: dd.DataFrame,
+    *,
+    product_name: str,
+    temp_dir: str,
+    required_columns: dict[str, list[str]],
+    logger: logging.LoggerAdapter | logging.Logger,
+) -> dict:
+    counts = {}
+    for column in HOMOGENIZED_COLUMNS:
+        counts[column] = int(df[column].count().compute()) if column in df.columns else 0
+
+    metadata = {
+        "product": product_name,
+        "homogenized_non_null_counts": counts,
+        "required_homogenized_columns": required_columns,
+    }
+    marker_path = os.path.join(temp_dir, f"prepared_{product_name}.homogenized.json")
+    try:
+        with open(marker_path, "w", encoding="utf-8") as fp:
+            json.dump(metadata, fp, indent=2, sort_keys=True)
+    except Exception as e:
+        logger.warning("Could not write homogenized metadata %s: %s", marker_path, e)
+
+    for column, reasons in required_columns.items():
+        if counts.get(column, 0) == 0:
+            logger.warning(
+                "[%s] Required homogenized column '%s' has no non-null values "
+                "in this catalog; reasons=%s. The driver will fail if this is "
+                "true for all input catalogs.",
+                product_name,
+                column,
+                reasons,
+            )
+    return metadata
+
+
 def validate_combine_configuration(
     combine_mode: object,
     tiebreaking_priority: object,
@@ -2525,7 +2829,7 @@ def prepare_catalog(
     extra_columns = _normalize_extra_columns_config(param_config.get("extra_columns"))
 
     z_flag_homogenized_value_to_cut = param_config.get(
-        "z_flag_homogenized_value_to_cut", None
+        "z_flag_homogenized_value_to_cut", 0
     )
 
     # 1) Load product
@@ -2566,12 +2870,26 @@ def prepare_catalog(
             combine_mode,
             z_flag_homogenized_value_to_cut,
         ),
+        require_instrument_type_homogenized=_active_instrument_type_filter(
+            param_config
+        ),
     )
     df = _normalize_custom_tiebreaking_priorities(
         df,
         list(tiebreaking_priority),
         product_name,
         lg,
+    )
+    required_homogenized = _required_homogenized_columns(
+        param_config=param_config,
+        tiebreaking_priority=list(tiebreaking_priority),
+    )
+    _write_homogenized_metadata(
+        df,
+        product_name=product_name,
+        temp_dir=temp_dir,
+        required_columns=required_homogenized,
+        logger=lg,
     )
 
     # 7) Apply cut based on z_flag_homogenized if requested
@@ -2605,35 +2923,41 @@ def prepare_catalog(
                     cut_val,
                     final_count,
                 )
-                if final_count == 0:
-                    marker_path = os.path.join(
-                        temp_dir, f"prepared_{product_name}.empty"
-                    )
-                    try:
-                        with open(marker_path, "w", encoding="utf-8") as fp:
-                            fp.write(
-                                "empty_after_z_flag_homogenized_cut\n"
-                                f"product={product_name}\n"
-                                f"z_flag_homogenized_value_to_cut={cut_val}\n"
-                                "rows_after=0\n"
-                            )
-                    except Exception as e:
-                        lg.warning(
-                            "Could not write empty-catalog marker %s: %s",
-                            marker_path,
-                            e,
-                        )
-                    lg.warning(
-                        "[%s] Catalog is empty after z_flag_homogenized cut >= %s; "
-                        "excluding it from subsequent HATS, crossmatch, and "
-                        "deduplication steps.",
-                        product_name,
-                        cut_val,
-                    )
+                _, empty_after_filter = _filter_empty_result(
+                    df,
+                    product_name=product_name,
+                    temp_dir=temp_dir,
+                    reason="empty_after_z_flag_homogenized_cut",
+                    detail_lines=[f"z_flag_homogenized_value_to_cut={cut_val}"],
+                    logger=lg,
+                )
+                if empty_after_filter:
                     lg.info(
                         f"END prepare_catalog product={product_name} empty_after_cut"
                     )
                     return "", "ra", "dec", product_name, "empty_after_cut"
+
+    df, empty_after_filter = _apply_instrument_type_filter(
+        df,
+        param_config=param_config,
+        product_name=product_name,
+        temp_dir=temp_dir,
+        logger=lg,
+    )
+    if empty_after_filter:
+        lg.info(f"END prepare_catalog product={product_name} empty_after_filter")
+        return "", "ra", "dec", product_name, "empty_after_filter"
+
+    df, empty_after_filter = _apply_object_type_filter(
+        df,
+        param_config=param_config,
+        product_name=product_name,
+        temp_dir=temp_dir,
+        logger=lg,
+    )
+    if empty_after_filter:
+        lg.info(f"END prepare_catalog product={product_name} empty_after_filter")
+        return "", "ra", "dec", product_name, "empty_after_filter"
 
     # 8) Optional persist + repartition. Sizing by bytes requires another full
     # pass, so production keeps the existing partitions unless explicitly asked.
@@ -2690,6 +3014,7 @@ def prepare_catalog(
         translation_rules_uc,
         tiebreaking_priority,
         used_type_fastpath,
+        param_config,
         save_expr_columns=translation_config.get("save_expr_columns", False),
         schema_hints=_normalize_schema_hints(
             translation_config.get("expr_column_schema")

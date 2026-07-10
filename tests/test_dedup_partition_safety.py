@@ -89,7 +89,7 @@ def test_reference_radius_split_is_stable_across_main_margin_views():
     assert second.loc["D", "group_id"] != first.loc["A", "group_id"]
 
 
-def test_custom_priority_keeps_excluded_star_outside_graph():
+def test_custom_priority_considers_star_after_preparation_filters_have_run():
     rows = [
         {
             **_row("A", "B, S", 10.0, 4.0),
@@ -114,9 +114,8 @@ def test_custom_priority_keeps_excluded_star_outside_graph():
         group_col="group_id",
     ).set_index("CRD_ID")
 
-    assert result["tie_result"].astype(int).to_dict() == {"A": 0, "B": 1, "S": 3}
-    assert result.loc["A", "group_id"] == result.loc["B", "group_id"]
-    assert result.loc["S", "group_id"] != result.loc["B", "group_id"]
+    assert result["tie_result"].astype(int).to_dict() == {"A": 0, "B": 0, "S": 1}
+    assert result["group_id"].nunique() == 1
 
 
 def test_local_invariant_accepts_single_winner_and_hard_tie():
@@ -124,7 +123,7 @@ def test_local_invariant_accepts_single_winner_and_hard_tie():
         {
             "group_id": [1, 1, 2, 2, 3],
             "z_flag_homogenized": [4, 3, 4, 4, pd.NA],
-            "tie_result": [1, 0, 2, 2, 3],
+            "tie_result": [1, 0, 2, 2, 1],
         }
     )
 
@@ -205,7 +204,7 @@ def test_global_tie_validation_detects_invalid_patterns():
             {
                 "group_id": [1, 1, 2, 2, 3, 3, 4],
                 "z_flag_homogenized": [4, 3, 4, 4, 4, 4, pd.NA],
-                "tie_result": [1, 0, 2, 2, 1, 1, 3],
+                "tie_result": [1, 0, 2, 2, 1, 1, 1],
             }
         ),
         npartitions=2,
@@ -226,7 +225,7 @@ def test_global_tie_validation_accepts_compact_labels_without_z_flag():
         pd.DataFrame(
             {
                 "group_id": [1, 1, 2, 2, 3],
-                "tie_result": [1, 0, 2, 2, 3],
+                "tie_result": [1, 0, 2, 2, 1],
             }
         ),
         npartitions=2,

@@ -47,6 +47,7 @@ from deduplication import (
     filter_dask_by_tie_treatment,
     filter_pandas_by_tie_treatment,
     run_dedup_with_lsdb_map_partitions,
+    validate_instrument_type_inclusion,
     validate_object_type_inclusion,
     validate_spatial_safety,
 )
@@ -54,6 +55,7 @@ from executor import get_executor
 from product_handle import save_dataframe
 from resource_usage import ResourceUsageMonitor
 from specz import (
+    HOMOGENIZED_COLUMNS,
     build_runtime_schema_hints,
     prepare_catalog,
     validate_combine_configuration,
@@ -76,6 +78,199 @@ __all__ = ["main"]
 
 _resource_usage_monitor: ResourceUsageMonitor | None = None
 _worker_floor_monitor: WorkerFloorMonitor | None = None
+
+DIAGNOSTICS_DEFAULTS = {
+    "tie_invariant_diagnostics_enabled": True,
+    "tie_invariant_diagnostics_detailed_enabled": False,
+    "tie_invariant_diagnostics_sample_size": 10,
+    "tie_invariant_diagnostics_max_rows": 100,
+    "label_merge_diagnostics_enabled": True,
+    "crossmatch_geometry_diagnostics_enabled": False,
+    "representative_radius_diagnostics_enabled": False,
+    "dedup_edge_diagnostics_enabled": False,
+    "save_expr_columns": False,
+}
+
+PREPARATION_DEFAULTS = {
+    "repartition_prepared_catalogs": False,
+    "prepared_partition_size": "256MB",
+}
+
+TRANSLATION_FALLBACK_DEFAULTS = {
+    "crossmatch_radius_arcsec": 0.5,
+    "max_representative_radius_arcsec": None,
+    "margin_threshold_arcsec": 5.0,
+    "margin_warning_fraction": 0.8,
+    "crossmatch_n_neighbors": 160,
+    "crossmatch_saturation_enabled": False,
+    "crossmatch_saturation_warn_fraction": 0.01,
+    "crossmatch_saturation_fail_fraction": None,
+    "delta_z_threshold": 0.0,
+    "validate_global_graph_edges": False,
+    "validate_global_tie_invariants": True,
+    "validate_crd_id_uniqueness": True,
+}
+
+
+def _normalize_param_config(param_config: dict | None) -> dict:
+    """Normalize supported external param layouts to the internal flat layout."""
+    if param_config is None:
+        return {}
+    if not isinstance(param_config, dict):
+        raise TypeError("param must be a mapping")
+
+    normalized = dict(param_config)
+
+    run = normalized.get("run") or {}
+    if not isinstance(run, dict):
+        raise TypeError("param.run must be a mapping")
+    for key in ("combine_type", "tie_treatment_option", "flags_translation_file"):
+        if key in run:
+            normalized[key] = run[key]
+
+    filters = normalized.get("filters") or {}
+    if not isinstance(filters, dict):
+        raise TypeError("param.filters must be a mapping")
+    if "z_flag_homogenized_value_to_cut" in filters:
+        normalized["z_flag_homogenized_value_to_cut"] = filters[
+            "z_flag_homogenized_value_to_cut"
+        ]
+
+    instrument = filters.get("instrument_type_homogenized") or {}
+    if not isinstance(instrument, dict):
+        raise TypeError("param.filters.instrument_type_homogenized must be a mapping")
+    instrument_aliases = {
+        "include_spectroscopic": "include_spectroscopic_ith",
+        "include_grism": "include_grism_ith",
+        "include_photometric": "include_photometric_ith",
+        "include_unclassified": "include_unclassified_ith",
+    }
+    for source, target in instrument_aliases.items():
+        if source in instrument:
+            normalized[target] = instrument[source]
+
+    object_type = filters.get("object_type_homogenized") or {}
+    if not isinstance(object_type, dict):
+        raise TypeError("param.filters.object_type_homogenized must be a mapping")
+    object_aliases = {
+        "include_unclassified": "include_unclassified_oth",
+        "include_galaxy": "include_galaxy_oth",
+        "include_star": "include_star_oth",
+        "include_agn": "include_agn_oth",
+        "include_qso": "include_qso_oth",
+        "include_galactic": "include_galactic_oth",
+    }
+    for source, target in object_aliases.items():
+        if source in object_type:
+            normalized[target] = object_type[source]
+
+    output = normalized.get("output") or {}
+    if not isinstance(output, dict):
+        raise TypeError("param.output must be a mapping")
+    output_aliases = {
+        "extra_columns": "extra_columns",
+        "homogenized_columns": "output_homogenized_columns",
+        "insert_DP1_footprint_flag": "insert_DP1_footprint_flag",
+        "insert_rubin_footprint_flag": "insert_rubin_footprint_flag",
+    }
+    for source, target in output_aliases.items():
+        if source in output:
+            normalized[target] = output[source]
+
+    return normalized
+
+
+def _log_translation_fallbacks(
+    translation_config: dict,
+    logger: logging.LoggerAdapter | logging.Logger,
+) -> None:
+    """Warn when optional scientific settings rely on internal defaults."""
+    missing = {
+        key: default
+        for key, default in TRANSLATION_FALLBACK_DEFAULTS.items()
+        if key not in translation_config
+    }
+    if not missing:
+        return
+    logger.warning(
+        "flags_translation.yaml is missing optional scientific setting(s); "
+        "using internal fallback defaults: %s",
+        missing,
+    )
+
+
+def _merge_param_diagnostics(
+    translation_config: dict,
+    param_config: dict,
+) -> dict:
+    """Overlay operational diagnostics from param.diagnostics onto runtime config."""
+    merged = dict(translation_config or {})
+    diagnostics = param_config.get("diagnostics") or {}
+    if not isinstance(diagnostics, dict):
+        raise TypeError("param.diagnostics must be a mapping")
+
+    legacy_diagnostics_keys = {"expr_column_schema"}
+    unknown = sorted(set(diagnostics) - set(DIAGNOSTICS_DEFAULTS) - legacy_diagnostics_keys)
+    if unknown:
+        raise ValueError(f"param.diagnostics has unknown option(s): {unknown}")
+
+    for key, default in DIAGNOSTICS_DEFAULTS.items():
+        merged[key] = diagnostics.get(key, merged.get(key, default))
+    merged["expr_column_schema"] = (
+        merged.get("expr_column_schema")
+        or diagnostics.get("expr_column_schema")
+        or {}
+    )
+
+    for key in (
+        "tie_invariant_diagnostics_enabled",
+        "tie_invariant_diagnostics_detailed_enabled",
+        "label_merge_diagnostics_enabled",
+        "crossmatch_geometry_diagnostics_enabled",
+        "representative_radius_diagnostics_enabled",
+        "dedup_edge_diagnostics_enabled",
+        "save_expr_columns",
+    ):
+        if not isinstance(merged[key], bool):
+            raise TypeError(f"param.diagnostics.{key} must be a boolean")
+
+    for key in (
+        "tie_invariant_diagnostics_sample_size",
+        "tie_invariant_diagnostics_max_rows",
+    ):
+        value = merged[key]
+        if not isinstance(value, int) or isinstance(value, bool) or value < 1:
+            raise ValueError(f"param.diagnostics.{key} must be a positive integer")
+
+    if not isinstance(merged["expr_column_schema"], dict):
+        raise TypeError("flags_translation.expr_column_schema must be a mapping")
+
+    return merged
+
+
+def _merge_param_preparation(
+    translation_config: dict,
+    param_config: dict,
+) -> dict:
+    """Overlay operational preparation settings from param.preparation."""
+    merged = dict(translation_config or {})
+    preparation = param_config.get("preparation") or {}
+    if not isinstance(preparation, dict):
+        raise TypeError("param.preparation must be a mapping")
+
+    unknown = sorted(set(preparation) - set(PREPARATION_DEFAULTS))
+    if unknown:
+        raise ValueError(f"param.preparation has unknown option(s): {unknown}")
+
+    for key, default in PREPARATION_DEFAULTS.items():
+        merged[key] = preparation.get(key, merged.get(key, default))
+
+    if not isinstance(merged["repartition_prepared_catalogs"], bool):
+        raise TypeError("param.preparation.repartition_prepared_catalogs must be a boolean")
+    if not isinstance(merged["prepared_partition_size"], str):
+        raise TypeError("param.preparation.prepared_partition_size must be a string")
+
+    return merged
 
 
 # -----------------------
@@ -581,7 +776,7 @@ def main(
 
     # --- Load config ---
     config = load_yml(config_path)
-    param_config = config.get("param", {})
+    param_config = _normalize_param_config(config.get("param", {}))
     if base_dir_override is None:
         raise ValueError("You must specify --base_dir via the command line.")
     base_dir = base_dir_override
@@ -651,7 +846,7 @@ def main(
             )
 
     log_init.info("START init: pipeline bootstrap")
-    cut_value = param_config.get("z_flag_homogenized_value_to_cut")
+    cut_value = param_config.get("z_flag_homogenized_value_to_cut", 0)
     try:
         cut_value_numeric = float(cut_value) if cut_value is not None else None
     except (TypeError, ValueError):
@@ -732,6 +927,15 @@ def main(
     try:
         translation_config = load_yml(path_to_translation_file)
         validate_translation_config(translation_config)
+        _log_translation_fallbacks(translation_config, log_init)
+        translation_config = _merge_param_diagnostics(
+            translation_config,
+            param_config,
+        )
+        translation_config = _merge_param_preparation(
+            translation_config,
+            param_config,
+        )
     except Exception as e:
         log_init.error("Failed to parse flags_translation_file: %s", e, exc_info=True)
         raise
@@ -796,37 +1000,56 @@ def main(
     combine_mode, validated_priorities = validate_combine_configuration(
         param_config.get("combine_type", "concatenate_and_mark_duplicates"),
         translation_config.get("tiebreaking_priority", []),
-        param_config.get("z_flag_homogenized_value_to_cut"),
+        param_config.get("z_flag_homogenized_value_to_cut", 0),
         log_init,
     )
     translation_config["tiebreaking_priority"] = validated_priorities
-    object_type_inclusion = validate_object_type_inclusion(
+    instrument_type_inclusion = validate_instrument_type_inclusion(
         {
             key: param_config[key]
             for key in (
-                "include_unclassified",
-                "include_galaxy",
-                "include_star",
-                "include_agn",
-                "include_qso",
-                "include_galactic",
+                "include_spectroscopic_ith",
+                "include_grism_ith",
+                "include_photometric_ith",
+                "include_unclassified_ith",
             )
             if key in param_config
         }
     )
-    log_init.info("Object-type graph inclusion: %s", object_type_inclusion)
-    if (
-        cut_value_numeric in {1.0, 2.0, 3.0, 4.0}
-        and (
-            object_type_inclusion["include_star"]
-            or object_type_inclusion["include_galactic"]
+    object_type_inclusion = validate_object_type_inclusion(
+        {
+            key: param_config[key]
+            for key in (
+                "include_unclassified_oth",
+                "include_galaxy_oth",
+                "include_star_oth",
+                "include_agn_oth",
+                "include_qso_oth",
+                "include_galactic_oth",
+            )
+            if key in param_config
+        }
+    )
+    log_init.info("Instrument-type input filter inclusion: %s", instrument_type_inclusion)
+    log_init.info("Object-type input filter inclusion: %s", object_type_inclusion)
+    required_homogenized_columns: dict[str, list[str]] = {
+        column: ["tiebreaking_priority"]
+        for column in HOMOGENIZED_COLUMNS
+        if column in set(validated_priorities)
+    }
+    if cut_value_numeric in {1.0, 2.0, 3.0, 4.0}:
+        required_homogenized_columns.setdefault("z_flag_homogenized", []).append(
+            "z_flag_homogenized_value_to_cut"
         )
-    ):
-        log_init.warning(
-            "An active z_flag_homogenized cut removes star/galactic rows whose "
-            "quality is null before graph inclusion. Their internal 0.5 ranking "
-            "fallback applies only to rows that survive this cut."
-        )
+    if not all(instrument_type_inclusion.values()):
+        required_homogenized_columns.setdefault(
+            "instrument_type_homogenized", []
+        ).append("instrument_type_filter")
+    if not all(object_type_inclusion.values()):
+        required_homogenized_columns.setdefault(
+            "object_type_homogenized", []
+        ).append("object_type_filter")
+    log_init.info("Required homogenized columns: %s", required_homogenized_columns)
     translation_config["runtime_schema_hints"] = build_runtime_schema_hints(
         param_config, translation_config
     )
@@ -1067,6 +1290,61 @@ def main(
                 len(results) - len(empty_results),
             )
 
+        homogenized_metadata = []
+        for r in results:
+            metadata_path = os.path.join(
+                temp_dir, f"prepared_{r[3]}.homogenized.json"
+            )
+            try:
+                with open(metadata_path, encoding="utf-8") as fp:
+                    homogenized_metadata.append(json.load(fp))
+            except FileNotFoundError:
+                log_prep.warning(
+                    "Missing homogenized metadata for catalog %s at %s. "
+                    "Required-column global validation will count it as empty.",
+                    r[3],
+                    metadata_path,
+                )
+                homogenized_metadata.append(
+                    {
+                        "product": r[3],
+                        "homogenized_non_null_counts": {},
+                    }
+                )
+            except Exception as e:
+                raise RuntimeError(
+                    f"Could not read homogenized metadata for catalog {r[3]} "
+                    f"at {metadata_path}: {e}"
+                ) from e
+
+        for column, reasons in required_homogenized_columns.items():
+            per_catalog_counts = {
+                str(meta.get("product") or "unknown"): int(
+                    (meta.get("homogenized_non_null_counts") or {}).get(column, 0)
+                )
+                for meta in homogenized_metadata
+            }
+            total_non_null = sum(per_catalog_counts.values())
+            if total_non_null == 0:
+                raise RuntimeError(
+                    f"All input catalogs have no valid values for required "
+                    f"homogenized column '{column}'. Required because: {reasons}. "
+                    f"Per-catalog non-null counts: {per_catalog_counts}. "
+                    "Check input column mappings and flags_translation.yaml."
+                )
+            empty_catalogs_for_column = [
+                name for name, count in per_catalog_counts.items() if count == 0
+            ]
+            if empty_catalogs_for_column:
+                log_prep.warning(
+                    "Required homogenized column %s has no non-null values in "
+                    "some input catalogs: %s; continuing because other catalogs "
+                    "provide valid values. Reasons=%s",
+                    column,
+                    empty_catalogs_for_column,
+                    reasons,
+                )
+
         prepared_info = [
             {
                 "collection_path": r[0],
@@ -1081,13 +1359,14 @@ def main(
 
         if not prepared_info:
             if len(empty_results) == len(results) and all(
-                r[4] == "empty_after_cut" for r in empty_results
+                r[4] in {"empty_after_cut", "empty_after_filter"}
+                for r in empty_results
             ):
-                names = ", ".join(r[3] for r in empty_results)
+                names = ", ".join(f"{r[3]} ({r[4]})" for r in empty_results)
                 raise RuntimeError(
-                    "All input catalogs became empty after applying the "
-                    "z_flag_homogenized cut; no non-empty catalogs remain for "
-                    f"downstream processing. Empty catalogs: {names}."
+                    "All input catalogs became empty after applying preparation "
+                    "filters; no non-empty catalogs remain for downstream "
+                    f"processing. Empty catalogs: {names}."
                 )
             raise RuntimeError(
                 "All input catalogs were excluded during preparation; no non-empty "

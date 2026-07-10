@@ -174,6 +174,44 @@ def validate_translation_config(config: dict) -> None:
     unknown_top = set(config) - _TOP_LEVEL_KEYS
     if unknown_top:
         raise ValueError(f"flags translation root: unknown option(s): {sorted(unknown_top)}")
+    required_top = {
+        "translation_rules",
+        "tiebreaking_priority",
+        "instrument_type_priority",
+        "expr_column_schema",
+    }
+    missing_top = sorted(required_top - set(config))
+    if missing_top:
+        raise ValueError(
+            "flags translation root: missing required scientific option(s): "
+            f"{missing_top}"
+        )
+    priorities = config.get("tiebreaking_priority")
+    if not isinstance(priorities, list):
+        raise TypeError("tiebreaking_priority must be a list")
+    if any(not isinstance(column, str) or not column.strip() for column in priorities):
+        raise ValueError("tiebreaking_priority entries must be non-empty strings")
+    if len(set(priorities)) != len(priorities):
+        raise ValueError("tiebreaking_priority cannot contain duplicate columns")
+
+    instrument_priority = config.get("instrument_type_priority")
+    if not isinstance(instrument_priority, dict):
+        raise TypeError("instrument_type_priority must be a mapping")
+    if not instrument_priority:
+        raise ValueError("instrument_type_priority must not be empty")
+    for label, priority in instrument_priority.items():
+        if label not in {"s", "g", "p"}:
+            raise ValueError(
+                f"instrument_type_priority.{label!r} is invalid; expected s, g or p"
+            )
+        if (
+            not isinstance(priority, int)
+            or isinstance(priority, bool)
+            or priority < 1
+        ):
+            raise ValueError(
+                f"instrument_type_priority.{label} must be a positive integer"
+            )
     for key in (
         "tie_invariant_diagnostics_enabled",
         "tie_invariant_diagnostics_detailed_enabled",
@@ -200,7 +238,18 @@ def validate_translation_config(config: dict) -> None:
         raise ValueError(
             "max_representative_radius_arcsec must be a positive number or null"
         )
-    rules = config.get("translation_rules", {})
+    rules = config.get("translation_rules")
+    expr_schema = config.get("expr_column_schema")
+    if not isinstance(expr_schema, dict):
+        raise TypeError("expr_column_schema must be a mapping")
+    for column, kind in expr_schema.items():
+        if not isinstance(column, str) or not column.strip():
+            raise ValueError("expr_column_schema column names must be non-empty strings")
+        if kind not in {"str", "float", "int", "bool"}:
+            raise ValueError(
+                f"expr_column_schema.{column}={kind!r} is invalid; "
+                "expected str, float, int or bool"
+            )
     runtime_hints = config.get("runtime_schema_hints", {})
     if not isinstance(runtime_hints, dict):
         raise TypeError("runtime_schema_hints must be a mapping")
@@ -214,6 +263,8 @@ def validate_translation_config(config: dict) -> None:
             )
     if not isinstance(rules, dict):
         raise TypeError("translation_rules must be a mapping")
+    if not rules:
+        raise ValueError("translation_rules must not be empty")
     for survey, ruleset in rules.items():
         base = f"translation_rules.{survey}"
         if not isinstance(survey, str) or not survey.strip():
@@ -435,6 +486,7 @@ def _homogenize(
     type_cast_ok: bool,
     *,
     require_z_flag_homogenized: bool = False,
+    require_instrument_type_homogenized: bool = False,
 ) -> tuple[dd.DataFrame, bool, list, dict, dict]:
     """Compute homogenized columns for tie-breaking.
 
@@ -446,6 +498,8 @@ def _homogenize(
         type_cast_ok: Whether `type` was normalized.
         require_z_flag_homogenized: Create and validate the quality flag even
             when it is not a ranking priority.
+        require_instrument_type_homogenized: Create and validate the instrument
+            type even when it is not a ranking priority.
 
     Returns:
         Tuple: (df, used_type_fastpath, tiebreaking_priority, instrument_type_priority, translation_rules_uc)
@@ -457,6 +511,10 @@ def _homogenize(
     validated_non_null_counts: dict[str, int] = {}
     z_flag_is_priority = "z_flag_homogenized" in tiebreaking_priority
     needs_z_flag = z_flag_is_priority or require_z_flag_homogenized
+    instrument_type_is_priority = "instrument_type_homogenized" in tiebreaking_priority
+    needs_instrument_type = (
+        instrument_type_is_priority or require_instrument_type_homogenized
+    )
 
     def _fast_path_policy(key: str) -> str:
         if "survey" not in df.columns:
@@ -507,7 +565,14 @@ def _homogenize(
     # -----------------------
     # Vectorized translator
     # -----------------------
-    def _translate_column_vectorized(df: dd.DataFrame, key: str, out_col: str, out_kind: str) -> dd.DataFrame:
+    def _translate_column_vectorized(
+        df: dd.DataFrame,
+        key: str,
+        out_col: str,
+        out_kind: str,
+        *,
+        strict: bool = True,
+    ) -> dd.DataFrame:
         """Apply YAML translation rules per partition."""
         assert key in {"z_flag", "instrument_type", "object_type"}
         assert out_col in {
@@ -630,6 +695,8 @@ def _homogenize(
                 if direct:
                     if source_col not in s.columns:
                         if not optional_source:
+                            if not strict:
+                                continue
                             raise ValueError(
                                 f"Missing source column '{source_col}' for survey "
                                 f"'{sname}' and translation '{out_col}'."
@@ -685,6 +752,17 @@ def _homogenize(
                         expr_vec = _ast.unparse(tree2)
                         mlocal = eval(expr_vec, safe_globals, ctx)
                     except Exception as e:
+                        if not strict:
+                            logger.warning(
+                                "[%s] Skipping optional %s condition '%s' for "
+                                "survey '%s': %s",
+                                product_name,
+                                out_col,
+                                expr,
+                                sname,
+                                e,
+                            )
+                            continue
                         raise ValueError(
                             f"Error evaluating condition '{expr}' for survey "
                             f"'{sname}': {e}"
@@ -775,70 +853,62 @@ def _homogenize(
             return 4.0
         return np.nan
 
-    if needs_z_flag:
-        if "z_flag_homogenized" not in df.columns:
-            z_fast_path = _fast_path_policy("z_flag")
-            z_fast_path_compatible = can_use_zflag_as_quality()
-            if z_fast_path == "required" and not z_fast_path_compatible:
-                raise ValueError(
-                    f"[{product_name}] z_flag fast_path is 'required', but z_flag "
-                    "is not a non-empty probability-like column in [0, 1]"
-                )
-            if z_fast_path != "disabled" and z_fast_path_compatible:
-                logger.info(
-                    "%s Using 'z_flag' fast path for z_flag_homogenized "
-                    "(policy=%s); YAML z_flag rules are bypassed.",
-                    product_name,
-                    z_fast_path,
-                )
-                df["z_flag_homogenized"] = df["z_flag"].map_partitions(
-                    lambda s: s.apply(quality_like_to_flag).astype(DTYPE_FLOAT),
-                    meta=pd.Series(pd.array([], dtype=DTYPE_FLOAT)),
-                )
-            else:
-                logger.info(f"{product_name} Using YAML translation for z_flag_homogenized.")
-                # NEW: assert that all surveys present have YAML coverage for z_flag
-                _assert_yaml_coverage_for_surveys(
-                    df=df,
-                    key="z_flag",
-                    translation_rules_uc=translation_rules_uc,
-                    product_name=product_name,
-                    logger=logger,
-                )
-                df = _translate_column_vectorized(df, key="z_flag",
-                                                  out_col="z_flag_homogenized",
-                                                  out_kind="float")
-                _validate_result_domain(
-                    "z_flag_homogenized", {0.0, 1.0, 2.0, 3.0, 4.0}
-                )
-        else:
-            # User-provided 'z_flag_homogenized' is present. Validate allowed domain {0,1,2,3,4} (NaN allowed).
-            logger.info(f"{product_name} 'z_flag_homogenized' already exists; validating user-provided values.")
-            allowed = {0.0, 1.0, 2.0, 3.0, 4.0}
-
-            vals = dd.to_numeric(df["z_flag_homogenized"], errors="coerce")
-            # NaN is allowed; only non-NaN values outside the allowed set are invalid
-            invalid_mask = (
-                ((~dd.isna(df["z_flag_homogenized"])) & dd.isna(vals))
-                | ((~dd.isna(vals)) & ~vals.isin(list(allowed)))
+    if "z_flag_homogenized" not in df.columns:
+        z_fast_path = _fast_path_policy("z_flag")
+        z_fast_path_compatible = can_use_zflag_as_quality()
+        if z_fast_path == "required" and not z_fast_path_compatible:
+            raise ValueError(
+                f"[{product_name}] z_flag fast_path is 'required', but z_flag "
+                "is not a non-empty probability-like column in [0, 1]"
             )
-            invalid_count, non_null_count = dask.compute(
-                invalid_mask.sum(), vals.count()
+        if z_fast_path != "disabled" and z_fast_path_compatible:
+            logger.info(
+                "%s Using 'z_flag' fast path for z_flag_homogenized "
+                "(policy=%s); YAML z_flag rules are bypassed.",
+                product_name,
+                z_fast_path,
             )
-            validated_non_null_counts["z_flag_homogenized"] = int(non_null_count)
-
-            if invalid_count > 0:
-                examples = df["z_flag_homogenized"].loc[invalid_mask].head(5, compute=True).tolist()
-                raise ValueError(
-                    f"[{product_name}] Invalid values in user-provided 'z_flag_homogenized'. "
-                    f"Allowed set is {sorted(allowed)} (NaN allowed). Examples of invalid values: {examples}"
-                )
-
-            # Cast to Arrow-backed float dtype for consistency
-            df["z_flag_homogenized"] = vals.map_partitions(
-                lambda s: s.astype(DTYPE_FLOAT),
+            df["z_flag_homogenized"] = df["z_flag"].map_partitions(
+                lambda s: s.apply(quality_like_to_flag).astype(DTYPE_FLOAT),
                 meta=pd.Series(pd.array([], dtype=DTYPE_FLOAT)),
             )
+        else:
+            logger.info(f"{product_name} Using YAML translation for z_flag_homogenized.")
+            df = _translate_column_vectorized(df, key="z_flag",
+                                              out_col="z_flag_homogenized",
+                                              out_kind="float",
+                                              strict=needs_z_flag)
+            _validate_result_domain(
+                "z_flag_homogenized", {0.0, 1.0, 2.0, 3.0, 4.0}
+            )
+    else:
+        # User-provided 'z_flag_homogenized' is present. Validate allowed domain {0,1,2,3,4} (NaN allowed).
+        logger.info(f"{product_name} 'z_flag_homogenized' already exists; validating user-provided values.")
+        allowed = {0.0, 1.0, 2.0, 3.0, 4.0}
+
+        vals = dd.to_numeric(df["z_flag_homogenized"], errors="coerce")
+        # NaN is allowed; only non-NaN values outside the allowed set are invalid
+        invalid_mask = (
+            ((~dd.isna(df["z_flag_homogenized"])) & dd.isna(vals))
+            | ((~dd.isna(vals)) & ~vals.isin(list(allowed)))
+        )
+        invalid_count, non_null_count = dask.compute(
+            invalid_mask.sum(), vals.count()
+        )
+        validated_non_null_counts["z_flag_homogenized"] = int(non_null_count)
+
+        if invalid_count > 0:
+            examples = df["z_flag_homogenized"].loc[invalid_mask].head(5, compute=True).tolist()
+            raise ValueError(
+                f"[{product_name}] Invalid values in user-provided 'z_flag_homogenized'. "
+                f"Allowed set is {sorted(allowed)} (NaN allowed). Examples of invalid values: {examples}"
+            )
+
+        # Cast to Arrow-backed float dtype for consistency
+        df["z_flag_homogenized"] = vals.map_partitions(
+            lambda s: s.astype(DTYPE_FLOAT),
+            meta=pd.Series(pd.array([], dtype=DTYPE_FLOAT)),
+        )
 
 
     # instrument_type_homogenized
@@ -858,76 +928,68 @@ def _homogenize(
             logger.warning(f"{product_name} Could not validate 'type' values: {e}")
             return False
 
-    if "instrument_type_homogenized" in tiebreaking_priority:
-        if "instrument_type_homogenized" not in df.columns:
-            instrument_fast_path = _fast_path_policy("instrument_type")
-            instrument_fast_path_compatible = can_use_type_for_instrument()
-            if instrument_fast_path == "required" and not instrument_fast_path_compatible:
-                raise ValueError(
-                    f"[{product_name}] instrument_type fast_path is 'required', "
-                    "but type is not a non-empty column containing only s/g/p"
-                )
-            if instrument_fast_path != "disabled" and instrument_fast_path_compatible:
-                logger.info(
-                    "%s Using 'type' fast path for instrument_type_homogenized "
-                    "(policy=%s); YAML instrument rules are bypassed.",
-                    product_name,
-                    instrument_fast_path,
-                )
-                df["instrument_type_homogenized"] = df["type"].map_partitions(
-                    _normalize_string_series_to_na,
-                    meta=pd.Series(pd.array([], dtype=DTYPE_STR)),
-                ).str.lower()
-                used_type_fastpath = True
-            else:
-                logger.info(f"{product_name} Using YAML translation for instrument_type_homogenized.")
-                # NEW: assert that all surveys present have YAML coverage for instrument_type
-                _assert_yaml_coverage_for_surveys(
-                    df=df,
-                    key="instrument_type",
-                    translation_rules_uc=translation_rules_uc,
-                    product_name=product_name,
-                    logger=logger,
-                )
-                df = _translate_column_vectorized(df, key="instrument_type",
-                                                  out_col="instrument_type_homogenized",
-                                                  out_kind="str")
-                df["instrument_type_homogenized"] = df["instrument_type_homogenized"].map_partitions(
-                    _normalize_string_series_to_na,
-                    meta=pd.Series(pd.array([], dtype=DTYPE_STR)),
-                ).str.lower()
-                _validate_result_domain(
-                    "instrument_type_homogenized",
-                    {"s", "g", "p"},
-                    normalize_string=True,
-                )
-        else:
-            # User-provided 'instrument_type_homogenized' is present. Validate allowed domain {"s","p","g"}.
-            logger.info(f"{product_name} 'instrument_type_homogenized' already exists; validating user-provided values.")
-            allowed = {"s", "p", "g"}
-
-            normed = df["instrument_type_homogenized"].map_partitions(
+    if "instrument_type_homogenized" not in df.columns:
+        instrument_fast_path = _fast_path_policy("instrument_type")
+        instrument_fast_path_compatible = can_use_type_for_instrument()
+        if instrument_fast_path == "required" and not instrument_fast_path_compatible:
+            raise ValueError(
+                f"[{product_name}] instrument_type fast_path is 'required', "
+                "but type is not a non-empty column containing only s/g/p"
+            )
+        if instrument_fast_path != "disabled" and instrument_fast_path_compatible:
+            logger.info(
+                "%s Using 'type' fast path for instrument_type_homogenized "
+                "(policy=%s); YAML instrument rules are bypassed.",
+                product_name,
+                instrument_fast_path,
+            )
+            df["instrument_type_homogenized"] = df["type"].map_partitions(
                 _normalize_string_series_to_na,
                 meta=pd.Series(pd.array([], dtype=DTYPE_STR)),
             ).str.lower()
-
-            invalid_mask = (~dd.isna(normed)) & ~normed.isin(list(allowed))
-            invalid_count, non_null_count = dask.compute(
-                invalid_mask.sum(), normed.count()
+            used_type_fastpath = True
+        else:
+            logger.info(f"{product_name} Using YAML translation for instrument_type_homogenized.")
+            df = _translate_column_vectorized(df, key="instrument_type",
+                                              out_col="instrument_type_homogenized",
+                                              out_kind="str",
+                                              strict=needs_instrument_type)
+            df["instrument_type_homogenized"] = df["instrument_type_homogenized"].map_partitions(
+                _normalize_string_series_to_na,
+                meta=pd.Series(pd.array([], dtype=DTYPE_STR)),
+            ).str.lower()
+            _validate_result_domain(
+                "instrument_type_homogenized",
+                {"s", "g", "p"},
+                normalize_string=True,
             )
-            validated_non_null_counts["instrument_type_homogenized"] = int(
-                non_null_count
+    else:
+        # User-provided 'instrument_type_homogenized' is present. Validate allowed domain {"s","p","g"}.
+        logger.info(f"{product_name} 'instrument_type_homogenized' already exists; validating user-provided values.")
+        allowed = {"s", "p", "g"}
+
+        normed = df["instrument_type_homogenized"].map_partitions(
+            _normalize_string_series_to_na,
+            meta=pd.Series(pd.array([], dtype=DTYPE_STR)),
+        ).str.lower()
+
+        invalid_mask = (~dd.isna(normed)) & ~normed.isin(list(allowed))
+        invalid_count, non_null_count = dask.compute(
+            invalid_mask.sum(), normed.count()
+        )
+        validated_non_null_counts["instrument_type_homogenized"] = int(
+            non_null_count
+        )
+
+        if invalid_count > 0:
+            examples = df["instrument_type_homogenized"].loc[invalid_mask].head(5, compute=True).tolist()
+            raise ValueError(
+                f"[{product_name}] Invalid values in user-provided 'instrument_type_homogenized'. "
+                f"Allowed set is {sorted(allowed)}. Examples of invalid values: {examples}"
             )
 
-            if invalid_count > 0:
-                examples = df["instrument_type_homogenized"].loc[invalid_mask].head(5, compute=True).tolist()
-                raise ValueError(
-                    f"[{product_name}] Invalid values in user-provided 'instrument_type_homogenized'. "
-                    f"Allowed set is {sorted(allowed)}. Examples of invalid values: {examples}"
-                )
-
-            # Keep normalized lower-case values for consistency
-            df["instrument_type_homogenized"] = normed
+        # Keep normalized lower-case values for consistency
+        df["instrument_type_homogenized"] = normed
 
     # object_type_homogenized is an output-schema field, not a ranking field.
     # An entirely-null result is valid for catalogs without classification data.
@@ -972,7 +1034,7 @@ def _homogenize(
         # An all-null quality column is valid: this priority simply cannot
         # distinguish candidates. Later priorities or hard-tie handling apply.
 
-    if "instrument_type_homogenized" in tiebreaking_priority:
+    if instrument_type_is_priority:
         if "instrument_type_homogenized" not in df.columns:
             raise ValueError(
                 f"[{product_name}] 'instrument_type_homogenized' is required by tiebreaking_priority but is missing after homogenization."
@@ -981,10 +1043,10 @@ def _homogenize(
         if non_null is None:
             non_null = dask.compute(df["instrument_type_homogenized"].count())[0]
         if int(non_null) == 0:
-            raise ValueError(
+            logger.warning(
                 f"[{product_name}] All values in 'instrument_type_homogenized' are NaN. "
-                "This column is required (in tiebreaking_priority) and must contain at least one non-NaN value. "
-                "Verify YAML translations / fast-path logic and input columns."
+                "This column is required in tiebreaking_priority; the driver will "
+                "fail if all input catalogs have no valid values."
             )
 
     return df, used_type_fastpath, tiebreaking_priority, instrument_type_priority, translation_rules_uc

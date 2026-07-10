@@ -1,3 +1,4 @@
+import ast
 import logging
 import sys
 import types
@@ -16,7 +17,10 @@ if "tables_io" not in sys.modules:
     sys.modules["tables_io"] = tables_io
 
 from specz import (  # noqa: E402
+    _apply_instrument_type_filter,
+    _apply_object_type_filter,
     _normalize_custom_tiebreaking_priorities,
+    _required_homogenized_columns,
     _requires_z_flag_homogenization,
     validate_combine_configuration,
 )
@@ -28,9 +32,144 @@ from specz_homogenization import (
 LOGGER = logging.getLogger("test.homogenization")
 
 
-def test_translation_schema_rejects_unsafe_expression_with_exact_path():
+def _science_config(**overrides):
     config = {
-        "translation_rules": {
+        "tiebreaking_priority": [],
+        "instrument_type_priority": {"s": 3, "g": 2, "p": 1},
+        "expr_column_schema": {},
+        "translation_rules": {"DEMO": {}},
+    }
+    for key, value in overrides.items():
+        if key == "translation_rules":
+            config["translation_rules"] = value
+        else:
+            config[key] = value
+    return config
+
+
+def test_template_expr_schema_covers_standard_translation_expression_columns():
+    root = Path(__file__).resolve().parents[1]
+    translation = yaml.safe_load(
+        (root / "flags_translation.yaml").read_text(encoding="utf-8")
+    )
+    protected = {
+        "id",
+        "ra",
+        "dec",
+        "z",
+        "z_flag",
+        "z_err",
+        "survey",
+        "instrument_type",
+        "object_type",
+    }
+    callables = {"np", "pd", "math", "float", "int", "str", "len"}
+    variables = set()
+    for ruleset in (translation.get("translation_rules") or {}).values():
+        for rule in (ruleset or {}).values():
+            if not isinstance(rule, dict):
+                continue
+            for condition in rule.get("conditions") or []:
+                expr = condition.get("expr")
+                if not expr:
+                    continue
+                tree = ast.parse(expr, mode="eval")
+                variables.update(
+                    node.id
+                    for node in ast.walk(tree)
+                    if isinstance(node, ast.Name)
+                    and node.id not in protected
+                    and node.id not in callables
+                )
+
+    schema = translation.get("expr_column_schema", {})
+    assert variables - set(schema) == set()
+
+
+def test_object_type_filter_removes_disabled_types(tmp_path):
+    ddf = dd.from_pandas(
+        pd.DataFrame(
+            {
+                "CRD_ID": ["G", "S", "U"],
+                "object_type_homogenized": ["galaxy", "star", pd.NA],
+            }
+        ),
+        npartitions=1,
+    )
+
+    filtered, empty = _apply_object_type_filter(
+        ddf,
+        param_config={
+            "include_unclassified_oth": True,
+            "include_galaxy_oth": True,
+            "include_star_oth": False,
+            "include_agn_oth": True,
+            "include_qso_oth": True,
+            "include_galactic_oth": False,
+        },
+        product_name="demo",
+        temp_dir=str(tmp_path),
+        logger=LOGGER,
+    )
+
+    assert not empty
+    assert filtered.compute()["CRD_ID"].tolist() == ["G", "U"]
+
+
+def test_instrument_type_filter_marks_empty_catalog(tmp_path):
+    ddf = dd.from_pandas(
+        pd.DataFrame(
+            {
+                "CRD_ID": ["P1", "P2"],
+                "instrument_type_homogenized": ["p", pd.NA],
+            }
+        ),
+        npartitions=1,
+    )
+
+    filtered, empty = _apply_instrument_type_filter(
+        ddf,
+        param_config={
+            "include_spectroscopic_ith": True,
+            "include_grism_ith": True,
+            "include_photometric_ith": False,
+            "include_unclassified_ith": False,
+        },
+        product_name="demo",
+        temp_dir=str(tmp_path),
+        logger=LOGGER,
+    )
+
+    assert empty
+    assert filtered.compute().empty
+    assert (tmp_path / "prepared_demo.empty").read_text().startswith(
+        "empty_after_instrument_type_homogenized_filter"
+    )
+
+
+def test_required_homogenized_columns_include_filters_and_priorities():
+    required = _required_homogenized_columns(
+        param_config={
+            "z_flag_homogenized_value_to_cut": 3,
+            "include_photometric_ith": False,
+            "include_star_oth": False,
+        },
+        tiebreaking_priority=["custom_rank", "instrument_type_homogenized"],
+    )
+
+    assert required == {
+        "z_flag_homogenized": ["z_flag_homogenized_value_to_cut"],
+        "instrument_type_homogenized": [
+            "tiebreaking_priority",
+            "instrument_type_filter",
+        ],
+        "object_type_homogenized": ["object_type_filter"],
+    }
+
+
+def test_translation_schema_rejects_unsafe_expression_with_exact_path():
+    config = _science_config(
+        translation_rules={
             "DEMO": {
                 "object_type_translation": {
                     "conditions": [
@@ -39,7 +178,7 @@ def test_translation_schema_rejects_unsafe_expression_with_exact_path():
                 }
             }
         }
-    }
+    )
 
     with pytest.raises(
         ValueError,
@@ -49,20 +188,20 @@ def test_translation_schema_rejects_unsafe_expression_with_exact_path():
 
 
 def test_translation_schema_rejects_private_attributes_and_typos():
-    private = {
-        "translation_rules": {
+    private = _science_config(
+        translation_rules={
             "DEMO": {
                 "object_type_translation": {
                     "conditions": [{"expr": "value.__class__", "value": "star"}]
                 }
             }
         }
-    }
+    )
     with pytest.raises(ValueError, match="private attribute"):
         validate_translation_config(private)
 
-    typo = {
-        "translation_rules": {
+    typo = _science_config(
+        translation_rules={
             "DEMO": {
                 "object_type_translation": {
                     "allow_condition_overlaps": True,
@@ -70,51 +209,60 @@ def test_translation_schema_rejects_private_attributes_and_typos():
                 }
             }
         }
-    }
+    )
     with pytest.raises(ValueError, match="did you mean 'allow_condition_overlap'"):
         validate_translation_config(typo)
 
 
 def test_translation_schema_validates_output_domains_and_condition_shape():
-    invalid_value = {
-        "translation_rules": {
+    invalid_value = _science_config(
+        translation_rules={
             "DEMO": {"z_flag_translation": {"default": 9}}
         }
-    }
+    )
     with pytest.raises(ValueError, match=r"z_flag_translation\.default=9"):
         validate_translation_config(invalid_value)
 
-    invalid_condition = {
-        "translation_rules": {
+    invalid_condition = _science_config(
+        translation_rules={
             "DEMO": {
                 "object_type_translation": {
                     "conditions": [{"expr": "value == 1", "vale": "star"}]
                 }
             }
         }
-    }
+    )
     with pytest.raises(ValueError, match=r"conditions\[0\].*unknown option"):
         validate_translation_config(invalid_condition)
 
 
 def test_translation_schema_validates_diagnostic_controls():
     with pytest.raises(TypeError, match="tie_invariant_diagnostics_enabled"):
-        validate_translation_config({"tie_invariant_diagnostics_enabled": "yes"})
+        validate_translation_config(
+            _science_config(tie_invariant_diagnostics_enabled="yes")
+        )
     with pytest.raises(ValueError, match="tie_invariant_diagnostics_sample_size"):
-        validate_translation_config({"tie_invariant_diagnostics_sample_size": 0})
+        validate_translation_config(
+            _science_config(tie_invariant_diagnostics_sample_size=0)
+        )
     with pytest.raises(ValueError, match="max_representative_radius_arcsec"):
-        validate_translation_config({"max_representative_radius_arcsec": 0})
+        validate_translation_config(_science_config(max_representative_radius_arcsec=0))
 
     validate_translation_config(
-        {
-            "tie_invariant_diagnostics_enabled": True,
-            "tie_invariant_diagnostics_detailed_enabled": False,
-            "tie_invariant_diagnostics_sample_size": 10,
-            "tie_invariant_diagnostics_max_rows": 100,
-            "label_merge_diagnostics_enabled": True,
-            "max_representative_radius_arcsec": 1.0,
-        }
+        _science_config(
+            tie_invariant_diagnostics_enabled=True,
+            tie_invariant_diagnostics_detailed_enabled=False,
+            tie_invariant_diagnostics_sample_size=10,
+            tie_invariant_diagnostics_max_rows=100,
+            label_merge_diagnostics_enabled=True,
+            max_representative_radius_arcsec=1.0,
+        )
     )
+
+
+def test_translation_schema_requires_core_scientific_options():
+    with pytest.raises(ValueError, match="missing required scientific option"):
+        validate_translation_config({})
 
 
 def test_yaml_flag_translation_applies_direct_default_and_condition():
@@ -129,9 +277,9 @@ def test_yaml_flag_translation_applies_direct_default_and_condition():
         npartitions=2,
         sort=False,
     )
-    config = {
-        "tiebreaking_priority": ["z_flag_homogenized"],
-        "translation_rules": {
+    config = _science_config(
+        tiebreaking_priority=["z_flag_homogenized"],
+        translation_rules={
             "DEMO": {
                 "z_flag_translation": {
                     "default": 0,
@@ -140,7 +288,7 @@ def test_yaml_flag_translation_applies_direct_default_and_condition():
                 }
             }
         },
-    }
+    )
 
     result, *_ = _homogenize(frame, config, "demo", LOGGER, type_cast_ok=False)
 
@@ -153,14 +301,14 @@ def test_z_flag_fast_path_policy_can_be_disabled_or_required():
         npartitions=1,
         sort=False,
     )
-    disabled = {
-        "tiebreaking_priority": ["z_flag_homogenized"],
-        "translation_rules": {
+    disabled = _science_config(
+        tiebreaking_priority=["z_flag_homogenized"],
+        translation_rules={
             "DEMO": {
                 "z_flag_translation": {"fast_path": "disabled", "default": 3}
             }
         },
-    }
+    )
     result, *_ = _homogenize(
         frame, disabled, "demo", LOGGER, type_cast_ok=False
     )
@@ -171,14 +319,14 @@ def test_z_flag_fast_path_policy_can_be_disabled_or_required():
         npartitions=1,
         sort=False,
     )
-    required = {
-        "tiebreaking_priority": ["z_flag_homogenized"],
-        "translation_rules": {
+    required = _science_config(
+        tiebreaking_priority=["z_flag_homogenized"],
+        translation_rules={
             "DEMO": {
                 "z_flag_translation": {"fast_path": "required", "default": 3}
             }
         },
-    }
+    )
     with pytest.raises(ValueError, match="fast_path is 'required'"):
         _homogenize(incompatible, required, "demo", LOGGER, type_cast_ok=False)
 
@@ -191,9 +339,9 @@ def test_instrument_fast_path_can_be_disabled():
         npartitions=1,
         sort=False,
     )
-    config = {
-        "tiebreaking_priority": ["instrument_type_homogenized"],
-        "translation_rules": {
+    config = _science_config(
+        tiebreaking_priority=["instrument_type_homogenized"],
+        translation_rules={
             "DEMO": {
                 "instrument_type_translation": {
                     "fast_path": "disabled",
@@ -201,7 +349,7 @@ def test_instrument_fast_path_can_be_disabled():
                 }
             }
         },
-    }
+    )
     result, *_ = _homogenize(frame, config, "demo", LOGGER, type_cast_ok=True)
     assert result.compute()["instrument_type_homogenized"].tolist() == ["p", "p"]
 
@@ -214,8 +362,8 @@ def test_optional_source_absence_keeps_condition_fallback():
         npartitions=1,
         sort=False,
     )
-    config = {
-        "translation_rules": {
+    config = _science_config(
+        translation_rules={
             "DEMO": {
                 "object_type_translation": {
                     "source": "missing_optional_column",
@@ -226,7 +374,7 @@ def test_optional_source_absence_keeps_condition_fallback():
                 }
             }
         }
-    }
+    )
     result, *_ = _homogenize(frame, config, "demo", LOGGER, type_cast_ok=False)
     assert result.compute()["object_type_homogenized"].fillna("missing").tolist() == [
         "galaxy",
@@ -246,8 +394,8 @@ def test_later_condition_wins_and_conflicting_overlap_warns(caplog):
         npartitions=1,
         sort=False,
     )
-    config = {
-        "translation_rules": {
+    config = _science_config(
+        translation_rules={
             "DEMO": {
                 "object_type_translation": {
                     "conditions": [
@@ -258,7 +406,7 @@ def test_later_condition_wins_and_conflicting_overlap_warns(caplog):
                 }
             }
         }
-    }
+    )
 
     with caplog.at_level(logging.WARNING, logger=LOGGER.name):
         result, *_ = _homogenize(
@@ -277,8 +425,8 @@ def test_declared_condition_overlap_does_not_warn(caplog):
         npartitions=1,
         sort=False,
     )
-    config = {
-        "translation_rules": {
+    config = _science_config(
+        translation_rules={
             "DEMO": {
                 "object_type_translation": {
                     "allow_condition_overlap": True,
@@ -290,7 +438,7 @@ def test_declared_condition_overlap_does_not_warn(caplog):
                 }
             }
         }
-    }
+    )
 
     with caplog.at_level(logging.WARNING, logger=LOGGER.name):
         result, *_ = _homogenize(
@@ -339,7 +487,9 @@ def test_object_type_is_always_present_and_may_be_entirely_null():
         sort=False,
     )
 
-    result, *_ = _homogenize(frame, {}, "demo", LOGGER, type_cast_ok=False)
+    result, *_ = _homogenize(
+        frame, _science_config(), "demo", LOGGER, type_cast_ok=False
+    )
 
     computed = result.compute()
     assert "object_type_homogenized" in computed
@@ -358,8 +508,8 @@ def test_object_type_translation_uses_canonical_renamed_z_flag():
         npartitions=1,
         sort=False,
     )
-    config = {
-        "translation_rules": {
+    config = _science_config(
+        translation_rules={
             "DEMO": {
                 "object_type_translation": {
                     "conditions": [
@@ -369,7 +519,7 @@ def test_object_type_translation_uses_canonical_renamed_z_flag():
                 }
             }
         }
-    }
+    )
 
     result, *_ = _homogenize(frame, config, "demo", LOGGER, type_cast_ok=False)
 
@@ -386,7 +536,9 @@ def test_object_type_rejects_values_outside_domain():
         npartitions=1,
         sort=False,
     )
-    result, *_ = _homogenize(valid, {}, "demo", LOGGER, type_cast_ok=False)
+    result, *_ = _homogenize(
+        valid, _science_config(), "demo", LOGGER, type_cast_ok=False
+    )
     assert result.compute()["object_type_homogenized"].tolist() == [
         "star",
         "agn",
@@ -399,7 +551,7 @@ def test_object_type_rejects_values_outside_domain():
         sort=False,
     )
     with pytest.raises(ValueError, match="Invalid values"):
-        _homogenize(invalid, {}, "demo", LOGGER, type_cast_ok=False)
+        _homogenize(invalid, _science_config(), "demo", LOGGER, type_cast_ok=False)
 
 
 def test_catalog_object_type_rules_use_renamed_flags_and_conservative_defaults():
@@ -813,21 +965,26 @@ def test_euclid_optional_source_is_safe_before_column_arrives():
     ]
 
 
-def test_homogenization_requires_translation_for_every_survey():
+def test_required_homogenized_column_allows_missing_survey_coverage():
     frame = dd.from_pandas(
         pd.DataFrame({"survey": ["known", "missing"], "z_flag": [1, 1]}),
         npartitions=1,
         sort=False,
     )
-    config = {
-        "tiebreaking_priority": ["z_flag_homogenized"],
-        "translation_rules": {
+    config = _science_config(
+        tiebreaking_priority=["z_flag_homogenized"],
+        translation_rules={
             "KNOWN": {"z_flag_translation": {"default": 1}}
         },
-    }
+    )
 
-    with pytest.raises(ValueError, match="MISSING"):
-        _homogenize(frame, config, "demo", LOGGER, type_cast_ok=False)
+    result, *_ = _homogenize(frame, config, "demo", LOGGER, type_cast_ok=False)
+
+    computed = result.compute()
+    assert computed["z_flag_homogenized"].astype(float).fillna(-1).tolist() == [
+        1.0,
+        -1.0,
+    ]
 
 
 def test_user_homogenized_values_are_normalized_and_validated():
@@ -836,7 +993,9 @@ def test_user_homogenized_values_are_normalized_and_validated():
         npartitions=1,
         sort=False,
     )
-    config = {"tiebreaking_priority": ["instrument_type_homogenized"]}
+    config = _science_config(
+        tiebreaking_priority=["instrument_type_homogenized"]
+    )
 
     result, *_ = _homogenize(valid, config, "demo", LOGGER, type_cast_ok=False)
     assert result.compute()["instrument_type_homogenized"].tolist() == ["s", "g", "p"]
@@ -856,7 +1015,7 @@ def test_user_homogenized_flag_rejects_values_outside_domain():
         npartitions=1,
         sort=False,
     )
-    config = {"tiebreaking_priority": ["z_flag_homogenized"]}
+    config = _science_config(tiebreaking_priority=["z_flag_homogenized"])
 
     with pytest.raises(ValueError, match="Invalid values"):
         _homogenize(frame, config, "demo", LOGGER, type_cast_ok=False)
@@ -873,7 +1032,7 @@ def test_quality_flag_rejects_legacy_six_and_accepts_all_null():
         npartitions=1,
         sort=False,
     )
-    config = {"tiebreaking_priority": ["custom_score"]}
+    config = _science_config(tiebreaking_priority=["custom_score"])
 
     with pytest.raises(ValueError, match="Invalid values"):
         _homogenize(
@@ -892,7 +1051,7 @@ def test_quality_flag_rejects_legacy_six_and_accepts_all_null():
     )
     result, *_ = _homogenize(
         all_null,
-        {"tiebreaking_priority": ["z_flag_homogenized"]},
+        _science_config(tiebreaking_priority=["z_flag_homogenized"]),
         "demo",
         LOGGER,
         type_cast_ok=False,

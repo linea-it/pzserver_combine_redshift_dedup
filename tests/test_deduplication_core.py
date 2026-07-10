@@ -80,7 +80,7 @@ def test_full_dedup_emits_two_and_three_way_hard_ties():
     assert three_way["group_id"].nunique() == 1
 
 
-def test_excluded_stars_are_isolated_from_deduplication():
+def test_stars_participate_after_preparation_filters_have_run():
     result = _deduplicate(
         [
             _row("A", "S", flag=4),
@@ -89,8 +89,8 @@ def test_excluded_stars_are_isolated_from_deduplication():
         ]
     )
 
-    assert result["tie_result"].astype(int).to_dict() == {"A": 1, "S": 3, "B": 1}
-    assert result["group_id"].nunique() == 3
+    assert result["tie_result"].astype(int).to_dict() == {"A": 1, "S": 0, "B": 0}
+    assert result["group_id"].nunique() == 1
 
 
 def test_connected_components_are_transitive():
@@ -141,7 +141,7 @@ def test_singleton_and_dangling_neighbor_remain_winners():
     assert result["group_id"].nunique() == 2
 
 
-def test_catalog_containing_only_stars_keeps_each_star_isolated():
+def test_catalog_containing_only_stars_does_not_emit_tie_result_three():
     result = _deduplicate(
         [
             _row("S1", "S2", flag=None, object_type="star"),
@@ -149,8 +149,8 @@ def test_catalog_containing_only_stars_keeps_each_star_isolated():
         ]
     )
 
-    assert result["tie_result"].astype(int).to_dict() == {"S1": 3, "S2": 3}
-    assert result["group_id"].nunique() == 2
+    assert result["tie_result"].astype(int).to_dict() == {"S1": 1, "S2": 0}
+    assert result["group_id"].nunique() == 1
 
 
 def test_included_star_without_quality_uses_internal_half_point_score():
@@ -162,7 +162,6 @@ def test_included_star_without_quality_uses_internal_half_point_score():
             ]
         ),
         tiebreaking_priority=["z_flag_homogenized"],
-        object_type_inclusion={"include_star": True},
         delta_z_threshold=0,
     ).set_index("CRD_ID")
 
@@ -179,7 +178,6 @@ def test_internal_half_point_loses_to_real_quality_one():
             ]
         ),
         tiebreaking_priority=["z_flag_homogenized"],
-        object_type_inclusion={"include_star": True},
         delta_z_threshold=0,
     ).set_index("CRD_ID")
 
@@ -187,23 +185,23 @@ def test_internal_half_point_loses_to_real_quality_one():
 
 
 def test_object_type_inclusion_requires_booleans_and_one_enabled_type():
-    with pytest.raises(TypeError, match=r"param\.include_star must be a boolean"):
-        validate_object_type_inclusion({"include_star": "yes"})
+    with pytest.raises(TypeError, match=r"param\.include_star_oth must be a boolean"):
+        validate_object_type_inclusion({"include_star_oth": "yes"})
     with pytest.raises(ValueError, match="At least one"):
         validate_object_type_inclusion(
             {
-                "include_unclassified": False,
-                "include_galaxy": False,
-                "include_star": False,
-                "include_agn": False,
-                "include_qso": False,
-                "include_galactic": False,
+                "include_unclassified_oth": False,
+                "include_galaxy_oth": False,
+                "include_star_oth": False,
+                "include_agn_oth": False,
+                "include_qso_oth": False,
+                "include_galactic_oth": False,
             }
         )
 
 
 @pytest.mark.parametrize("object_type", ["star", "galactic"])
-def test_default_object_type_policy_excludes_stellar_and_galactic(object_type):
+def test_default_object_type_policy_is_no_longer_a_dedup_exclusion(object_type):
     result = _deduplicate(
         [
             _row("X", "G", flag=None, object_type=object_type),
@@ -211,12 +209,12 @@ def test_default_object_type_policy_excludes_stellar_and_galactic(object_type):
         ]
     )
 
-    assert result.loc["X", "tie_result"] == 3
+    assert result.loc["X", "tie_result"] == 0
     assert result.loc["G", "tie_result"] == 1
-    assert result["group_id"].nunique() == 2
+    assert result["group_id"].nunique() == 1
 
 
-def test_unclassified_rows_can_be_excluded_explicitly():
+def test_object_type_inclusion_is_validated_but_not_used_as_dedup_filter():
     result = deduplicate_pandas(
         pd.DataFrame(
             [
@@ -225,12 +223,12 @@ def test_unclassified_rows_can_be_excluded_explicitly():
             ]
         ),
         tiebreaking_priority=["z_flag_homogenized"],
-        object_type_inclusion={"include_unclassified": False},
+        object_type_inclusion={"include_unclassified_oth": False},
         group_col="group_id",
     ).set_index("CRD_ID")
 
-    assert result.loc["U", "tie_result"] == 3
-    assert result.loc["G", "tie_result"] == 1
+    assert result["tie_result"].astype(int).to_dict() == {"U": 2, "G": 2}
+    assert result["group_id"].nunique() == 1
 
 
 def _chain_rows():
