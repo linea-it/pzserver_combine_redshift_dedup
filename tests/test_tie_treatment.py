@@ -16,7 +16,7 @@ from deduplication import (  # noqa: E402
 def _results():
     return pd.DataFrame(
         {
-            "CRD_ID": ["winner", "loser", "tie-a", "tie-b", "star"],
+            "CRD_ID": ["winner", "loser", "tie-a", "tie-b", "excluded"],
             "group_id": [1, 1, 2, 2, 3],
             "tie_result": [1, 0, 2, 2, 3],
         }
@@ -35,7 +35,7 @@ def test_final_tie_filtering_policies(option, expected):
     result, effective, resolved = filter_pandas_by_tie_treatment(_results(), option)
 
     assert set(result["CRD_ID"]) == expected
-    assert "star" not in set(result["CRD_ID"])
+    assert "excluded" not in set(result["CRD_ID"])
     assert effective == (option if option != "invalid" else "remove_all")
     assert resolved == 0
 
@@ -48,7 +48,7 @@ def test_draw_one_keeps_exactly_one_candidate_per_hard_tie():
     assert effective == "draw_one"
     assert resolved == 1
     assert set(result["CRD_ID"]) == {"winner", "tie-a"}
-    assert "star" not in set(result["CRD_ID"])
+    assert "excluded" not in set(result["CRD_ID"])
 
 
 def test_draw_one_without_group_id_falls_back_to_remove_all():

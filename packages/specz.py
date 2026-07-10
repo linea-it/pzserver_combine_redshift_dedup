@@ -1340,6 +1340,7 @@ def _validate_and_rename(
         "z": DTYPE_FLOAT,
         "z_flag": DTYPE_FLOAT,
         "z_err": DTYPE_FLOAT,
+        "object_type": DTYPE_STR,
     }
     for col, pd_dtype in base_schema.items():
         if col not in df.columns:
@@ -1626,6 +1627,7 @@ def _normalize_extra_columns_config(value: Any) -> dict[str, dict[str, str]]:
         "group_id",
         "z_flag_homogenized",
         "instrument_type_homogenized",
+        "object_type_homogenized",
         "is_in_DP1_fields",
         "is_in_rubin_footprint",
     }
@@ -1635,6 +1637,45 @@ def _normalize_extra_columns_config(value: Any) -> dict[str, dict[str, str]]:
             f"param.extra_columns cannot redefine pipeline columns: {conflicts}"
         )
     return normalized
+
+
+def build_runtime_schema_hints(
+    param_config: dict, translation_config: dict
+) -> dict[str, str]:
+    """Build schema hints that must survive every crossmatch round.
+
+    Args:
+        param_config: Pipeline ``param`` configuration.
+        translation_config: Validated flags translation configuration.
+
+    Returns:
+        Mapping of output column names to ``str``, ``float``, ``int`` or ``bool``.
+    """
+    hints: dict[str, str] = {}
+    if bool(translation_config.get("save_expr_columns", False)):
+        hints.update(
+            _normalize_schema_hints(translation_config.get("expr_column_schema"))
+        )
+
+    extra_columns = _normalize_extra_columns_config(param_config.get("extra_columns"))
+    hints.update({output: spec["type"] for output, spec in extra_columns.items()})
+
+    if _as_bool_config(param_config.get("insert_DP1_footprint_flag"), default=False):
+        hints["is_in_DP1_fields"] = "int"
+    if _as_bool_config(
+        param_config.get("insert_rubin_footprint_flag"), default=False
+    ):
+        hints["is_in_rubin_footprint"] = "int"
+
+    standard_priorities = {
+        "z_flag_homogenized",
+        "instrument_type_homogenized",
+    }
+    for column in translation_config.get("tiebreaking_priority", []) or []:
+        name = str(column).strip()
+        if name and name not in standard_priorities:
+            hints[name] = "float"
+    return hints
 
 
 def _copy_extra_columns_from_sources(
@@ -2180,7 +2221,10 @@ def _select_output_columns(
         "group_id",
     ]
 
-    # Optional homogenized fields.
+    # Homogenized object type is part of every output, including all-null catalogs.
+    final_cols.append("object_type_homogenized")
+
+    # Optional homogenized fields used by the legacy quality/ranking logic.
     if "z_flag_homogenized" in df.columns:
         final_cols.append("z_flag_homogenized")
     if "instrument_type_homogenized" in df.columns:
@@ -2344,7 +2388,7 @@ def _requires_z_flag_homogenization(combine_mode: str, cut_value: object) -> boo
         numeric_cut = float(cut_value)
     except (TypeError, ValueError):
         return False
-    return numeric_cut in {1.0, 2.0, 3.0, 4.0, 5.0, 6.0}
+    return numeric_cut in {1.0, 2.0, 3.0, 4.0}
 
 
 def validate_combine_configuration(
@@ -2381,20 +2425,6 @@ def validate_combine_configuration(
             f"tiebreaking_priority must be non-empty for {normalized_mode}"
         )
 
-    try:
-        numeric_cut = float(cut_value) if cut_value is not None else None
-    except (TypeError, ValueError):
-        numeric_cut = None
-    if (
-        normalized_mode == "concatenate_and_remove_duplicates"
-        and numeric_cut == 6.0
-        and logger is not None
-    ):
-        logger.warning(
-            "z_flag_homogenized_value_to_cut=6 retains only stars, while "
-            "concatenate_and_remove_duplicates excludes tie_result=3; the final "
-            "catalog will normally be empty."
-        )
     return normalized_mode, priorities
 
 
@@ -2561,10 +2591,10 @@ def prepare_catalog(
                 # Zero is the explicit no-cut sentinel. It is summarized once
                 # by the driver instead of repeated for every input catalog.
                 pass
-            elif cut_val not in {1.0, 2.0, 3.0, 4.0, 5.0, 6.0}:
+            elif cut_val not in {1.0, 2.0, 3.0, 4.0}:
                 lg.warning(
                     "Invalid z_flag_homogenized_value_to_cut=%s; use 0 to disable "
-                    "the cut or one of 1, 2, 3, 4, 5, 6. Skipping cut.",
+                    "the cut or one of 1, 2, 3, 4. Skipping cut.",
                     z_flag_homogenized_value_to_cut,
                 )
             else:
@@ -2646,7 +2676,7 @@ def prepare_catalog(
         param_config.get("insert_DP1_footprint_flag", False), default=False
     )
     insert_rubin = _as_bool_config(
-        param_config.get("insert_rubin_footprint_flag", True), default=True
+        param_config.get("insert_rubin_footprint_flag", False), default=False
     )
 
     if insert_dp1:

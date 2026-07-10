@@ -30,7 +30,6 @@ from typing import Any
 import dask
 import dask.dataframe as dd
 import lsdb
-import numpy as np
 import pandas as pd
 
 # -----------------------
@@ -42,17 +41,24 @@ from dask.distributed import Client, as_completed, performance_report
 from dask.distributed import wait as dask_wait
 from deduplication import (
     REPRESENTATIVE_RADIUS_DIAGNOSTIC_COLUMN,
+    build_global_tie_invariant_diagnostics,
     count_global_edge_group_mismatches,
     count_global_tie_invariant_violations,
     filter_dask_by_tie_treatment,
     filter_pandas_by_tie_treatment,
     run_dedup_with_lsdb_map_partitions,
+    validate_object_type_inclusion,
     validate_spatial_safety,
 )
 from executor import get_executor
 from product_handle import save_dataframe
 from resource_usage import ResourceUsageMonitor
-from specz import prepare_catalog, validate_combine_configuration
+from specz import (
+    build_runtime_schema_hints,
+    prepare_catalog,
+    validate_combine_configuration,
+)
+from specz_homogenization import validate_translation_config
 from utils import (
     configure_exception_hook,
     configure_warning_handler,
@@ -725,6 +731,7 @@ def main(
 
     try:
         translation_config = load_yml(path_to_translation_file)
+        validate_translation_config(translation_config)
     except Exception as e:
         log_init.error("Failed to parse flags_translation_file: %s", e, exc_info=True)
         raise
@@ -737,15 +744,28 @@ def main(
     margin_warning_fraction = float(
         translation_config.get("margin_warning_fraction", 0.8)
     )
+    configured_max_radius = translation_config.get(
+        "max_representative_radius_arcsec", None
+    )
+    max_representative_radius_arcsec = (
+        None if configured_max_radius is None else float(configured_max_radius)
+    )
     validate_spatial_safety(
         crossmatch_radius_arcsec,
         margin_threshold_arcsec,
         margin_warning_fraction,
+        max_representative_radius_arcsec,
     )
     log_init.info(
-        'Spatial safety: crossmatch_radius=%.3f" margin_threshold=%.3f" ratio=%.3f',
+        'Spatial safety: crossmatch_radius=%.3f" margin_threshold=%.3f" '
+        "max_representative_radius=%s ratio=%.3f",
         crossmatch_radius_arcsec,
         margin_threshold_arcsec,
+        (
+            "disabled"
+            if max_representative_radius_arcsec is None
+            else f'{max_representative_radius_arcsec:.3f}"'
+        ),
         crossmatch_radius_arcsec / margin_threshold_arcsec,
     )
     # Minimal summary of loaded translation (no heavy dumping)
@@ -780,6 +800,36 @@ def main(
         log_init,
     )
     translation_config["tiebreaking_priority"] = validated_priorities
+    object_type_inclusion = validate_object_type_inclusion(
+        {
+            key: param_config[key]
+            for key in (
+                "include_unclassified",
+                "include_galaxy",
+                "include_star",
+                "include_agn",
+                "include_qso",
+                "include_galactic",
+            )
+            if key in param_config
+        }
+    )
+    log_init.info("Object-type graph inclusion: %s", object_type_inclusion)
+    if (
+        cut_value_numeric in {1.0, 2.0, 3.0, 4.0}
+        and (
+            object_type_inclusion["include_star"]
+            or object_type_inclusion["include_galactic"]
+        )
+    ):
+        log_init.warning(
+            "An active z_flag_homogenized cut removes star/galactic rows whose "
+            "quality is null before graph inclusion. Their internal 0.5 ranking "
+            "fallback applies only to rows that survive this cut."
+        )
+    translation_config["runtime_schema_hints"] = build_runtime_schema_hints(
+        param_config, translation_config
+    )
     completed = read_completed_steps(os.path.join(temp_dir, "process_resume.log"))
 
     # --- Dask cluster/client ---
@@ -1634,7 +1684,7 @@ def main(
 
             #######################################################################
             # Diagnostics / outputs
-            # - edge_log: enable edge diagnostics (warn on star-neighbor exclusions)
+            # - edge_log: enable diagnostics for object types excluded from the graph
             # - group_col: set to None to disable exporting group labels
             edge_log = bool(
                 translation_config.get("dedup_edge_diagnostics_enabled", False)
@@ -1691,6 +1741,8 @@ def main(
                         margin_threshold_arcsec=margin_threshold_arcsec,
                         margin_warning_fraction=margin_warning_fraction,
                         representative_radius_diagnostics_enabled=representative_radius_diagnostics_enabled,
+                        object_type_inclusion=object_type_inclusion,
+                        max_representative_radius_arcsec=max_representative_radius_arcsec,
                     )
                     log_dedup.info(
                         "Labels graph built (lazy). Persisting compact labels for "
@@ -1779,6 +1831,16 @@ def main(
 
                 # Coalesce tie_result in Dask (still lazy)
                 try:
+                    label_merge_diagnostics = bool(
+                        translation_config.get(
+                            "label_merge_diagnostics_enabled", True
+                        )
+                    )
+                    missing_new_labels_lazy = (
+                        merged["tie_result_new"].isna().sum()
+                        if label_merge_diagnostics
+                        else None
+                    )
                     if "tie_result" in merged.columns:
                         merged["tie_result"] = merged["tie_result_new"].fillna(
                             merged["tie_result"]
@@ -1787,15 +1849,7 @@ def main(
                         merged = merged.assign(tie_result=merged["tie_result_new"])
                     if "tie_result_new" in merged.columns:
                         merged = merged.drop(columns=["tie_result_new"])
-                    if "z_flag_homogenized" in merged.columns:
-                        star_mask = dd.to_numeric(
-                            merged["z_flag_homogenized"], errors="coerce"
-                        ).eq(6.0)
-                        merged["tie_result"] = (
-                            merged["tie_result"]
-                            .mask(star_mask, np.int8(3))
-                            .astype("Int8")
-                        )
+                    merged["tie_result"] = merged["tie_result"].astype("Int8")
 
                     validate_edges = bool(
                         translation_config.get("validate_global_graph_edges", False)
@@ -1803,7 +1857,23 @@ def main(
                     validate_ties = bool(
                         translation_config.get("validate_global_tie_invariants", False)
                     )
+                    tie_diagnostics = bool(
+                        translation_config.get(
+                            "tie_invariant_diagnostics_enabled", True
+                        )
+                    )
+                    detailed_tie_diagnostics = bool(
+                        translation_config.get(
+                            "tie_invariant_diagnostics_detailed_enabled", False
+                        )
+                    )
+                    invalid_stats_lazy = None
                     validation_tasks = []
+                    representative_limit_arcsec = (
+                        max_representative_radius_arcsec
+                        if max_representative_radius_arcsec is not None
+                        else crossmatch_radius_arcsec
+                    )
                     if representative_radius_diagnostics_enabled:
                         representative_radius = labels_dd[
                             REPRESENTATIVE_RADIUS_DIAGNOSTIC_COLUMN
@@ -1813,10 +1883,10 @@ def main(
                             [
                                 representative_radius_valid.count(),
                                 representative_radius_valid.gt(
-                                    crossmatch_radius_arcsec
+                                    representative_limit_arcsec
                                 ).sum(),
                                 representative_radius_valid.gt(
-                                    2.0 * crossmatch_radius_arcsec
+                                    2.0 * representative_limit_arcsec
                                 ).sum(),
                                 representative_radius_valid.gt(
                                     margin_threshold_arcsec
@@ -1829,13 +1899,31 @@ def main(
                             count_global_edge_group_mismatches(merged)
                         )
                         validation_tasks.extend([mismatch_lazy, dangling_lazy])
+                    if label_merge_diagnostics:
+                        validation_tasks.append(missing_new_labels_lazy)
                     if validate_ties:
-                        invalid_groups_lazy = count_global_tie_invariant_violations(
-                            labels_dd,
-                            z_flag_col=None,
-                        )
-
-                        validation_tasks.append(invalid_groups_lazy)
+                        if tie_diagnostics or detailed_tie_diagnostics:
+                            invalid_stats_lazy, missing_group_rows_lazy = (
+                                build_global_tie_invariant_diagnostics(labels_dd)
+                            )
+                            validation_tasks.extend(
+                                [
+                                    invalid_stats_lazy.map_partitions(len).sum()
+                                    + missing_group_rows_lazy,
+                                    missing_group_rows_lazy,
+                                    invalid_stats_lazy["multiple_winners"].sum(),
+                                    invalid_stats_lazy["no_survivor"].sum(),
+                                    invalid_stats_lazy[
+                                        "mixed_winner_hard_tie"
+                                    ].sum(),
+                                    invalid_stats_lazy["single_hard_tie"].sum(),
+                                    invalid_stats_lazy["invalid_tie_values"].sum(),
+                                ]
+                            )
+                        else:
+                            validation_tasks.append(
+                                count_global_tie_invariant_violations(labels_dd)
+                            )
 
                     validation_results = iter(dask.compute(*validation_tasks))
                     if representative_radius_diagnostics_enabled:
@@ -1857,7 +1945,7 @@ def main(
                             "fraction_exceeding=%.6f exceeding_twice_radius=%d "
                             "exceeding_margin=%d max_radius=%.4farcsec",
                             representative_components,
-                            crossmatch_radius_arcsec,
+                            representative_limit_arcsec,
                             representative_exceed_radius,
                             representative_fraction,
                             representative_exceed_twice_radius,
@@ -1869,16 +1957,23 @@ def main(
                         dangling_count = int(next(validation_results))
                         log_dedup.info(
                             "Global graph validation: cross_group_edges=%d "
-                            "dangling_nonstar_edges=%d",
+                            "dangling_participating_edges=%d",
                             mismatch_count,
                             dangling_count,
                         )
                         if mismatch_count:
-                            raise RuntimeError(
-                                "Partition-local deduplication produced "
-                                f"{mismatch_count} non-star edges whose endpoints "
-                                "have different canonical group_id values. Increase "
-                                "margin_threshold_arcsec or inspect long components."
+                            if max_representative_radius_arcsec is None:
+                                raise RuntimeError(
+                                    "Partition-local deduplication produced "
+                                    f"{mismatch_count} participating edges whose "
+                                    "endpoints have different canonical group_id "
+                                    "values. Increase margin_threshold_arcsec or "
+                                    "inspect long components."
+                                )
+                            log_dedup.info(
+                                "Cross-group edges are expected with representative-"
+                                "radius truncation enabled (radius=%.3f arcsec).",
+                                max_representative_radius_arcsec,
                             )
                         if dangling_count:
                             raise RuntimeError(
@@ -1889,12 +1984,81 @@ def main(
                                 "catalog concatenation."
                             )
 
+                    if label_merge_diagnostics:
+                        missing_new_labels = int(next(validation_results))
+                        log_dedup.info(
+                            "Label merge diagnostics: rows_without_new_label=%d",
+                            missing_new_labels,
+                        )
+
                     if validate_ties:
                         invalid_groups = int(next(validation_results))
+                        if tie_diagnostics or detailed_tie_diagnostics:
+                            missing_group_rows = int(next(validation_results))
+                            multiple_winners = int(next(validation_results))
+                            no_survivor = int(next(validation_results))
+                            mixed_winner_hard_tie = int(next(validation_results))
+                            single_hard_tie = int(next(validation_results))
+                            invalid_tie_values = int(next(validation_results))
+                            log_dedup.info(
+                                "Global tie invariant diagnostics: "
+                                "missing_group_rows=%d multiple_winners=%d "
+                                "no_survivor=%d mixed_winner_hard_tie=%d "
+                                "single_hard_tie=%d invalid_tie_values=%d",
+                                missing_group_rows,
+                                multiple_winners,
+                                no_survivor,
+                                mixed_winner_hard_tie,
+                                single_hard_tie,
+                                invalid_tie_values,
+                            )
                         log_dedup.info(
                             "Global tie invariant validation: invalid_groups=%d",
                             invalid_groups,
                         )
+                        if (
+                            invalid_groups
+                            and detailed_tie_diagnostics
+                            and invalid_stats_lazy is not None
+                        ):
+                            sample_size = int(
+                                translation_config.get(
+                                    "tie_invariant_diagnostics_sample_size", 10
+                                )
+                            )
+                            max_rows = int(
+                                translation_config.get(
+                                    "tie_invariant_diagnostics_max_rows", 100
+                                )
+                            )
+                            invalid_sample = invalid_stats_lazy.reset_index().head(
+                                sample_size, npartitions=-1
+                            )
+                            log_dedup.error(
+                                "Invalid tie group summary sample: %s",
+                                invalid_sample.to_dict("records"),
+                            )
+                            sample_group_ids = invalid_sample["group_id"].tolist()
+                            if sample_group_ids:
+                                member_columns = [
+                                    column
+                                    for column in (
+                                        "group_id",
+                                        "CRD_ID",
+                                        "tie_result",
+                                        "z_flag_homogenized",
+                                        "object_type_homogenized",
+                                    )
+                                    if column in labels_dd.columns
+                                ]
+                                member_sample = labels_dd.loc[
+                                    labels_dd["group_id"].isin(sample_group_ids),
+                                    member_columns,
+                                ].head(max_rows, npartitions=-1)
+                                log_dedup.error(
+                                    "Invalid tie group member sample: %s",
+                                    member_sample.to_dict("records"),
+                                )
                         if invalid_groups:
                             raise RuntimeError(
                                 f"Global tie-result invariants failed for "

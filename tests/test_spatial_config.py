@@ -9,7 +9,13 @@ from deduplication import validate_spatial_safety  # noqa: E402
 
 
 def test_spatial_safety_accepts_radius_smaller_than_margin():
-    validate_spatial_safety(0.5, 5.0, 0.8)
+    validate_spatial_safety(0.5, 5.0, 0.8, 1.0)
+
+
+@pytest.mark.parametrize("max_radius", [0.4, 5.0, 6.0])
+def test_spatial_safety_rejects_unsafe_representative_radius(max_radius):
+    with pytest.raises(ValueError, match="max_representative_radius_arcsec"):
+        validate_spatial_safety(0.5, 5.0, 0.8, max_radius)
 
 
 @pytest.mark.parametrize(

@@ -72,6 +72,7 @@ def test_column_mapping_ignores_null_mapping_and_creates_base_schema():
         "z",
         "z_flag",
         "z_err",
+        "object_type",
         "source",
     }
     assert expected.issubset(result.columns)
