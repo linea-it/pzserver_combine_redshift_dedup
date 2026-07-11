@@ -2,7 +2,7 @@ import os
 from pathlib import Path
 from typing import Any
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 MAINDIR = Path(__file__).parent
 DATASETS_DIR = os.getenv("DATASETS_DIR", "/datasets")
@@ -99,16 +99,24 @@ class Inputs(BaseModel):
 
 
 class Param(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     class Run(BaseModel):
+        model_config = ConfigDict(extra="forbid")
+
         combine_type: str = "concatenate"
         tie_treatment_option: str = "remove_all"
         flags_translation_file: str = str(Path(MAINDIR, "flags_translation.yaml"))
 
     class Preparation(BaseModel):
+        model_config = ConfigDict(extra="forbid")
+
         repartition_prepared_catalogs: bool = False
         prepared_partition_size: str = "256MB"
 
     class Diagnostics(BaseModel):
+        model_config = ConfigDict(extra="forbid")
+
         tie_invariant_diagnostics_enabled: bool = True
         tie_invariant_diagnostics_detailed_enabled: bool = False
         tie_invariant_diagnostics_sample_size: int = 10
@@ -130,7 +138,11 @@ class Param(BaseModel):
             return self
 
     class Filters(BaseModel):
+        model_config = ConfigDict(extra="forbid")
+
         class InstrumentTypeHomogenized(BaseModel):
+            model_config = ConfigDict(extra="forbid")
+
             include_spectroscopic: bool = True
             include_grism: bool = True
             include_photometric: bool = True
@@ -146,6 +158,8 @@ class Param(BaseModel):
                 return self
 
         class ObjectTypeHomogenized(BaseModel):
+            model_config = ConfigDict(extra="forbid")
+
             include_unclassified: bool = True
             include_galaxy: bool = True
             include_star: bool = False
@@ -170,7 +184,11 @@ class Param(BaseModel):
         object_type_homogenized: ObjectTypeHomogenized = ObjectTypeHomogenized()
 
     class Output(BaseModel):
+        model_config = ConfigDict(extra="forbid")
+
         class HomogenizedColumns(BaseModel):
+            model_config = ConfigDict(extra="forbid")
+
             z_flag_homogenized: str = "always"
             instrument_type_homogenized: str = "always"
             object_type_homogenized: str = "always"
@@ -196,77 +214,6 @@ class Param(BaseModel):
     preparation: Preparation = Preparation()
     diagnostics: Diagnostics = Diagnostics()
     output: Output = Output()
-
-    @model_validator(mode="before")
-    @classmethod
-    def migrate_legacy_layout(cls, data: Any) -> Any:
-        if not isinstance(data, dict):
-            return data
-        migrated = dict(data)
-
-        run = dict(migrated.get("run") or {})
-        for key in ("combine_type", "tie_treatment_option", "flags_translation_file"):
-            if key in migrated and key not in run:
-                run[key] = migrated[key]
-        if run:
-            migrated["run"] = run
-
-        filters = dict(migrated.get("filters") or {})
-        if "z_flag_homogenized_value_to_cut" in migrated:
-            filters.setdefault(
-                "z_flag_homogenized_value_to_cut",
-                migrated["z_flag_homogenized_value_to_cut"],
-            )
-
-        instrument = dict(filters.get("instrument_type_homogenized") or {})
-        instrument_aliases = {
-            "include_spectroscopic_ith": "include_spectroscopic",
-            "include_grism_ith": "include_grism",
-            "include_photometric_ith": "include_photometric",
-            "include_unclassified_ith": "include_unclassified",
-        }
-        for old, new in instrument_aliases.items():
-            if old in migrated and new not in instrument:
-                instrument[new] = migrated[old]
-        if instrument:
-            filters["instrument_type_homogenized"] = instrument
-
-        object_type = dict(filters.get("object_type_homogenized") or {})
-        object_aliases = {
-            "include_unclassified_oth": "include_unclassified",
-            "include_galaxy_oth": "include_galaxy",
-            "include_star_oth": "include_star",
-            "include_agn_oth": "include_agn",
-            "include_qso_oth": "include_qso",
-            "include_galactic_oth": "include_galactic",
-        }
-        for old, new in object_aliases.items():
-            if old in migrated and new not in object_type:
-                object_type[new] = migrated[old]
-        if object_type:
-            filters["object_type_homogenized"] = object_type
-        if filters:
-            migrated["filters"] = filters
-
-        output = dict(migrated.get("output") or {})
-        if "extra_columns" in migrated:
-            output.setdefault("extra_columns", migrated["extra_columns"])
-        if "output_homogenized_columns" in migrated:
-            output.setdefault(
-                "homogenized_columns", migrated["output_homogenized_columns"]
-            )
-        for key in ("insert_DP1_footprint_flag", "insert_rubin_footprint_flag"):
-            if key in migrated and key not in output:
-                output[key] = migrated[key]
-        if output:
-            migrated["output"] = output
-
-        diagnostics = dict(migrated.get("diagnostics") or {})
-        diagnostics.pop("expr_column_schema", None)
-        if diagnostics:
-            migrated["diagnostics"] = diagnostics
-
-        return migrated
 
 
 class Config(BaseModel):

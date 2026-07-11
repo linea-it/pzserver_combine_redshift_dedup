@@ -1699,18 +1699,20 @@ def _normalize_output_homogenized_columns_config(config: object) -> dict[str, st
     elif isinstance(config, dict):
         supplied = dict(config)
     else:
-        raise TypeError("param.output_homogenized_columns must be a mapping")
+        raise TypeError("param.output.homogenized_columns must be a mapping")
 
     unknown = sorted(set(supplied) - set(HOMOGENIZED_COLUMNS))
     if unknown:
-        raise ValueError(f"Unknown output_homogenized_columns option(s): {unknown}")
+        raise ValueError(
+            f"Unknown param.output.homogenized_columns option(s): {unknown}"
+        )
 
     result = {column: "always" for column in HOMOGENIZED_COLUMNS}
     for column, value in supplied.items():
         normalized = str(value).strip().lower()
         if normalized not in valid:
             raise ValueError(
-                f"param.output_homogenized_columns.{column} must be one of "
+                f"param.output.homogenized_columns.{column} must be one of "
                 f"{sorted(valid)}"
             )
         result[column] = normalized

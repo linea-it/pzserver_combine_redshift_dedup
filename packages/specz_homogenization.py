@@ -85,18 +85,10 @@ _TOP_LEVEL_KEYS = {
     "max_representative_radius_arcsec",
     "margin_threshold_arcsec", "margin_warning_fraction",
     "validate_global_graph_edges", "validate_global_tie_invariants",
-    "validate_crd_id_uniqueness", "repartition_prepared_catalogs",
-    "prepared_partition_size", "crossmatch_n_neighbors",
+    "validate_crd_id_uniqueness", "crossmatch_n_neighbors",
     "crossmatch_saturation_enabled", "crossmatch_saturation_warn_fraction",
-    "crossmatch_saturation_fail_fraction",
-    "crossmatch_geometry_diagnostics_enabled",
-    "representative_radius_diagnostics_enabled", "dedup_edge_diagnostics_enabled",
-    "tie_invariant_diagnostics_enabled",
-    "tie_invariant_diagnostics_detailed_enabled",
-    "tie_invariant_diagnostics_sample_size",
-    "tie_invariant_diagnostics_max_rows",
-    "label_merge_diagnostics_enabled",
-    "instrument_type_priority", "save_expr_columns", "expr_column_schema",
+    "crossmatch_saturation_fail_fraction", "instrument_type_priority",
+    "expr_column_schema",
     "runtime_schema_hints", "translation_rules",
 }
 _SAFE_FUNCTIONS = {"len", "int", "float", "str"}
@@ -212,23 +204,6 @@ def validate_translation_config(config: dict) -> None:
             raise ValueError(
                 f"instrument_type_priority.{label} must be a positive integer"
             )
-    for key in (
-        "tie_invariant_diagnostics_enabled",
-        "tie_invariant_diagnostics_detailed_enabled",
-        "label_merge_diagnostics_enabled",
-    ):
-        if key in config and not isinstance(config[key], bool):
-            raise TypeError(f"{key} must be a boolean")
-    for key in (
-        "tie_invariant_diagnostics_sample_size",
-        "tie_invariant_diagnostics_max_rows",
-    ):
-        if key in config and (
-            not isinstance(config[key], int)
-            or isinstance(config[key], bool)
-            or config[key] < 1
-        ):
-            raise ValueError(f"{key} must be a positive integer")
     max_radius = config.get("max_representative_radius_arcsec")
     if max_radius is not None and (
         isinstance(max_radius, bool)

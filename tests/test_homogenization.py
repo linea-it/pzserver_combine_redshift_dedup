@@ -236,25 +236,23 @@ def test_translation_schema_validates_output_domains_and_condition_shape():
         validate_translation_config(invalid_condition)
 
 
-def test_translation_schema_validates_diagnostic_controls():
-    with pytest.raises(TypeError, match="tie_invariant_diagnostics_enabled"):
+def test_translation_schema_rejects_operational_controls():
+    with pytest.raises(ValueError, match="unknown option"):
+        validate_translation_config(_science_config(save_expr_columns=False))
+    with pytest.raises(ValueError, match="unknown option"):
         validate_translation_config(
-            _science_config(tie_invariant_diagnostics_enabled="yes")
+            _science_config(tie_invariant_diagnostics_enabled=True)
         )
-    with pytest.raises(ValueError, match="tie_invariant_diagnostics_sample_size"):
-        validate_translation_config(
-            _science_config(tie_invariant_diagnostics_sample_size=0)
-        )
+    with pytest.raises(ValueError, match="unknown option"):
+        validate_translation_config(_science_config(repartition_prepared_catalogs=False))
+
+
+def test_translation_schema_validates_spatial_controls():
     with pytest.raises(ValueError, match="max_representative_radius_arcsec"):
         validate_translation_config(_science_config(max_representative_radius_arcsec=0))
 
     validate_translation_config(
         _science_config(
-            tie_invariant_diagnostics_enabled=True,
-            tie_invariant_diagnostics_detailed_enabled=False,
-            tie_invariant_diagnostics_sample_size=10,
-            tie_invariant_diagnostics_max_rows=100,
-            label_merge_diagnostics_enabled=True,
             max_representative_radius_arcsec=1.0,
         )
     )

@@ -112,33 +112,67 @@ TRANSLATION_FALLBACK_DEFAULTS = {
 }
 
 
-def _normalize_param_config(param_config: dict | None) -> dict:
-    """Normalize supported external param layouts to the internal flat layout."""
+def _build_runtime_param_config(param_config: dict | None) -> dict:
+    """Build the internal runtime param mapping from the canonical config layout."""
     if param_config is None:
         return {}
     if not isinstance(param_config, dict):
         raise TypeError("param must be a mapping")
 
+    allowed_sections = {"run", "filters", "preparation", "diagnostics", "output"}
+    unknown_sections = sorted(set(param_config) - allowed_sections)
+    if unknown_sections:
+        raise ValueError(f"param has unknown section(s): {unknown_sections}")
+
     normalized = dict(param_config)
 
-    run = normalized.get("run") or {}
+    run = normalized.get("run")
     if not isinstance(run, dict):
         raise TypeError("param.run must be a mapping")
+    unknown_run = sorted(
+        set(run) - {"combine_type", "tie_treatment_option", "flags_translation_file"}
+    )
+    if unknown_run:
+        raise ValueError(f"param.run has unknown option(s): {unknown_run}")
     for key in ("combine_type", "tie_treatment_option", "flags_translation_file"):
         if key in run:
             normalized[key] = run[key]
 
-    filters = normalized.get("filters") or {}
+    filters = normalized.get("filters")
     if not isinstance(filters, dict):
         raise TypeError("param.filters must be a mapping")
+    unknown_filters = sorted(
+        set(filters)
+        - {
+            "z_flag_homogenized_value_to_cut",
+            "instrument_type_homogenized",
+            "object_type_homogenized",
+        }
+    )
+    if unknown_filters:
+        raise ValueError(f"param.filters has unknown option(s): {unknown_filters}")
     if "z_flag_homogenized_value_to_cut" in filters:
         normalized["z_flag_homogenized_value_to_cut"] = filters[
             "z_flag_homogenized_value_to_cut"
         ]
 
-    instrument = filters.get("instrument_type_homogenized") or {}
+    instrument = filters.get("instrument_type_homogenized")
     if not isinstance(instrument, dict):
         raise TypeError("param.filters.instrument_type_homogenized must be a mapping")
+    unknown_instrument = sorted(
+        set(instrument)
+        - {
+            "include_spectroscopic",
+            "include_grism",
+            "include_photometric",
+            "include_unclassified",
+        }
+    )
+    if unknown_instrument:
+        raise ValueError(
+            "param.filters.instrument_type_homogenized has unknown option(s): "
+            f"{unknown_instrument}"
+        )
     instrument_aliases = {
         "include_spectroscopic": "include_spectroscopic_ith",
         "include_grism": "include_grism_ith",
@@ -149,9 +183,25 @@ def _normalize_param_config(param_config: dict | None) -> dict:
         if source in instrument:
             normalized[target] = instrument[source]
 
-    object_type = filters.get("object_type_homogenized") or {}
+    object_type = filters.get("object_type_homogenized")
     if not isinstance(object_type, dict):
         raise TypeError("param.filters.object_type_homogenized must be a mapping")
+    unknown_object_type = sorted(
+        set(object_type)
+        - {
+            "include_unclassified",
+            "include_galaxy",
+            "include_star",
+            "include_agn",
+            "include_qso",
+            "include_galactic",
+        }
+    )
+    if unknown_object_type:
+        raise ValueError(
+            "param.filters.object_type_homogenized has unknown option(s): "
+            f"{unknown_object_type}"
+        )
     object_aliases = {
         "include_unclassified": "include_unclassified_oth",
         "include_galaxy": "include_galaxy_oth",
@@ -164,9 +214,20 @@ def _normalize_param_config(param_config: dict | None) -> dict:
         if source in object_type:
             normalized[target] = object_type[source]
 
-    output = normalized.get("output") or {}
+    output = normalized.get("output")
     if not isinstance(output, dict):
         raise TypeError("param.output must be a mapping")
+    unknown_output = sorted(
+        set(output)
+        - {
+            "extra_columns",
+            "homogenized_columns",
+            "insert_DP1_footprint_flag",
+            "insert_rubin_footprint_flag",
+        }
+    )
+    if unknown_output:
+        raise ValueError(f"param.output has unknown option(s): {unknown_output}")
     output_aliases = {
         "extra_columns": "extra_columns",
         "homogenized_columns": "output_homogenized_columns",
@@ -209,18 +270,13 @@ def _merge_param_diagnostics(
     if not isinstance(diagnostics, dict):
         raise TypeError("param.diagnostics must be a mapping")
 
-    legacy_diagnostics_keys = {"expr_column_schema"}
-    unknown = sorted(set(diagnostics) - set(DIAGNOSTICS_DEFAULTS) - legacy_diagnostics_keys)
+    unknown = sorted(set(diagnostics) - set(DIAGNOSTICS_DEFAULTS))
     if unknown:
         raise ValueError(f"param.diagnostics has unknown option(s): {unknown}")
 
     for key, default in DIAGNOSTICS_DEFAULTS.items():
         merged[key] = diagnostics.get(key, merged.get(key, default))
-    merged["expr_column_schema"] = (
-        merged.get("expr_column_schema")
-        or diagnostics.get("expr_column_schema")
-        or {}
-    )
+    merged["expr_column_schema"] = merged.get("expr_column_schema") or {}
 
     for key in (
         "tie_invariant_diagnostics_enabled",
@@ -776,7 +832,7 @@ def main(
 
     # --- Load config ---
     config = load_yml(config_path)
-    param_config = _normalize_param_config(config.get("param", {}))
+    param_config = _build_runtime_param_config(config.get("param", {}))
     if base_dir_override is None:
         raise ValueError("You must specify --base_dir via the command line.")
     base_dir = base_dir_override
