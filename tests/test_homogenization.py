@@ -247,6 +247,33 @@ def test_translation_schema_rejects_operational_controls():
         validate_translation_config(_science_config(repartition_prepared_catalogs=False))
 
 
+def test_homogenize_accepts_runtime_operational_overlays():
+    frame = dd.from_pandas(
+        pd.DataFrame({"survey": ["demo"], "z_flag": [1]}),
+        npartitions=1,
+        sort=False,
+    )
+    config = _science_config(
+        tiebreaking_priority=["z_flag_homogenized"],
+        translation_rules={"DEMO": {"z_flag_translation": {"default": 3}}},
+        crossmatch_geometry_diagnostics_enabled=False,
+        dedup_edge_diagnostics_enabled=False,
+        label_merge_diagnostics_enabled=True,
+        prepared_partition_size="256MB",
+        repartition_prepared_catalogs=False,
+        representative_radius_diagnostics_enabled=False,
+        save_expr_columns=False,
+        tie_invariant_diagnostics_detailed_enabled=False,
+        tie_invariant_diagnostics_enabled=True,
+        tie_invariant_diagnostics_max_rows=100,
+        tie_invariant_diagnostics_sample_size=10,
+    )
+
+    result, *_ = _homogenize(frame, config, "demo", LOGGER, type_cast_ok=False)
+
+    assert result.compute()["z_flag_homogenized"].tolist() == [3.0]
+
+
 def test_translation_schema_validates_spatial_controls():
     with pytest.raises(ValueError, match="max_representative_radius_arcsec"):
         validate_translation_config(_science_config(max_representative_radius_arcsec=0))

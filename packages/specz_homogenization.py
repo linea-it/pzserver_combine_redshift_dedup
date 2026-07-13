@@ -91,6 +91,19 @@ _TOP_LEVEL_KEYS = {
     "expr_column_schema",
     "runtime_schema_hints", "translation_rules",
 }
+_RUNTIME_ONLY_KEYS = {
+    "crossmatch_geometry_diagnostics_enabled",
+    "dedup_edge_diagnostics_enabled",
+    "label_merge_diagnostics_enabled",
+    "prepared_partition_size",
+    "repartition_prepared_catalogs",
+    "representative_radius_diagnostics_enabled",
+    "save_expr_columns",
+    "tie_invariant_diagnostics_detailed_enabled",
+    "tie_invariant_diagnostics_enabled",
+    "tie_invariant_diagnostics_max_rows",
+    "tie_invariant_diagnostics_sample_size",
+}
 _SAFE_FUNCTIONS = {"len", "int", "float", "str"}
 _SAFE_NUMPY_FUNCTIONS = {"isfinite", "abs", "trunc"}
 _SAFE_SERIES_METHODS = {"isin", "contains", "strip", "lower"}
@@ -320,6 +333,16 @@ def validate_translation_config(config: dict) -> None:
                         f"{sorted(allowed)} or null"
                     )
 
+
+def _science_translation_config(config: dict) -> dict:
+    """Return the science subset from a runtime translation config."""
+    return {
+        key: value
+        for key, value in (config or {}).items()
+        if key not in _RUNTIME_ONLY_KEYS
+    }
+
+
 # -----------------------
 # Local helper (duplicated to avoid circular dep)
 # -----------------------
@@ -482,7 +505,7 @@ def _homogenize(
     Returns:
         Tuple: (df, used_type_fastpath, tiebreaking_priority, instrument_type_priority, translation_rules_uc)
     """
-    validate_translation_config(translation_config)
+    validate_translation_config(_science_translation_config(translation_config))
     tiebreaking_priority = translation_config.get("tiebreaking_priority", [])
     instrument_type_priority = translation_config.get("instrument_type_priority", {})
     translation_rules_uc = {k.upper(): v for k, v in translation_config.get("translation_rules", {}).items()}
