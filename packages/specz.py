@@ -1985,6 +1985,12 @@ CRD_ID_OPTIONAL_HASH_COLUMNS = (
 CRD_ID_HASH_COLUMNS = CRD_ID_REQUIRED_HASH_COLUMNS + CRD_ID_OPTIONAL_HASH_COLUMNS
 
 
+def _crd_id_diagnostic_columns(columns: Sequence[str]) -> list[str]:
+    """Return stable columns to show when CRD_ID collisions are detected."""
+    wanted = ("CRD_ID",) + CRD_ID_HASH_COLUMNS
+    return [column for column in wanted if column in columns]
+
+
 def _format_crd_signature_value(value: object) -> str:
     """Return a stable scalar representation for CRD_ID hashing."""
     if pd.isna(value):
@@ -2064,6 +2070,54 @@ def _generate_crd_ids(
     )
 
 
+def _log_crd_id_collision_diagnostics(
+    df: dd.DataFrame,
+    product_name: str,
+    logger: logging.LoggerAdapter,
+    *,
+    duplicate_rows: int,
+    max_groups: int = 5,
+    max_rows: int = 50,
+) -> None:
+    """Log a bounded sample of duplicate CRD_ID groups before failing."""
+    try:
+        counts = df.groupby("CRD_ID").size().rename("_count").reset_index()
+        duplicate_counts = counts[counts["_count"] > 1]
+        duplicate_summary = duplicate_counts.sort_values(
+            "_count", ascending=False
+        ).head(max_groups, npartitions=-1)
+        if duplicate_summary.empty:
+            logger.error(
+                "%s CRD_ID collision diagnostics found duplicate_rows=%d but no "
+                "duplicate groups were sampled.",
+                product_name,
+                duplicate_rows,
+            )
+            return
+
+        sample_ids = duplicate_summary["CRD_ID"].astype(str).tolist()
+        diagnostic_columns = _crd_id_diagnostic_columns(df.columns)
+        sample_rows = (
+            df.loc[df["CRD_ID"].isin(sample_ids), diagnostic_columns]
+            .head(max_rows, npartitions=-1)
+            .to_dict("records")
+        )
+        logger.error(
+            "%s CRD_ID collision diagnostics: duplicate_rows=%d "
+            "sample_groups=%s sample_rows=%s",
+            product_name,
+            duplicate_rows,
+            duplicate_summary.to_dict("records"),
+            sample_rows,
+        )
+    except Exception as exc:
+        logger.error(
+            "%s CRD_ID collision diagnostics failed: %r",
+            product_name,
+            exc,
+        )
+
+
 def _validate_unique_crd_ids(
     df: dd.DataFrame, product_name: str, logger: logging.LoggerAdapter
 ) -> None:
@@ -2076,6 +2130,9 @@ def _validate_unique_crd_ids(
     unique_ids = int(unique_ids)
     duplicate_rows = total_rows - unique_ids
     if duplicate_rows:
+        _log_crd_id_collision_diagnostics(
+            df, product_name, logger, duplicate_rows=duplicate_rows
+        )
         raise RuntimeError(
             f"{product_name}: generated non-unique CRD_ID values "
             f"(rows={total_rows}, unique_ids={unique_ids}, "

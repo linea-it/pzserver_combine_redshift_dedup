@@ -111,7 +111,7 @@ def test_generate_crd_ids_optional_canonical_columns_disambiguate_coordinates():
     assert result["CRD_ID"].is_unique
 
 
-def test_generate_crd_ids_collide_when_all_available_canonical_values_match():
+def test_generate_crd_ids_collide_when_all_available_canonical_values_match(caplog):
     frame = dd.from_pandas(
         pd.DataFrame(
             {
@@ -132,5 +132,11 @@ def test_generate_crd_ids_collide_when_all_available_canonical_values_match():
 
     result = _generate_crd_ids(frame, "314_example", "/tmp")
 
+    caplog.set_level(logging.ERROR)
     with pytest.raises(RuntimeError, match="non-unique CRD_ID"):
         _validate_unique_crd_ids(result, "314_example", logging.getLogger(__name__))
+
+    assert "CRD_ID collision diagnostics" in caplog.text
+    assert "duplicate_rows=1" in caplog.text
+    assert "sample_groups=" in caplog.text
+    assert "sample_rows=" in caplog.text
