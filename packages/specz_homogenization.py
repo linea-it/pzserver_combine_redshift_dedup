@@ -462,6 +462,7 @@ def _homogenize(
     *,
     require_z_flag_homogenized: bool = False,
     require_instrument_type_homogenized: bool = False,
+    require_object_type_homogenized: bool = False,
 ) -> tuple[dd.DataFrame, bool, list, dict, dict]:
     """Compute homogenized columns for tie-breaking.
 
@@ -475,6 +476,8 @@ def _homogenize(
             when it is not a ranking priority.
         require_instrument_type_homogenized: Create and validate the instrument
             type even when it is not a ranking priority.
+        require_object_type_homogenized: Create and validate the object type
+            for active filters even when it is not a ranking priority.
 
     Returns:
         Tuple: (df, used_type_fastpath, tiebreaking_priority, instrument_type_priority, translation_rules_uc)
@@ -490,6 +493,7 @@ def _homogenize(
     needs_instrument_type = (
         instrument_type_is_priority or require_instrument_type_homogenized
     )
+    needs_object_type = require_object_type_homogenized
 
     def _fast_path_policy(key: str) -> str:
         if "survey" not in df.columns:
@@ -558,7 +562,7 @@ def _homogenize(
         assert out_kind in {"float", "str"}
 
         def _partition(p: pd.DataFrame) -> pd.DataFrame:
-            if p.empty or ("survey" not in p.columns) or (key not in p.columns):
+            if p.empty or ("survey" not in p.columns):
                 q = p.copy()
                 if out_kind == "float":
                     q[out_col] = pd.Series(pd.array([], dtype=DTYPE_FLOAT)).reindex(q.index)
@@ -974,6 +978,7 @@ def _homogenize(
             key="object_type",
             out_col="object_type_homogenized",
             out_kind="str",
+            strict=needs_object_type,
         )
 
     object_types = df["object_type_homogenized"].map_partitions(

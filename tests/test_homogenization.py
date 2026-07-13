@@ -329,6 +329,124 @@ def test_z_flag_fast_path_policy_can_be_disabled_or_required():
         _homogenize(incompatible, required, "demo", LOGGER, type_cast_ok=False)
 
 
+def test_z_flag_fast_path_bypasses_invalid_required_yaml_rule():
+    frame = dd.from_pandas(
+        pd.DataFrame({"survey": ["demo", "demo"], "z_flag": [0.2, 0.95]}),
+        npartitions=1,
+        sort=False,
+    )
+    config = _science_config(
+        tiebreaking_priority=["z_flag_homogenized"],
+        translation_rules={
+            "DEMO": {
+                "z_flag_translation": {
+                    "conditions": [{"expr": "missing_column > 0", "value": 4}],
+                    "default": 0,
+                }
+            }
+        },
+    )
+
+    result, *_ = _homogenize(
+        frame,
+        config,
+        "demo",
+        LOGGER,
+        type_cast_ok=False,
+        require_z_flag_homogenized=True,
+    )
+
+    assert result.compute()["z_flag_homogenized"].tolist() == [1.0, 3.0]
+
+
+def test_user_homogenized_column_bypasses_invalid_required_yaml_rule():
+    frame = dd.from_pandas(
+        pd.DataFrame(
+            {"survey": ["demo"], "z_flag_homogenized": [4.0], "z_flag": [99.0]}
+        ),
+        npartitions=1,
+        sort=False,
+    )
+    config = _science_config(
+        tiebreaking_priority=["z_flag_homogenized"],
+        translation_rules={
+            "DEMO": {
+                "z_flag_translation": {
+                    "source": "missing_source",
+                    1: 4,
+                }
+            }
+        },
+    )
+
+    result, *_ = _homogenize(
+        frame,
+        config,
+        "demo",
+        LOGGER,
+        type_cast_ok=False,
+        require_z_flag_homogenized=True,
+    )
+
+    assert result.compute()["z_flag_homogenized"].tolist() == [4.0]
+
+
+def test_required_yaml_translation_fails_on_missing_source_column():
+    frame = dd.from_pandas(
+        pd.DataFrame({"survey": ["demo"], "z_flag": [99.0]}),
+        npartitions=1,
+        sort=False,
+    )
+    config = _science_config(
+        translation_rules={
+            "DEMO": {
+                "z_flag_translation": {
+                    "source": "missing_source",
+                    1: 4,
+                }
+            }
+        },
+    )
+
+    with pytest.raises(ValueError, match="Missing source column 'missing_source'"):
+        _homogenize(
+            frame,
+            config,
+            "demo",
+            LOGGER,
+            type_cast_ok=False,
+            require_z_flag_homogenized=True,
+        )
+
+
+def test_required_object_type_yaml_fails_on_invalid_condition():
+    frame = dd.from_pandas(
+        pd.DataFrame({"survey": ["demo"], "object_type": [pd.NA]}),
+        npartitions=1,
+        sort=False,
+    )
+    config = _science_config(
+        translation_rules={
+            "DEMO": {
+                "object_type_translation": {
+                    "conditions": [{"expr": "missing_column == 1", "value": "galaxy"}],
+                    "default": None,
+                }
+            }
+        },
+    )
+
+    with pytest.raises(ValueError, match="Error evaluating condition"):
+        _homogenize(
+            frame,
+            config,
+            "demo",
+            LOGGER,
+            type_cast_ok=False,
+            require_object_type_homogenized=True,
+        )
+
+
 def test_instrument_fast_path_can_be_disabled():
     frame = dd.from_pandas(
         pd.DataFrame(

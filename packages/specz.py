@@ -2875,6 +2875,7 @@ def prepare_catalog(
         require_instrument_type_homogenized=_active_instrument_type_filter(
             param_config
         ),
+        require_object_type_homogenized=_active_object_type_filter(param_config),
     )
     df = _normalize_custom_tiebreaking_priorities(
         df,
