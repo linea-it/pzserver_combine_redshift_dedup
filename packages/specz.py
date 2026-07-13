@@ -2021,11 +2021,62 @@ def _crd_hash_id(
     return f"CRD{catalog_prefix}_{digest.hexdigest()}"
 
 
+def _add_crd_signature_column(
+    df: dd.DataFrame,
+    hash_columns: Sequence[str],
+    *,
+    signature_column: str = "__crd_signature",
+) -> dd.DataFrame:
+    """Attach the canonical CRD_ID signature as a temporary column."""
+
+    def _add_signature(part: pd.DataFrame) -> pd.DataFrame:
+        p = part.copy()
+        values = p[list(hash_columns)].itertuples(index=False, name=None)
+        p[signature_column] = [_crd_signature(hash_columns, row) for row in values]
+        return p
+
+    meta = df._meta.assign(**{signature_column: pd.Series(dtype="string")})
+    return df.map_partitions(_add_signature, meta=meta)
+
+
+def _drop_duplicate_crd_signatures(
+    df: dd.DataFrame,
+    hash_columns: Sequence[str],
+    product_name: str,
+    logger: logging.LoggerAdapter | None,
+) -> dd.DataFrame:
+    """Drop rows with identical canonical CRD_ID signatures."""
+    signature_column = "__crd_signature"
+    with_signature = _add_crd_signature_column(
+        df, hash_columns, signature_column=signature_column
+    )
+    deduplicated = with_signature.drop_duplicates(subset=[signature_column])
+    before, after = dask.compute(
+        with_signature.map_partitions(len).sum(),
+        deduplicated.map_partitions(len).sum(),
+    )
+    before = int(before)
+    after = int(after)
+    dropped = before - after
+    if dropped and logger is not None:
+        logger.warning(
+            "%s dropped %d duplicate canonical input row(s) before CRD_ID "
+            "generation (rows_before=%d rows_after=%d hash_columns=%s).",
+            product_name,
+            dropped,
+            before,
+            after,
+            list(hash_columns),
+        )
+    return deduplicated.drop(columns=[signature_column])
+
+
 def _generate_crd_ids(
     df: dd.DataFrame,
     product_name: str,
     temp_dir: str,
     client: "Client | None" = None,
+    logger: logging.LoggerAdapter | None = None,
 ) -> dd.DataFrame:
     """Assign deterministic, catalog-scoped CRD_IDs from canonical input fields.
 
@@ -2034,6 +2085,7 @@ def _generate_crd_ids(
         product_name: Internal name (expects numeric prefix before underscore).
         temp_dir: Unused, kept for signature stability.
         client: Unused, kept for signature stability.
+        logger: Optional logger for duplicate-signature diagnostics.
 
     Returns:
         dd.DataFrame: Frame with CRD_ID column (Arrow string dtype).
@@ -2055,6 +2107,7 @@ def _generate_crd_ids(
     if missing:
         raise KeyError(f"Missing required columns for CRD_ID generation: {missing}")
     hash_columns = [column for column in CRD_ID_HASH_COLUMNS if column in df.columns]
+    df = _drop_duplicate_crd_signatures(df, hash_columns, product_name, logger)
 
     def _add_crd(part: pd.DataFrame) -> pd.DataFrame:
         p = part.copy()
@@ -2943,7 +2996,7 @@ def prepare_catalog(
     df, type_cast_ok = _normalize_types(df, product_name, lg)
 
     # 5) Assign CRD_IDs
-    df = _generate_crd_ids(df, product_name, temp_dir, client=client)
+    df = _generate_crd_ids(df, product_name, temp_dir, client=client, logger=lg)
     if bool(translation_config.get("validate_crd_id_uniqueness", False)):
         _validate_unique_crd_ids(df, product_name, lg)
 
