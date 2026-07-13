@@ -15,6 +15,7 @@ Public API:
 # -----------------------
 import ast as _ast
 import difflib
+import hashlib
 import json
 import logging
 import os
@@ -1972,25 +1973,52 @@ def _as_bool_config(value: Any, default: bool) -> bool:
 # -----------------------
 # CRD_ID generation
 # -----------------------
+def _format_crd_signature_value(value: object) -> str:
+    """Return a stable scalar representation for CRD_ID hashing."""
+    if pd.isna(value):
+        return "NA"
+    number = float(value)
+    if number == 0.0:
+        number = 0.0
+    return format(number, ".17g")
+
+
+def _crd_signature(row: tuple[object, object, object]) -> str:
+    """Return the canonical row signature used for CRD_ID generation."""
+    ra, dec, z = row
+    return (
+        f"ra={_format_crd_signature_value(ra)}|"
+        f"dec={_format_crd_signature_value(dec)}|"
+        f"z={_format_crd_signature_value(z)}"
+    )
+
+
+def _crd_hash_id(catalog_prefix: str, row: tuple[object, object, object]) -> str:
+    """Return a short deterministic CRD_ID for one canonical row signature."""
+    digest = hashlib.blake2b(_crd_signature(row).encode("utf-8"), digest_size=8)
+    return f"CRD{catalog_prefix}_{digest.hexdigest()}"
+
+
 def _generate_crd_ids(
     df: dd.DataFrame,
     product_name: str,
     temp_dir: str,
     client: "Client | None" = None,
 ) -> dd.DataFrame:
-    """Assign stable, catalog-scoped CRD_IDs.
+    """Assign deterministic, catalog-scoped CRD_IDs from RA/DEC/Z values.
 
     Args:
         df: Input frame after schema normalization.
         product_name: Internal name (expects numeric prefix before underscore).
         temp_dir: Unused, kept for signature stability.
-        client: Optional distributed client used to stabilize the input graph.
+        client: Unused, kept for signature stability.
 
     Returns:
         dd.DataFrame: Frame with CRD_ID column (Arrow string dtype).
 
     Raises:
         ValueError: If numeric prefix cannot be extracted from product_name.
+        KeyError: If any of the required identity columns are missing.
     """
     m = re.match(r"(\d+)_", product_name)
     if not m:
@@ -1999,34 +2027,21 @@ def _generate_crd_ids(
         )
     catalog_prefix = m.group(1)
 
-    # Stabilize partition contents before measuring offsets. Otherwise a second
-    # execution of a non-deterministic upstream graph can reuse an ID range for
-    # different rows.
-    df = df.persist()
-    if client is not None:
-        wait(df)
+    required = ["ra", "dec", "z"]
+    missing = [column for column in required if column not in df.columns]
+    if missing:
+        raise KeyError(f"Missing required columns for CRD_ID generation: {missing}")
 
-    sizes = [int(size) for size in df.map_partitions(len).compute().tolist()]
-    offsets = [0]
-    for s in sizes[:-1]:
-        offsets.append(offsets[-1] + s)
-
-    def _add_crd(part: pd.DataFrame, start: int) -> pd.DataFrame:
+    def _add_crd(part: pd.DataFrame) -> pd.DataFrame:
         p = part.copy()
-        n = len(p)
-        p["CRD_ID"] = [f"CRD{catalog_prefix}_{start + i + 1}" for i in range(n)]
+        values = p[required].itertuples(index=False, name=None)
+        p["CRD_ID"] = [_crd_hash_id(catalog_prefix, row) for row in values]
         return p
 
-    parts = [
-        df.get_partition(i).map_partitions(
-            _add_crd,
-            offset,
-            meta=df._meta.assign(CRD_ID=pd.Series(pd.array([], dtype=DTYPE_STR))),
-        )
-        for i, offset in enumerate(offsets)
-    ]
-    df = dd.concat(parts)
-    return df
+    return df.map_partitions(
+        _add_crd,
+        meta=df._meta.assign(CRD_ID=pd.Series(pd.array([], dtype=DTYPE_STR))),
+    )
 
 
 def _validate_unique_crd_ids(
