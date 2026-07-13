@@ -20,7 +20,7 @@ import json
 import logging
 import os
 import re
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Sequence
 
 # -----------------------
 # Third-party
@@ -1973,29 +1973,45 @@ def _as_bool_config(value: Any, default: bool) -> bool:
 # -----------------------
 # CRD_ID generation
 # -----------------------
+CRD_ID_REQUIRED_HASH_COLUMNS = ("ra", "dec", "z")
+CRD_ID_OPTIONAL_HASH_COLUMNS = (
+    "id",
+    "z_flag",
+    "z_err",
+    "survey",
+    "source",
+    "instrument_type",
+)
+CRD_ID_HASH_COLUMNS = CRD_ID_REQUIRED_HASH_COLUMNS + CRD_ID_OPTIONAL_HASH_COLUMNS
+
+
 def _format_crd_signature_value(value: object) -> str:
     """Return a stable scalar representation for CRD_ID hashing."""
     if pd.isna(value):
         return "NA"
-    number = float(value)
-    if number == 0.0:
-        number = 0.0
-    return format(number, ".17g")
+    if isinstance(value, (float, int, np.floating, np.integer)):
+        number = float(value)
+        if number == 0.0:
+            number = 0.0
+        return format(number, ".17g")
+    return str(value).strip()
 
 
-def _crd_signature(row: tuple[object, object, object]) -> str:
+def _crd_signature(columns: Sequence[str], row: tuple[object, ...]) -> str:
     """Return the canonical row signature used for CRD_ID generation."""
-    ra, dec, z = row
-    return (
-        f"ra={_format_crd_signature_value(ra)}|"
-        f"dec={_format_crd_signature_value(dec)}|"
-        f"z={_format_crd_signature_value(z)}"
+    return "|".join(
+        f"{column}={_format_crd_signature_value(value)}"
+        for column, value in zip(columns, row)
     )
 
 
-def _crd_hash_id(catalog_prefix: str, row: tuple[object, object, object]) -> str:
+def _crd_hash_id(
+    catalog_prefix: str, columns: Sequence[str], row: tuple[object, ...]
+) -> str:
     """Return a short deterministic CRD_ID for one canonical row signature."""
-    digest = hashlib.blake2b(_crd_signature(row).encode("utf-8"), digest_size=8)
+    digest = hashlib.blake2b(
+        _crd_signature(columns, row).encode("utf-8"), digest_size=8
+    )
     return f"CRD{catalog_prefix}_{digest.hexdigest()}"
 
 
@@ -2005,7 +2021,7 @@ def _generate_crd_ids(
     temp_dir: str,
     client: "Client | None" = None,
 ) -> dd.DataFrame:
-    """Assign deterministic, catalog-scoped CRD_IDs from RA/DEC/Z values.
+    """Assign deterministic, catalog-scoped CRD_IDs from canonical input fields.
 
     Args:
         df: Input frame after schema normalization.
@@ -2027,15 +2043,19 @@ def _generate_crd_ids(
         )
     catalog_prefix = m.group(1)
 
-    required = ["ra", "dec", "z"]
-    missing = [column for column in required if column not in df.columns]
+    missing = [
+        column for column in CRD_ID_REQUIRED_HASH_COLUMNS if column not in df.columns
+    ]
     if missing:
         raise KeyError(f"Missing required columns for CRD_ID generation: {missing}")
+    hash_columns = [column for column in CRD_ID_HASH_COLUMNS if column in df.columns]
 
     def _add_crd(part: pd.DataFrame) -> pd.DataFrame:
         p = part.copy()
-        values = p[required].itertuples(index=False, name=None)
-        p["CRD_ID"] = [_crd_hash_id(catalog_prefix, row) for row in values]
+        values = p[hash_columns].itertuples(index=False, name=None)
+        p["CRD_ID"] = [
+            _crd_hash_id(catalog_prefix, hash_columns, row) for row in values
+        ]
         return p
 
     return df.map_partitions(

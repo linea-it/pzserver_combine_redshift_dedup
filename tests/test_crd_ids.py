@@ -90,13 +90,40 @@ def test_generate_crd_ids_do_not_depend_on_row_order_or_partitions():
     assert first_map == second_map
 
 
-def test_generate_crd_ids_duplicate_ra_dec_z_collide_for_validation():
+def test_generate_crd_ids_optional_canonical_columns_disambiguate_coordinates():
     frame = dd.from_pandas(
         pd.DataFrame(
             {
+                "id": ["first", "second"],
                 "ra": [10.0, 10.0],
                 "dec": [-10.0, -10.0],
                 "z": [0.1, 0.1],
+                "z_flag": [1.0, 2.0],
+                "survey": ["same", "same"],
+            }
+        ),
+        npartitions=2,
+        sort=False,
+    )
+
+    result = _generate_crd_ids(frame, "314_example", "/tmp").compute()
+
+    assert result["CRD_ID"].is_unique
+
+
+def test_generate_crd_ids_collide_when_all_available_canonical_values_match():
+    frame = dd.from_pandas(
+        pd.DataFrame(
+            {
+                "id": ["same", "same"],
+                "ra": [10.0, 10.0],
+                "dec": [-10.0, -10.0],
+                "z": [0.1, 0.1],
+                "z_flag": [1.0, 1.0],
+                "z_err": [0.01, 0.01],
+                "survey": ["same", "same"],
+                "source": ["same", "same"],
+                "instrument_type": ["same", "same"],
             }
         ),
         npartitions=2,
