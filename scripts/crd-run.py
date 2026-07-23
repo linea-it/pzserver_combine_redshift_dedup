@@ -114,6 +114,12 @@ TRANSLATION_FALLBACK_DEFAULTS = {
 
 PUBLISH_MAX_ATTEMPTS = 3
 PUBLISH_RETRY_DELAY_SECONDS = 5
+PUBLISH_INTEGRITY_CHECK_BASIC = "basic"
+PUBLISH_INTEGRITY_CHECK_CHECKSUM = "checksum"
+PUBLISH_INTEGRITY_CHECK_OPTIONS = {
+    PUBLISH_INTEGRITY_CHECK_BASIC,
+    PUBLISH_INTEGRITY_CHECK_CHECKSUM,
+}
 
 
 def _build_runtime_param_config(param_config: dict | None) -> dict:
@@ -228,19 +234,31 @@ def _build_runtime_param_config(param_config: dict | None) -> dict:
             "homogenized_columns",
             "insert_DP1_footprint_flag",
             "insert_rubin_footprint_flag",
+            "publish_integrity_check",
         }
     )
     if unknown_output:
         raise ValueError(f"param.output has unknown option(s): {unknown_output}")
+    publish_integrity_check = str(
+        output.get("publish_integrity_check", PUBLISH_INTEGRITY_CHECK_BASIC)
+        or PUBLISH_INTEGRITY_CHECK_BASIC
+    ).strip().lower()
+    if publish_integrity_check not in PUBLISH_INTEGRITY_CHECK_OPTIONS:
+        raise ValueError(
+            "param.output.publish_integrity_check must be one of "
+            f"{sorted(PUBLISH_INTEGRITY_CHECK_OPTIONS)}"
+        )
     output_aliases = {
         "extra_columns": "extra_columns",
         "homogenized_columns": "output_homogenized_columns",
         "insert_DP1_footprint_flag": "insert_DP1_footprint_flag",
         "insert_rubin_footprint_flag": "insert_rubin_footprint_flag",
+        "publish_integrity_check": "publish_integrity_check",
     }
     for source, target in output_aliases.items():
         if source in output:
             normalized[target] = output[source]
+    normalized["publish_integrity_check"] = publish_integrity_check
 
     return normalized
 
@@ -808,7 +826,7 @@ def _sha256_file(path: str) -> str:
     return digest.hexdigest()
 
 
-def _verify_copied_file(src: str, dst: str) -> None:
+def _verify_copied_file(src: str, dst: str, integrity_check: str) -> None:
     if not os.path.isfile(src):
         raise FileNotFoundError(f"source file is missing: {src}")
     if not os.path.isfile(dst):
@@ -822,6 +840,22 @@ def _verify_copied_file(src: str, dst: str) -> None:
             f"{src} ({src_size} bytes) != {dst} ({dst_size} bytes)"
         )
 
+    src_mtime = os.path.getmtime(src)
+    dst_mtime = os.path.getmtime(dst)
+    if abs(src_mtime - dst_mtime) > 1.0:
+        raise RuntimeError(
+            "copied file mtime mismatch: "
+            f"{src} ({src_mtime}) != {dst} ({dst_mtime})"
+        )
+
+    if integrity_check == PUBLISH_INTEGRITY_CHECK_BASIC:
+        return
+    if integrity_check != PUBLISH_INTEGRITY_CHECK_CHECKSUM:
+        raise ValueError(
+            "publish_integrity_check must be one of "
+            f"{sorted(PUBLISH_INTEGRITY_CHECK_OPTIONS)}"
+        )
+
     src_hash = _sha256_file(src)
     dst_hash = _sha256_file(dst)
     if src_hash != dst_hash:
@@ -830,7 +864,9 @@ def _verify_copied_file(src: str, dst: str) -> None:
         )
 
 
-def _verify_copied_tree(src_dir: str, dst_dir: str) -> tuple[int, int]:
+def _verify_copied_tree(
+    src_dir: str, dst_dir: str, integrity_check: str
+) -> tuple[int, int]:
     if not os.path.isdir(src_dir):
         raise FileNotFoundError(f"source directory is missing: {src_dir}")
     if not os.path.isdir(dst_dir):
@@ -855,7 +891,7 @@ def _verify_copied_tree(src_dir: str, dst_dir: str) -> tuple[int, int]:
         for filename in files:
             src_file = os.path.join(root, filename)
             dst_file = os.path.join(dst_root, filename)
-            _verify_copied_file(src_file, dst_file)
+            _verify_copied_file(src_file, dst_file, integrity_check)
             n_files += 1
 
     return n_dirs, n_files
@@ -864,23 +900,25 @@ def _verify_copied_tree(src_dir: str, dst_dir: str) -> tuple[int, int]:
 def _verify_publish_artifacts(
     artifacts: list[tuple[str, str, str]],
     lg: logging.LoggerAdapter,
+    integrity_check: str = PUBLISH_INTEGRITY_CHECK_BASIC,
 ) -> None:
     """Verify published artifacts against staged sources."""
     total_files = 0
     total_dirs = 0
     for kind, src, dst in artifacts:
         if kind == "file":
-            _verify_copied_file(src, dst)
+            _verify_copied_file(src, dst, integrity_check)
             total_files += 1
         elif kind == "tree":
-            n_dirs, n_files = _verify_copied_tree(src, dst)
+            n_dirs, n_files = _verify_copied_tree(src, dst, integrity_check)
             total_dirs += n_dirs
             total_files += n_files
         else:
             raise ValueError(f"Unknown publish artifact kind: {kind}")
 
     lg.info(
-        "Publish verification passed: %d file(s), %d directories verified.",
+        "Publish verification passed (%s): %d file(s), %d directories verified.",
+        integrity_check,
         total_files,
         total_dirs,
     )
@@ -902,6 +940,7 @@ def _copy_and_verify_publish_artifacts(
     lg: logging.LoggerAdapter,
     max_attempts: int = PUBLISH_MAX_ATTEMPTS,
     retry_delay_seconds: int = PUBLISH_RETRY_DELAY_SECONDS,
+    integrity_check: str = PUBLISH_INTEGRITY_CHECK_BASIC,
 ) -> None:
     last_error = None
     for attempt in range(1, max_attempts + 1):
@@ -909,7 +948,7 @@ def _copy_and_verify_publish_artifacts(
             lg.info("Publish copy/verify attempt %d/%d.", attempt, max_attempts)
             for kind, src, dst in artifacts:
                 _copy_publish_artifact(kind, src, dst, lg)
-            _verify_publish_artifacts(artifacts, lg)
+            _verify_publish_artifacts(artifacts, lg, integrity_check)
             return
         except Exception as e:
             last_error = e
@@ -2884,7 +2923,13 @@ def main(
             )
         )
 
-    _copy_and_verify_publish_artifacts(publish_artifacts, publish_logger)
+    _copy_and_verify_publish_artifacts(
+        publish_artifacts,
+        publish_logger,
+        integrity_check=param_config.get(
+            "publish_integrity_check", PUBLISH_INTEGRITY_CHECK_BASIC
+        ),
+    )
 
     publish_logger.info(
         "END publish: artifacts copied and verified at %s", out_root_and_dir
