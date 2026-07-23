@@ -2,7 +2,7 @@ import os
 from pathlib import Path
 from typing import Any
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 MAINDIR = Path(__file__).parent
 DATASETS_DIR = os.getenv("DATASETS_DIR", "/datasets")
@@ -99,33 +99,121 @@ class Inputs(BaseModel):
 
 
 class Param(BaseModel):
-    combine_type: str = "concatenate"
-    extra_columns: dict[str, Any] = Field(default_factory=dict)
-    # Zero disables the cut; valid active cuts are 1, 2, 3, 4.
-    z_flag_homogenized_value_to_cut: float = 3.0
-    include_unclassified: bool = True
-    include_galaxy: bool = True
-    include_star: bool = False
-    include_agn: bool = True
-    include_qso: bool = True
-    include_galactic: bool = False
-    flags_translation_file: str = str(Path(MAINDIR, "flags_translation.yaml"))
-    insert_DP1_footprint_flag: bool = False
-    insert_rubin_footprint_flag: bool = False
+    model_config = ConfigDict(extra="forbid")
 
-    @model_validator(mode="after")
-    def validate_object_type_inclusion(self):
-        inclusion = (
-            self.include_unclassified,
-            self.include_galaxy,
-            self.include_star,
-            self.include_agn,
-            self.include_qso,
-            self.include_galactic,
+    class Run(BaseModel):
+        model_config = ConfigDict(extra="forbid")
+
+        combine_type: str = "concatenate"
+        tie_treatment_option: str = "remove_all"
+        flags_translation_file: str = str(Path(MAINDIR, "flags_translation.yaml"))
+
+    class Preparation(BaseModel):
+        model_config = ConfigDict(extra="forbid")
+
+        repartition_prepared_catalogs: bool = False
+        prepared_partition_size: str = "256MB"
+
+    class Diagnostics(BaseModel):
+        model_config = ConfigDict(extra="forbid")
+
+        tie_invariant_diagnostics_enabled: bool = True
+        tie_invariant_diagnostics_detailed_enabled: bool = False
+        tie_invariant_diagnostics_sample_size: int = 10
+        tie_invariant_diagnostics_max_rows: int = 100
+        label_merge_diagnostics_enabled: bool = True
+        crossmatch_geometry_diagnostics_enabled: bool = False
+        representative_radius_diagnostics_enabled: bool = False
+        dedup_edge_diagnostics_enabled: bool = False
+        save_expr_columns: bool = False
+
+        @model_validator(mode="after")
+        def validate_limits(self):
+            if self.tie_invariant_diagnostics_sample_size < 1:
+                raise ValueError(
+                    "tie_invariant_diagnostics_sample_size must be positive"
+                )
+            if self.tie_invariant_diagnostics_max_rows < 1:
+                raise ValueError("tie_invariant_diagnostics_max_rows must be positive")
+            return self
+
+    class Filters(BaseModel):
+        model_config = ConfigDict(extra="forbid")
+
+        class InstrumentTypeHomogenized(BaseModel):
+            model_config = ConfigDict(extra="forbid")
+
+            include_spectroscopic: bool = True
+            include_grism: bool = True
+            include_photometric: bool = True
+            include_unclassified: bool = True
+
+            @model_validator(mode="after")
+            def validate_any_enabled(self):
+                if not any(self.model_dump().values()):
+                    raise ValueError(
+                        "at least one instrument_type_homogenized include option "
+                        "must be true"
+                    )
+                return self
+
+        class ObjectTypeHomogenized(BaseModel):
+            model_config = ConfigDict(extra="forbid")
+
+            include_unclassified: bool = True
+            include_galaxy: bool = True
+            include_star: bool = False
+            include_agn: bool = True
+            include_qso: bool = True
+            include_galactic: bool = False
+
+            @model_validator(mode="after")
+            def validate_any_enabled(self):
+                if not any(self.model_dump().values()):
+                    raise ValueError(
+                        "at least one object_type_homogenized include option "
+                        "must be true"
+                    )
+                return self
+
+        # Zero disables the cut; valid active cuts are 1, 2, 3, 4.
+        z_flag_homogenized_value_to_cut: float = 3.0
+        instrument_type_homogenized: InstrumentTypeHomogenized = (
+            InstrumentTypeHomogenized()
         )
-        if not any(inclusion):
-            raise ValueError("at least one include_* object-type option must be true")
-        return self
+        object_type_homogenized: ObjectTypeHomogenized = ObjectTypeHomogenized()
+
+    class Output(BaseModel):
+        model_config = ConfigDict(extra="forbid")
+
+        class HomogenizedColumns(BaseModel):
+            model_config = ConfigDict(extra="forbid")
+
+            z_flag_homogenized: str = "always"
+            instrument_type_homogenized: str = "always"
+            object_type_homogenized: str = "always"
+
+            @model_validator(mode="after")
+            def validate_modes(self):
+                valid = {"auto", "always", "never"}
+                for field, value in self.model_dump().items():
+                    if value not in valid:
+                        raise ValueError(
+                            f"output.homogenized_columns.{field} must be one of "
+                            f"{sorted(valid)}"
+                        )
+                return self
+
+        extra_columns: dict[str, Any] = Field(default_factory=dict)
+        homogenized_columns: HomogenizedColumns = HomogenizedColumns()
+        insert_DP1_footprint_flag: bool = False
+        insert_rubin_footprint_flag: bool = False
+
+    run: Run = Run()
+    filters: Filters = Filters()
+    preparation: Preparation = Preparation()
+    diagnostics: Diagnostics = Diagnostics()
+    output: Output = Output()
 
 
 class Config(BaseModel):
@@ -142,8 +230,8 @@ if __name__ == "__main__":
     import yaml
 
     cfg = Config()
+    data = cfg.model_dump()
 
     with open("config.yml", "w") as outfile:
-        data_json = cfg.model_dump()
-        print(data_json)
-        yaml.dump(data_json, outfile)
+        print(cfg.model_dump_json(indent=2))
+        yaml.dump(data, outfile, sort_keys=False, allow_unicode=True)

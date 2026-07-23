@@ -76,26 +76,58 @@ output_name: "crd" # Name prefix for the final output files
 output_format: "parquet" # Output format: csv, parquet, hdf5, fits, or hats
 
 param:
-  combine_type: "concatenate_and_mark_duplicates" # Options: "concatenate", "concatenate_and_mark_duplicates", or "concatenate_and_remove_duplicates"
-  tie_treatment_option: "remove_all" # Options (only for concatenate_and_remove_duplicates): "remove_all", "keep_all", "draw_one"
-  # Extra output columns. Existing values are preserved and converted to the
-  # declared type; catalogs without a column receive typed null values.
-  # Supported types: str, float, int, bool.
-  extra_columns: {}
-  # extra_columns:
-  #   DELTACHI2: float
-  #   ORIGINAL_ID:
-  #     source: id
-  #     type: str
-  z_flag_homogenized_value_to_cut: 0.0 # 0 disables the cut; valid active cuts are 1, 2, 3, 4.
-  # Object types allowed to participate in the deduplication graph. Disabled
-  # types remain in marked outputs as isolated rows with tie_result=3.
-  include_unclassified: true
-  include_galaxy: true
-  include_star: false
-  include_agn: true
-  include_qso: true
-  include_galactic: false
-  insert_DP1_footprint_flag: false # Adds is_in_DP1_fields (1/0)
-  insert_rubin_footprint_flag: false # Adds is_in_rubin_footprint (1/0)
-  flags_translation_file: flags_translation.yaml # File with homogenization rules for z_flag and type
+  # The template uses the recommended production policy. Internal fallbacks are
+  # non-restrictive: no z-flag cut, all classes included, homogenized columns kept.
+  run:
+    combine_type: "concatenate_and_mark_duplicates" # concatenate, concatenate_and_mark_duplicates, concatenate_and_remove_duplicates
+    tie_treatment_option: "remove_all" # remove_all, keep_all, draw_one; used only by concatenate_and_remove_duplicates
+    flags_translation_file: flags_translation.yaml # Homogenization and deduplication science rules.
+
+  preparation:
+    repartition_prepared_catalogs: false # Optional full-data pass to resize prepared partitions.
+    prepared_partition_size: "256MB" # Target size when repartition_prepared_catalogs is true.
+
+  filters:
+    z_flag_homogenized_value_to_cut: 3.0 # 0 disables the cut; active cuts are 1, 2, 3, or 4.
+    instrument_type_homogenized:
+      include_spectroscopic: true # instrument_type_homogenized == "s"
+      include_grism: true # instrument_type_homogenized == "g"
+      include_photometric: true # instrument_type_homogenized == "p"
+      include_unclassified: true # missing instrument_type_homogenized
+    object_type_homogenized:
+      include_unclassified: true # missing object_type_homogenized
+      include_galaxy: true
+      include_star: false
+      include_agn: true
+      include_qso: true
+      include_galactic: false
+
+  output:
+    # Extra output columns. Values are cast to the declared type; missing source
+    # columns are emitted as typed nulls. Supported types: str, float, int, bool.
+    extra_columns: {}
+    # extra_columns:
+    #   DELTACHI2: float
+    #   ORIGINAL_ID:
+    #     source: id
+    #     type: str
+    # Controls final output only. Internally all homogenized columns are created.
+    # Options: always, auto, never. Auto keeps columns used by filters or dedup.
+    homogenized_columns:
+      z_flag_homogenized: always
+      instrument_type_homogenized: always
+      object_type_homogenized: always
+    insert_DP1_footprint_flag: false # Adds is_in_DP1_fields as 1/0.
+    insert_rubin_footprint_flag: false # Adds is_in_rubin_footprint as 1/0.
+    publish_integrity_check: basic # basic: exists/size; checksum: also compare sha256.
+
+  diagnostics:
+    tie_invariant_diagnostics_enabled: true # Aggregate reason counts for invalid tie groups.
+    tie_invariant_diagnostics_detailed_enabled: false # Sample invalid groups and member CRD_IDs.
+    tie_invariant_diagnostics_sample_size: 10 # Maximum invalid groups in the detailed sample.
+    tie_invariant_diagnostics_max_rows: 100 # Maximum member rows collected across sampled groups.
+    label_merge_diagnostics_enabled: true # Count rows without a newly computed dedup label.
+    crossmatch_geometry_diagnostics_enabled: false # Separation and component-shape diagnostics.
+    representative_radius_diagnostics_enabled: false # Component radius diagnostics during deduplication.
+    dedup_edge_diagnostics_enabled: false # Extra graph diagnostics during edge construction.
+    save_expr_columns: false # Preserve columns referenced by flags_translation expressions.

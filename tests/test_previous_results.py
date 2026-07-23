@@ -2,12 +2,17 @@ from __future__ import annotations
 
 import logging
 import sys
+import types
 from pathlib import Path
 
 import dask.dataframe as dd
 import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "packages"))
+if "tables_io" not in sys.modules:
+    tables_io = types.ModuleType("tables_io")
+    tables_io.types = types.SimpleNamespace(PD_DATAFRAME="PD_DATAFRAME")
+    sys.modules["tables_io"] = tables_io
 
 from specz import (  # noqa: E402
     _copy_extra_columns_from_sources,
@@ -175,6 +180,99 @@ def test_missing_extra_column_is_created_with_null_values():
 
     assert result["DELTACHI2"].isna().all()
     assert str(result["DELTACHI2"].dtype) == "double[pyarrow]"
+
+
+def test_homogenized_output_auto_keeps_runtime_used_columns():
+    frame = dd.from_pandas(
+        pd.DataFrame(
+            {
+                "id": ["a"],
+                "z_flag_homogenized": [4.0],
+                "instrument_type_homogenized": ["s"],
+                "object_type_homogenized": ["galaxy"],
+            }
+        ),
+        npartitions=1,
+    )
+
+    result = _select_output_columns(
+        frame,
+        translation_rules_uc={},
+        tiebreaking_priority=[],
+        used_type_fastpath=False,
+        param_config={
+            "z_flag_homogenized_value_to_cut": 3,
+            "include_star_oth": False,
+            "output_homogenized_columns": {
+                "z_flag_homogenized": "auto",
+                "instrument_type_homogenized": "auto",
+                "object_type_homogenized": "auto",
+            },
+        },
+    ).compute()
+
+    assert "z_flag_homogenized" in result.columns
+    assert "object_type_homogenized" in result.columns
+    assert "instrument_type_homogenized" not in result.columns
+
+
+def test_homogenized_output_default_keeps_all_homogenized_columns():
+    frame = dd.from_pandas(
+        pd.DataFrame(
+            {
+                "id": ["a"],
+                "z_flag_homogenized": [4.0],
+                "instrument_type_homogenized": ["s"],
+                "object_type_homogenized": ["galaxy"],
+            }
+        ),
+        npartitions=1,
+    )
+
+    result = _select_output_columns(
+        frame,
+        translation_rules_uc={},
+        tiebreaking_priority=[],
+        used_type_fastpath=False,
+    ).compute()
+
+    assert {
+        "z_flag_homogenized",
+        "instrument_type_homogenized",
+        "object_type_homogenized",
+    }.issubset(result.columns)
+
+
+def test_homogenized_output_always_and_never_override_auto():
+    frame = dd.from_pandas(
+        pd.DataFrame(
+            {
+                "id": ["a"],
+                "z_flag_homogenized": [4.0],
+                "instrument_type_homogenized": ["s"],
+                "object_type_homogenized": ["galaxy"],
+            }
+        ),
+        npartitions=1,
+    )
+
+    result = _select_output_columns(
+        frame,
+        translation_rules_uc={},
+        tiebreaking_priority=["instrument_type_homogenized"],
+        used_type_fastpath=False,
+        param_config={
+            "output_homogenized_columns": {
+                "z_flag_homogenized": "always",
+                "instrument_type_homogenized": "never",
+                "object_type_homogenized": "auto",
+            }
+        },
+    ).compute()
+
+    assert "z_flag_homogenized" in result.columns
+    assert "instrument_type_homogenized" not in result.columns
+    assert "object_type_homogenized" not in result.columns
 
 
 def test_extra_columns_rejects_unsupported_dtype():

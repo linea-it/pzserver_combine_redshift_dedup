@@ -81,22 +81,35 @@ __all__ = [
     "filter_dask_by_tie_treatment",
     "filter_pandas_by_tie_treatment",
     "validate_object_type_inclusion",
+    "validate_instrument_type_inclusion",
 ]
 
 OBJECT_TYPE_INCLUDE_DEFAULTS = {
-    "include_unclassified": True,
-    "include_galaxy": True,
-    "include_star": False,
-    "include_agn": True,
-    "include_qso": True,
-    "include_galactic": False,
+    "include_unclassified_oth": True,
+    "include_galaxy_oth": True,
+    "include_star_oth": True,
+    "include_agn_oth": True,
+    "include_qso_oth": True,
+    "include_galactic_oth": True,
 }
 _OBJECT_TYPE_TO_INCLUDE_KEY = {
-    "galaxy": "include_galaxy",
-    "star": "include_star",
-    "agn": "include_agn",
-    "qso": "include_qso",
-    "galactic": "include_galactic",
+    "galaxy": "include_galaxy_oth",
+    "star": "include_star_oth",
+    "agn": "include_agn_oth",
+    "qso": "include_qso_oth",
+    "galactic": "include_galactic_oth",
+}
+
+INSTRUMENT_TYPE_INCLUDE_DEFAULTS = {
+    "include_spectroscopic_ith": True,
+    "include_grism_ith": True,
+    "include_photometric_ith": True,
+    "include_unclassified_ith": True,
+}
+_INSTRUMENT_TYPE_TO_INCLUDE_KEY = {
+    "s": "include_spectroscopic_ith",
+    "g": "include_grism_ith",
+    "p": "include_photometric_ith",
 }
 
 
@@ -119,13 +132,34 @@ def validate_object_type_inclusion(config: Mapping[str, object] | None) -> dict[
     return result
 
 
+def validate_instrument_type_inclusion(
+    config: Mapping[str, object] | None,
+) -> dict[str, bool]:
+    """Return strict, complete instrument-type inclusion settings."""
+    supplied = dict(config or {})
+    unknown = sorted(set(supplied) - set(INSTRUMENT_TYPE_INCLUDE_DEFAULTS))
+    if unknown:
+        raise ValueError(f"Unknown instrument-type inclusion option(s): {unknown}")
+    result = dict(INSTRUMENT_TYPE_INCLUDE_DEFAULTS)
+    for key, value in supplied.items():
+        if not isinstance(value, bool):
+            raise TypeError(f"param.{key} must be a boolean, got {type(value).__name__}")
+        result[key] = value
+    if not any(result.values()):
+        raise ValueError(
+            "At least one instrument-type inclusion option must be true: "
+            + ", ".join(INSTRUMENT_TYPE_INCLUDE_DEFAULTS)
+        )
+    return result
+
+
 def _excluded_object_type_mask(
     object_types: pd.Series,
     inclusion: Mapping[str, bool],
 ) -> pd.Series:
     normalized = object_types.astype("string").str.strip().str.lower()
     included = pd.Series(False, index=object_types.index, dtype=bool)
-    included |= normalized.isna() & bool(inclusion["include_unclassified"])
+    included |= normalized.isna() & bool(inclusion["include_unclassified_oth"])
     for object_type, key in _OBJECT_TYPE_TO_INCLUDE_KEY.items():
         included |= normalized.eq(object_type).fillna(False) & bool(inclusion[key])
     return ~included
@@ -325,9 +359,8 @@ def _validate_local_tie_invariants(
 ) -> None:
     """Validate winner/hard-tie semantics for every local component."""
     tie = pd.to_numeric(df[tie_col], errors="coerce")
-    participants = ~tie.eq(3.0)
-    participating = df.loc[participants, [group_col]].copy()
-    participating["__tie"] = tie.loc[participants].to_numpy()
+    participating = df.loc[:, [group_col]].copy()
+    participating["__tie"] = tie.to_numpy()
     for gid_value, component in participating.groupby(group_col, dropna=False):
         values = component["__tie"]
         n_one = int(values.eq(1).sum())
@@ -590,12 +623,7 @@ def _edge_rows_partition(
     tie_col: str,
 ) -> pd.DataFrame:
     """Extract directed graph edges from participating rows."""
-    tie = (
-        pd.to_numeric(part[tie_col], errors="coerce")
-        if tie_col in part.columns
-        else pd.Series(0, index=part.index, dtype="int8")
-    )
-    work = part.loc[~tie.eq(3.0), [crd_col, compared_col]].copy()
+    work = part.loc[:, [crd_col, compared_col]].copy()
     if work.empty:
         return pd.DataFrame(
             {
@@ -639,17 +667,9 @@ def count_global_edge_group_mismatches(
         meta=meta,
     ).drop_duplicates()
 
-    tie = (
-        dd.to_numeric(df[tie_col], errors="coerce")
-        if tie_col in df.columns
-        else df[crd_col].map_partitions(
-            lambda s: pd.Series(0, index=s.index, dtype="int8"),
-            meta=pd.Series(dtype="int8"),
-        )
-    )
     groups = (
         df[[crd_col, group_col]]
-        .assign(is_excluded=tie.eq(3.0))
+        .assign(is_excluded=False)
         .rename(columns={crd_col: "node", group_col: "node_group"})
     )
     groups = groups.assign(node=groups["node"].astype("string[pyarrow]"))
@@ -709,10 +729,8 @@ def build_global_tie_invariant_diagnostics(
 ) -> tuple[dd.DataFrame, object]:
     """Build lazy per-group invariant diagnostics and missing-group count."""
     tie = dd.to_numeric(df[tie_col], errors="coerce")
-    # tie_result=3 is the public, type-agnostic marker for rows excluded from
-    # the graph. z_flag_col is retained only for API compatibility.
-    participating_mask = ~tie.eq(3)
-    participants = df.loc[participating_mask, [group_col]].assign(
+    # z_flag_col is retained only for API compatibility.
+    participants = df.loc[:, [group_col]].assign(
         n=1,
         n0=tie.eq(0).astype("int8"),
         n1=tie.eq(1).astype("int8"),
@@ -1137,9 +1155,7 @@ def _apply_guard_restore_local(
         df[compared_col], excluded_ids
     )
 
-    # Rule:
-    # Excluded rows remain tie_result=3. Participating rows with no usable
-    # neighbors recover their original label.
+    # Rule: participating rows with no usable neighbors recover their original label.
     restore_mask = (~excluded) & (cmp_empty | only_excluded_neighbors)
 
     # Apply restoration.
@@ -1170,7 +1186,6 @@ def _resolve_group(
         if excluded_mask is None
         else excluded_mask.reindex(g.index).fillna(False).astype(bool)
     )
-    out.loc[excluded.index[excluded], "tie_result_new"] = 3
 
     cand = g[~excluded].copy()
     if cand.empty:
@@ -1268,19 +1283,9 @@ def deduplicate_pandas(
         raise KeyError(f"Missing required columns: {missing}")
 
     out = df.copy()
-    inclusion = validate_object_type_inclusion(object_type_inclusion)
-    excluded_object_types = sorted(
-        object_type
-        for object_type, option in _OBJECT_TYPE_TO_INCLUDE_KEY.items()
-        if not inclusion[option]
-    )
-    if not inclusion["include_unclassified"]:
-        excluded_object_types.append("unclassified")
-    object_types = out.get(
-        "object_type_homogenized",
-        pd.Series(pd.NA, index=out.index, dtype="string"),
-    )
-    excluded_mask = _excluded_object_type_mask(object_types, inclusion)
+    validate_object_type_inclusion(object_type_inclusion)
+    excluded_object_types: list[str] = []
+    excluded_mask = pd.Series(False, index=out.index, dtype=bool)
 
     tie_col_orig = f"{tie_col}_orig"
     if tie_col in out.columns:
@@ -1308,7 +1313,7 @@ def deduplicate_pandas(
         excluded_neighbor_edges = diag.get("n_edges_starB_excluded")
         if isinstance(excluded_neighbor_edges, int) and excluded_neighbor_edges > 0:
             lg.warning(
-                "%s Object types excluded from deduplication graph: "
+                "%s Edge build saw pre-filtered object types: "
                 "types=%s, rows_excluded=%d, edges_raw=%d, "
                 "excluded_neighbor_edges=%d, edges_kept=%d",
                 tag,
@@ -1320,7 +1325,7 @@ def deduplicate_pandas(
             )
         elif partition_tag is None:
             lg.info(
-                "%s Edge build summary: excluded_object_types=%s, "
+                "%s Edge build summary: pre_filtered_object_types=%s, "
                 "rows_excluded=%d, edges_raw=%d, "
                 "excluded_neighbor_edges=%s, edges_kept=%d",
                 tag,
@@ -1377,7 +1382,7 @@ def deduplicate_pandas(
                 )
                 na_mask[bridged.index.to_numpy()] = False
 
-    # Fallback for rows still without group id (avoid mixing stars in graph).
+    # Fallback for rows still without group id.
     if na_mask.any():
         pos_na = np.flatnonzero(na_mask)
 
@@ -1453,15 +1458,12 @@ def deduplicate_pandas(
     is_singleton = group_sizes.eq(1)
 
     is_singleton_np = is_singleton.to_numpy(dtype=bool, na_value=False)
-    is_excluded_np = excluded_mask.to_numpy(dtype=bool, na_value=False)
 
     tr = np.zeros(len(out), dtype=np.int8)
-    tr[is_excluded_np] = 3
-    tr[is_singleton_np & ~is_excluded_np] = 1
+    tr[is_singleton_np] = 1
 
     is_multi = ~is_singleton
-    participating = ~excluded_mask
-    survivors = (is_multi & participating).copy()
+    survivors = is_multi.copy()
 
     zf_num = _effective_z_flag_score(out)
 
@@ -1506,18 +1508,6 @@ def deduplicate_pandas(
     tr[multi_winner.to_numpy(dtype=bool, na_value=False)] = 2
 
     out[tie_col] = pd.Series(tr, index=out.index).astype("Int8")
-
-    tr_num = pd.to_numeric(out[tie_col], errors="coerce")
-    eq3_np = tr_num.eq(3.0).to_numpy(dtype=bool, na_value=False)
-    excluded_np = excluded_mask.to_numpy(dtype=bool, na_value=False)
-    is_single_np = is_singleton.to_numpy(dtype=bool, na_value=False)
-
-    invalid_3_np = eq3_np & ~excluded_np
-    if invalid_3_np.any():
-        invalid_3 = pd.Series(invalid_3_np, index=out.index)
-        single = pd.Series(is_single_np, index=out.index)
-        out.loc[invalid_3 & single, tie_col] = np.int8(1)
-        out.loc[invalid_3 & ~single, tie_col] = np.int8(0)
 
     z_num = _to_numeric(out[z_col]).astype("float64")
     f_num = zf_num.fillna(-np.inf)
@@ -1646,15 +1636,6 @@ def deduplicate_pandas(
                 out.iloc[[p1, p2], out.columns.get_loc(tie_col)] = np.array(
                     [2, 2], dtype=np.int8
                 )
-
-    out = _apply_guard_restore_local(
-        out,
-        crd_col=crd_col,
-        compared_col=compared_col,
-        excluded_mask=excluded_mask,
-        tie_col=tie_col,
-        tie_col_orig=tie_col_orig,
-    )
 
     drop_cols = []
     if tie_col_orig in out.columns:
@@ -1882,9 +1863,7 @@ def _dedup_local_with_margin(
         if max_representative_radius_arcsec is None:
             # Without radius truncation, every participating edge must remain
             # inside one canonical component.
-            semantic_exclusion = pd.to_numeric(
-                solved[tie_col], errors="coerce"
-            ).eq(3.0)
+            semantic_exclusion = pd.Series(False, index=solved.index, dtype=bool)
             edge_nodes, edge_uv, _ = _build_edges_fast(
                 solved,
                 crd_col=crd_col,

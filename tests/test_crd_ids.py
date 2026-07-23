@@ -18,13 +18,21 @@ from specz import _generate_crd_ids, _validate_unique_crd_ids  # noqa: E402
 
 def test_generate_crd_ids_are_unique_across_partitions():
     frame = dd.from_pandas(
-        pd.DataFrame({"value": range(17)}), npartitions=4, sort=False
+        pd.DataFrame(
+            {
+                "ra": [float(i) for i in range(17)],
+                "dec": [float(-i) for i in range(17)],
+                "z": [float(i) / 10.0 for i in range(17)],
+            }
+        ),
+        npartitions=4,
+        sort=False,
     )
 
     result = _generate_crd_ids(frame, "314_example", "/tmp").compute()
 
     assert result["CRD_ID"].is_unique
-    assert set(result["CRD_ID"]) == {f"CRD314_{i}" for i in range(1, 18)}
+    assert result["CRD_ID"].str.match(r"^CRD314_[0-9a-f]{16}$").all()
 
 
 def test_validate_unique_crd_ids_rejects_collisions():
@@ -40,12 +48,96 @@ def test_validate_unique_crd_ids_rejects_collisions():
 
 def test_generate_crd_ids_is_deterministic_for_same_partitioned_input():
     frame = dd.from_pandas(
-        pd.DataFrame({"value": range(12)}), npartitions=3, sort=False
+        pd.DataFrame(
+            {
+                "ra": [float(i) for i in range(12)],
+                "dec": [float(i + 1) for i in range(12)],
+                "z": [float(i + 2) for i in range(12)],
+            }
+        ),
+        npartitions=3,
+        sort=False,
     )
 
     first = _generate_crd_ids(frame, "314_example", "/tmp").compute()
     second = _generate_crd_ids(frame, "314_example", "/tmp").compute()
 
-    assert first[["value", "CRD_ID"]].to_dict("records") == second[
-        ["value", "CRD_ID"]
+    assert first[["ra", "dec", "z", "CRD_ID"]].to_dict("records") == second[
+        ["ra", "dec", "z", "CRD_ID"]
     ].to_dict("records")
+
+
+def test_generate_crd_ids_do_not_depend_on_row_order_or_partitions():
+    pdf = pd.DataFrame(
+        {
+            "id": ["duplicate", "duplicate", None, "ignored"],
+            "ra": [10.0, 20.0, 30.0, 40.0],
+            "dec": [-10.0, -20.0, -30.0, -40.0],
+            "z": [0.1, 0.2, 0.3, 0.4],
+        }
+    )
+    forward = dd.from_pandas(pdf, npartitions=2, sort=False)
+    reverse = dd.from_pandas(
+        pdf.iloc[::-1].reset_index(drop=True), npartitions=3, sort=False
+    )
+
+    first = _generate_crd_ids(forward, "314_example", "/tmp").compute()
+    second = _generate_crd_ids(reverse, "314_example", "/tmp").compute()
+
+    key = ["ra", "dec", "z"]
+    first_map = first.set_index(key)["CRD_ID"].to_dict()
+    second_map = second.set_index(key)["CRD_ID"].to_dict()
+    assert first_map == second_map
+
+
+def test_generate_crd_ids_optional_canonical_columns_disambiguate_coordinates():
+    frame = dd.from_pandas(
+        pd.DataFrame(
+            {
+                "id": ["first", "second"],
+                "ra": [10.0, 10.0],
+                "dec": [-10.0, -10.0],
+                "z": [0.1, 0.1],
+                "z_flag": [1.0, 2.0],
+                "survey": ["same", "same"],
+            }
+        ),
+        npartitions=2,
+        sort=False,
+    )
+
+    result = _generate_crd_ids(frame, "314_example", "/tmp").compute()
+
+    assert result["CRD_ID"].is_unique
+
+
+def test_generate_crd_ids_drop_duplicate_canonical_rows(caplog):
+    frame = dd.from_pandas(
+        pd.DataFrame(
+            {
+                "id": ["same", "same"],
+                "ra": [10.0, 10.0],
+                "dec": [-10.0, -10.0],
+                "z": [0.1, 0.1],
+                "z_flag": [1.0, 1.0],
+                "z_err": [0.01, 0.01],
+                "survey": ["same", "same"],
+                "source": ["same", "same"],
+                "instrument_type": ["same", "same"],
+            }
+        ),
+        npartitions=2,
+        sort=False,
+    )
+
+    caplog.set_level(logging.WARNING)
+    result = _generate_crd_ids(
+        frame, "314_example", "/tmp", logger=logging.getLogger(__name__)
+    )
+    computed = result.compute()
+
+    assert len(computed) == 1
+    assert computed["CRD_ID"].is_unique
+    _validate_unique_crd_ids(result, "314_example", logging.getLogger(__name__))
+
+    assert "dropped 1 duplicate canonical input row(s)" in caplog.text
