@@ -11,6 +11,7 @@ from __future__ import annotations
 # -----------------------
 import argparse
 import glob
+import hashlib
 import json
 
 # -----------------------
@@ -110,6 +111,9 @@ TRANSLATION_FALLBACK_DEFAULTS = {
     "validate_global_tie_invariants": True,
     "validate_crd_id_uniqueness": True,
 }
+
+PUBLISH_MAX_ATTEMPTS = 3
+PUBLISH_RETRY_DELAY_SECONDS = 5
 
 
 def _build_runtime_param_config(param_config: dict | None) -> dict:
@@ -794,6 +798,140 @@ def _copy_tree(src_dir: str, dst_dir: str, lg: logging.LoggerAdapter) -> None:
         os.makedirs(tgt_root, exist_ok=True)
         for f in files:
             _copy_file(os.path.join(root, f), os.path.join(tgt_root, f), lg)
+
+
+def _sha256_file(path: str) -> str:
+    digest = hashlib.sha256()
+    with open(path, "rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _verify_copied_file(src: str, dst: str) -> None:
+    if not os.path.isfile(src):
+        raise FileNotFoundError(f"source file is missing: {src}")
+    if not os.path.isfile(dst):
+        raise FileNotFoundError(f"destination file is missing: {dst}")
+
+    src_size = os.path.getsize(src)
+    dst_size = os.path.getsize(dst)
+    if src_size != dst_size:
+        raise RuntimeError(
+            "copied file size mismatch: "
+            f"{src} ({src_size} bytes) != {dst} ({dst_size} bytes)"
+        )
+
+    src_hash = _sha256_file(src)
+    dst_hash = _sha256_file(dst)
+    if src_hash != dst_hash:
+        raise RuntimeError(
+            f"copied file checksum mismatch: {src} ({src_hash}) != {dst} ({dst_hash})"
+        )
+
+
+def _verify_copied_tree(src_dir: str, dst_dir: str) -> tuple[int, int]:
+    if not os.path.isdir(src_dir):
+        raise FileNotFoundError(f"source directory is missing: {src_dir}")
+    if not os.path.isdir(dst_dir):
+        raise FileNotFoundError(f"destination directory is missing: {dst_dir}")
+
+    n_dirs = 0
+    n_files = 0
+    for root, dirs, files in os.walk(src_dir):
+        rel = os.path.relpath(root, src_dir)
+        dst_root = os.path.join(dst_dir, rel) if rel != "." else dst_dir
+        if not os.path.isdir(dst_root):
+            raise FileNotFoundError(f"destination directory is missing: {dst_root}")
+        n_dirs += 1
+
+        for dirname in dirs:
+            dst_subdir = os.path.join(dst_root, dirname)
+            if not os.path.isdir(dst_subdir):
+                raise FileNotFoundError(
+                    f"destination directory is missing: {dst_subdir}"
+                )
+
+        for filename in files:
+            src_file = os.path.join(root, filename)
+            dst_file = os.path.join(dst_root, filename)
+            _verify_copied_file(src_file, dst_file)
+            n_files += 1
+
+    return n_dirs, n_files
+
+
+def _verify_publish_artifacts(
+    artifacts: list[tuple[str, str, str]],
+    lg: logging.LoggerAdapter,
+) -> None:
+    """Verify published artifacts against staged sources."""
+    total_files = 0
+    total_dirs = 0
+    for kind, src, dst in artifacts:
+        if kind == "file":
+            _verify_copied_file(src, dst)
+            total_files += 1
+        elif kind == "tree":
+            n_dirs, n_files = _verify_copied_tree(src, dst)
+            total_dirs += n_dirs
+            total_files += n_files
+        else:
+            raise ValueError(f"Unknown publish artifact kind: {kind}")
+
+    lg.info(
+        "Publish verification passed: %d file(s), %d directories verified.",
+        total_files,
+        total_dirs,
+    )
+
+
+def _copy_publish_artifact(
+    kind: str, src: str, dst: str, lg: logging.LoggerAdapter
+) -> None:
+    if kind == "file":
+        _copy_file(src, dst, lg)
+    elif kind == "tree":
+        _copy_tree(src, dst, lg)
+    else:
+        raise ValueError(f"Unknown publish artifact kind: {kind}")
+
+
+def _copy_and_verify_publish_artifacts(
+    artifacts: list[tuple[str, str, str]],
+    lg: logging.LoggerAdapter,
+    max_attempts: int = PUBLISH_MAX_ATTEMPTS,
+    retry_delay_seconds: int = PUBLISH_RETRY_DELAY_SECONDS,
+) -> None:
+    last_error = None
+    for attempt in range(1, max_attempts + 1):
+        try:
+            lg.info("Publish copy/verify attempt %d/%d.", attempt, max_attempts)
+            for kind, src, dst in artifacts:
+                _copy_publish_artifact(kind, src, dst, lg)
+            _verify_publish_artifacts(artifacts, lg)
+            return
+        except Exception as e:
+            last_error = e
+            if attempt >= max_attempts:
+                lg.error(
+                    "FAILED publish verification after %d attempt(s): %s",
+                    max_attempts,
+                    e,
+                )
+                raise
+
+            lg.warning(
+                "Publish copy/verify attempt %d/%d failed: %s. Retrying in %d s.",
+                attempt,
+                max_attempts,
+                e,
+                retry_delay_seconds,
+            )
+            time.sleep(retry_delay_seconds)
+
+    if last_error is not None:
+        raise last_error
 
 
 def _snapshot_shell_logs(
@@ -2702,72 +2840,55 @@ def main(
         )
         raise
 
-    # 1) process_info/
-    try:
-        _copy_tree(
+    src_out = f"{staged_output_base}.{output_format}"
+    dst_out = os.path.join(out_root_and_dir, f"{output_name}.{output_format}")
+    publish_artifacts = [
+        (
+            "tree",
             os.path.join(base_dir, "process_info"),
             os.path.join(out_root_and_dir, "process_info"),
-            publish_logger,
-        )
-    except Exception as e:
-        publish_logger.error("FAILED to copy process_info/: %s", e)
-        raise
-
-    # 2) process.yml and process.yaml
-    try:
-        _copy_file(
+        ),
+        (
+            "file",
             os.path.join(base_dir, "process.yml"),
             os.path.join(out_root_and_dir, "process.yml"),
-            publish_logger,
-        )
-        if os.path.exists(os.path.join(base_dir, "process.yaml")):
-            _copy_file(
+        ),
+        (
+            "tree" if output_format == "hats" else "file",
+            src_out,
+            dst_out,
+        ),
+    ]
+    if os.path.exists(os.path.join(base_dir, "process.yaml")):
+        publish_artifacts.append(
+            (
+                "file",
                 os.path.join(base_dir, "process.yaml"),
                 os.path.join(out_root_and_dir, "process.yaml"),
-                publish_logger,
             )
-    except Exception as e:
-        publish_logger.error("FAILED to copy process.yml/.yaml: %s", e)
-        raise
-
-    # 3) config.yaml
-    try:
-        if os.path.exists(os.path.join(base_dir, "config.yaml")):
-            _copy_file(
+        )
+    if os.path.exists(os.path.join(base_dir, "config.yaml")):
+        publish_artifacts.append(
+            (
+                "file",
                 os.path.join(base_dir, "config.yaml"),
                 os.path.join(out_root_and_dir, "config.yaml"),
-                publish_logger,
             )
-    except Exception as e:
-        publish_logger.error("FAILED to copy config.yaml: %s", e)
-        raise
-
-    # 4) flags_translation.yaml
-    try:
-        if os.path.exists(path_to_translation_file):
-            _copy_file(
+        )
+    if os.path.exists(path_to_translation_file):
+        publish_artifacts.append(
+            (
+                "file",
                 path_to_translation_file,
                 os.path.join(out_root_and_dir, "flags_translation.yaml"),
-                publish_logger,
             )
-    except Exception as e:
-        publish_logger.error("FAILED to copy flags_translation.yaml: %s", e)
-        raise
+        )
 
-    # 5) final output
-    try:
-        src_out = f"{staged_output_base}.{output_format}"
-        dst_out = os.path.join(out_root_and_dir, f"{output_name}.{output_format}")
-        publish_logger.info("Copying final output: %s -> %s", src_out, dst_out)
-        if output_format == "hats":
-            _copy_tree(src_out, dst_out, publish_logger)
-        else:
-            _copy_file(src_out, dst_out, publish_logger)
-    except Exception as e:
-        publish_logger.error("FAILED to copy final output to publish dir: %s", e)
-        raise
+    _copy_and_verify_publish_artifacts(publish_artifacts, publish_logger)
 
-    publish_logger.info("END publish: artifacts copied to %s", out_root_and_dir)
+    publish_logger.info(
+        "END publish: artifacts copied and verified at %s", out_root_and_dir
+    )
 
     if delete_temp_files:
         try:
