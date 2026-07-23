@@ -47,7 +47,7 @@ def test_verify_publish_artifacts_detects_corrupted_destination_with_checksum(
         )
 
 
-def test_verify_publish_artifacts_basic_uses_metadata_only(tmp_path, monkeypatch):
+def test_verify_publish_artifacts_basic_uses_size_only(tmp_path, monkeypatch):
     crd_run = _load_crd_run_module()
     logger = logging.getLogger("test_publish_basic_verification")
 

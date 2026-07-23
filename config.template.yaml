@@ -119,7 +119,7 @@ param:
       object_type_homogenized: always
     insert_DP1_footprint_flag: false # Adds is_in_DP1_fields as 1/0.
     insert_rubin_footprint_flag: false # Adds is_in_rubin_footprint as 1/0.
-    publish_integrity_check: basic # basic: exists/size/mtime; checksum: also compare sha256.
+    publish_integrity_check: basic # basic: exists/size; checksum: also compare sha256.
 
   diagnostics:
     tie_invariant_diagnostics_enabled: true # Aggregate reason counts for invalid tie groups.

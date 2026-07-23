@@ -840,14 +840,6 @@ def _verify_copied_file(src: str, dst: str, integrity_check: str) -> None:
             f"{src} ({src_size} bytes) != {dst} ({dst_size} bytes)"
         )
 
-    src_mtime = os.path.getmtime(src)
-    dst_mtime = os.path.getmtime(dst)
-    if abs(src_mtime - dst_mtime) > 1.0:
-        raise RuntimeError(
-            "copied file mtime mismatch: "
-            f"{src} ({src_mtime}) != {dst} ({dst_mtime})"
-        )
-
     if integrity_check == PUBLISH_INTEGRITY_CHECK_BASIC:
         return
     if integrity_check != PUBLISH_INTEGRITY_CHECK_CHECKSUM:
